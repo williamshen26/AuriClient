@@ -21,9 +21,7 @@ Hey Auri Client is a Home Assistant custom integration that connects your smart 
 
 3. **Add Hey Auri Client in HACS**
    - In Home Assistant, open **HACS**.
-   - Go to **Integrations**.
    - Search for **Hey Auri Client** and click **Download**.
-   - Restart Home Assistant when prompted.
 
 4. **Add the integration in Home Assistant**
    - Navigate to **Settings → Devices & Services**.
@@ -35,7 +33,9 @@ Hey Auri Client is a Home Assistant custom integration that connects your smart 
 1. Go to **Settings → Voice Assistants**.
 2. Create a new assistant (or edit an existing one).
 3. Set the **Conversation Agent** to **Hey Auri Client**.
-4. Save your changes.
+4. Uncheck **Prefer handling commands locally**.
+5. Select your preferred STT and TTS method.
+6. Save your changes.
 
 ## Usage
 - Start a conversation in Home Assistant using your new voice assistant.
