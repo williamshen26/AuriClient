@@ -1,0 +1,20 @@
+{
+  "domain": "hey_auri_client",
+  "name": "Hey Auri Client",
+  "codeowners": ["@williamshen26"],
+  "config_flow": true,
+  "dependencies": [
+    "conversation",
+    "energy",
+    "history",
+    "recorder",
+    "rest",
+    "scrape"
+  ],
+  "documentation": "https://github.com/williamshen26/hey_auri_client",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/williamshen26/hey_auri_client/issues",
+  "requirements": ["influxdb==5.3.2"],
+  "version": "0.1.0"
+}

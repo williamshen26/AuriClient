@@ -1,0 +1,91 @@
+get_entity_state:
+  name: Get entity state
+  description: Return state and attributes for one entity.
+  target:
+    entity: {}
+
+update_user_preferences:
+  name: Update user preferences
+  description: Merge user preference updates into local user preference storage.
+  fields:
+    user_id:
+      required: true
+      selector:
+        text:
+    user_preference:
+      required: false
+      selector:
+        text:
+    updates:
+      required: false
+      selector:
+        object:
+
+get_user_preferences:
+  name: Get user preferences
+  description: Return local user preference JSON for a user.
+  fields:
+    user_id:
+      required: true
+      selector:
+        text:
+
+get_automation_metadata_service:
+  name: Get automation metadata
+  description: Return metadata for current Home Assistant automations.
+
+add_automation:
+  name: Add automation
+  description: Add an automation from YAML.
+  fields:
+    automation_config:
+      required: true
+      selector:
+        text:
+          multiline: true
+
+update_automation:
+  name: Update automation
+  description: Update an existing automation by id using YAML.
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+    automation_config:
+      required: true
+      selector:
+        text:
+          multiline: true
+
+remove_automation:
+  name: Remove automation
+  description: Remove an automation by id.
+  fields:
+    id:
+      required: true
+      selector:
+        text:
+
+start_auri_timer:
+  name: Start AURI timer
+  description: Start a thin-integration AURI timer.
+  fields:
+    duration:
+      required: true
+      example: 300
+      selector:
+        number:
+          min: 1
+          max: 86400
+          mode: box
+    satellite_speaker:
+      required: false
+      example: media_player.kitchen
+      selector:
+        entity:
+          domain: media_player
+
+get_auri_timers:
+  name: Get AURI timers
+  description: Return all currently running thin-integration AURI timers.
