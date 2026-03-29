@@ -11,10 +11,10 @@
     "rest",
     "scrape"
   ],
-  "documentation": "https://github.com/williamshen26/hey_auri_client",
+  "documentation": "https://github.com/williamshen26/AuriClient",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/williamshen26/hey_auri_client/issues",
+  "issue_tracker": "https://github.com/williamshen26/AuriClient/issues",
   "requirements": ["influxdb==5.3.2"],
   "version": "0.1.0"
 }
