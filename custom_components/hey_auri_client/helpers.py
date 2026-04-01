@@ -215,6 +215,32 @@ class LocalToolExecutor:
             result = await self._turn_off_light(arguments)
         elif function_name == "adjust_light_brightness":
             result = await self._adjust_light_brightness(arguments)
+        elif function_name == "open_cover":
+            result = await self._open_cover(arguments)
+        elif function_name == "close_cover":
+            result = await self._close_cover(arguments)
+        elif function_name == "set_cover_position":
+            result = await self._set_cover_position(arguments)
+        elif function_name == "stop_cover":
+            result = await self._stop_cover(arguments)
+        elif function_name == "open_cover_tilt":
+            result = await self._open_cover_tilt(arguments)
+        elif function_name == "close_cover_tilt":
+            result = await self._close_cover_tilt(arguments)
+        elif function_name == "set_cover_tilt_position":
+            result = await self._set_cover_tilt_position(arguments)
+        elif function_name == "turn_on_climate":
+            result = await self._turn_on_climate(arguments)
+        elif function_name == "turn_off_climate":
+            result = await self._turn_off_climate(arguments)
+        elif function_name == "set_temperature":
+            result = await self._set_temperature(arguments)
+        elif function_name == "set_humidity":
+            result = await self._set_humidity(arguments)
+        elif function_name == "set_fan_mode":
+            result = await self._set_fan_mode(arguments)
+        elif function_name == "set_hvac_mode":
+            result = await self._set_hvac_mode(arguments)
         elif function_name == "adjust_media_volume":
             result = await self._adjust_media_volume(arguments)
         elif function_name == "select_media_source":
@@ -250,7 +276,7 @@ class LocalToolExecutor:
         elif function_name == "add_calendar_event":
             result = await self._add_calendar_event(arguments)
         else:
-            raise ToolExecutionError(f"Unsupported tool: {function_name}")
+            raise ToolExecutionError(f"Unsupported tool: {function_name}, consider update your Auri client to the latest version that supports this tool.")
 
         return {
             "tool_call_id": tool_call.get("id"),
@@ -527,6 +553,293 @@ class LocalToolExecutor:
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
+    async def _open_cover(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="open_cover",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _close_cover(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="close_cover",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _set_cover_position(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        raw_position = arguments.get("position")
+        if raw_position is None:
+            return {"retry": "position is required for set_cover_position"}
+
+        position = _clamp_percentage_zero_to_hundred(raw_position)
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="set_cover_position",
+                service_data={"entity_id": entity_id, "position": position},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id, "position": position}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _stop_cover(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="stop_cover",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _open_cover_tilt(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="open_cover_tilt",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _close_cover_tilt(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="close_cover_tilt",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _set_cover_tilt_position(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("cover", arguments.get("entity_id"))
+        raw_tilt_position = arguments.get("tilt_position")
+        if raw_tilt_position is None:
+            return {"retry": "tilt_position is required for set_cover_tilt_position"}
+
+        tilt_position = _clamp_percentage_zero_to_hundred(raw_tilt_position)
+        try:
+            await self.hass.services.async_call(
+                domain="cover",
+                service="set_cover_tilt_position",
+                service_data={"entity_id": entity_id, "tilt_position": tilt_position},
+                blocking=True,
+            )
+            return {
+                "success": True,
+                "entity_id": entity_id,
+                "tilt_position": tilt_position,
+            }
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _turn_on_climate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="climate",
+                service="turn_on",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _turn_off_climate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="climate",
+                service="turn_off",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _set_temperature(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
+        raw_temperature = arguments.get("temperature")
+        if raw_temperature is None:
+            return {"retry": "temperature is required for set_temperature"}
+
+        try:
+            requested_temperature = float(raw_temperature)
+        except (TypeError, ValueError):
+            return {"retry": "temperature must be a number"}
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            raise ToolExecutionError(f"Entity not found: {entity_id}")
+
+        requested_unit = _normalize_temperature_unit(arguments.get("temperature_unit"))
+        target_unit = _normalize_temperature_unit(state.attributes.get("temperature_unit"))
+        service_temperature = _convert_temperature(
+            requested_temperature,
+            from_unit=requested_unit,
+            to_unit=target_unit,
+        )
+
+        service_data: dict[str, Any] = {
+            "entity_id": entity_id,
+            "temperature": service_temperature,
+        }
+
+        hvac_mode = arguments.get("hvac_mode")
+        if hvac_mode is not None:
+            service_data["hvac_mode"] = str(hvac_mode)
+
+        try:
+            await self.hass.services.async_call(
+                domain="climate",
+                service="set_temperature",
+                service_data=service_data,
+                blocking=True,
+            )
+            result: dict[str, Any] = {
+                "success": True,
+                "entity_id": entity_id,
+                "temperature": service_temperature,
+                "temperature_unit": target_unit,
+            }
+            if hvac_mode is not None:
+                result["hvac_mode"] = str(hvac_mode)
+            return result
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _set_humidity(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
+        raw_humidity = arguments.get("humidity")
+        if raw_humidity is None:
+            return {"retry": "humidity is required for set_humidity"}
+
+        try:
+            humidity = float(raw_humidity)
+        except (TypeError, ValueError):
+            return {"retry": "humidity must be a number between 0 and 100"}
+
+        if humidity < 0 or humidity > 100:
+            return {"retry": "humidity must be a number between 0 and 100"}
+
+        try:
+            await self.hass.services.async_call(
+                domain="climate",
+                service="set_humidity",
+                service_data={"entity_id": entity_id, "humidity": humidity},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id, "humidity": humidity}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _set_fan_mode(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
+        fan_mode = str(arguments.get("fan_mode", "")).strip()
+        if not fan_mode:
+            return {"retry": "fan_mode is required for set_fan_mode"}
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            raise ToolExecutionError(f"Entity not found: {entity_id}")
+
+        supported_fan_modes = state.attributes.get("fan_modes") or []
+        if supported_fan_modes and fan_mode not in supported_fan_modes:
+            return {
+                "retry": f"Unsupported fan_mode '{fan_mode}'. Supported fan_modes: {supported_fan_modes}"
+            }
+
+        try:
+            await self.hass.services.async_call(
+                domain="climate",
+                service="set_fan_mode",
+                service_data={"entity_id": entity_id, "fan_mode": fan_mode},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id, "fan_mode": fan_mode}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _set_hvac_mode(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
+        hvac_mode = str(arguments.get("hvac_mode", "")).strip()
+        if not hvac_mode:
+            return {"retry": "hvac_mode is required for set_hvac_mode"}
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            raise ToolExecutionError(f"Entity not found: {entity_id}")
+
+        supported_hvac_modes = state.attributes.get("hvac_modes") or []
+        if supported_hvac_modes and hvac_mode not in supported_hvac_modes:
+            return {
+                "retry": f"Unsupported hvac_mode '{hvac_mode}'. Supported hvac_modes: {supported_hvac_modes}"
+            }
+
+        try:
+            await self.hass.services.async_call(
+                domain="climate",
+                service="set_hvac_mode",
+                service_data={"entity_id": entity_id, "hvac_mode": hvac_mode},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id, "hvac_mode": hvac_mode}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
     async def _get_forecasts(self, arguments: dict[str, Any]) -> dict[str, Any]:
         forecast_type = arguments.get("type")
         weather_entity_id = self._resolve_entity_id("weather", arguments.get("entity_id"))
@@ -785,6 +1098,13 @@ async def build_context_snapshot(
         "request_area": get_request_area(hass, user_input.device_id),
         "exposed_entities": get_exposed_entities(hass),
         "user_preferences": user_preferences,
+        "home_location": {
+            "latitude": round(float(hass.config.latitude), 1),
+            "longitude": round(float(hass.config.longitude), 1),
+            "time_zone": hass.config.time_zone,
+            "country": hass.config.country,
+        },
+        "temperature_unit_preference": str(hass.config.units.temperature_unit),
         "now": now.isoformat(),
         "day_of_week": now.strftime("%A"),
     }
@@ -900,7 +1220,32 @@ def _clamp_percentage(value: Any) -> int:
     return max(1, min(100, numeric))
 
 
+def _clamp_percentage_zero_to_hundred(value: Any) -> int:
+    """Normalize a percentage-like value into an integer from 0 to 100."""
+    numeric = int(round(float(value)))
+    return max(0, min(100, numeric))
+
+
 def _clamp_step_percentage(value: Any) -> int:
     """Normalize a step percentage-like value into an integer from -100 to 100."""
     numeric = int(round(float(value)))
     return max(-100, min(100, numeric))
+
+
+def _normalize_temperature_unit(raw_unit: Any) -> str:
+    """Normalize unit text to C or F, defaulting to C."""
+    unit = str(raw_unit or "").strip().upper()
+    if unit in {"F", "°F"}:
+        return "F"
+    return "C"
+
+
+def _convert_temperature(value: float, *, from_unit: str, to_unit: str) -> float:
+    """Convert temperature between C and F when units differ."""
+    if from_unit == to_unit:
+        return value
+    if from_unit == "F" and to_unit == "C":
+        return round((value - 32.0) * 5.0 / 9.0, 2)
+    if from_unit == "C" and to_unit == "F":
+        return round((value * 9.0 / 5.0) + 32.0, 2)
+    return value
