@@ -211,6 +211,12 @@ class LocalToolExecutor:
             result = await self._get_entity_state(arguments)
         elif function_name == "adjust_light_brightness":
             result = await self._adjust_light_brightness(arguments)
+        elif function_name == "adjust_media_volume":
+            result = await self._adjust_media_volume(arguments)
+        elif function_name == "select_media_source":
+            result = await self._select_media_source(arguments)
+        elif function_name == "set_media_mute":
+            result = await self._set_media_mute(arguments)
         elif function_name == "get_forecasts":
             result = await self._get_forecasts(arguments)
         elif function_name == "update_user_preferences":
@@ -360,9 +366,87 @@ class LocalToolExecutor:
             "state": state.state,
             "attributes": dict(state.attributes),
         }
+    
+    async def _set_media_mute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("media_player", arguments.get("entity_id"))
+        is_volume_muted = arguments.get("is_volume_muted")
+        if is_volume_muted is None:
+            return {"retry": "is_volume_muted is required for set_media_mute"}
+        try:
+            await self.hass.services.async_call(
+                domain="media_player",
+                service="volume_mute",
+                service_data={"entity_id": entity_id, "is_volume_muted": is_volume_muted},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id, "is_volume_muted": is_volume_muted}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _select_media_source(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("media_player", arguments.get("entity_id"))
+        source = arguments.get("source")
+        if not source:
+            return {"retry": "source is required for select_media_source"}
+        try:
+            await self.hass.services.async_call(
+                domain="media_player",
+                service="select_source",
+                service_data={"entity_id": entity_id, "source": source},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id, "source": source}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+    async def _adjust_media_volume(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("media_player", arguments.get("entity_id"))
+        raw_volume_pct = arguments.get("volume_pct")
+        raw_volume_step_pct = arguments.get("volume_step_pct")
+
+        if raw_volume_pct is None and raw_volume_step_pct is None:
+            return {
+                "retry": "volume_pct or volume_step_pct is required for adjust_volume"
+            }
+        service_data: dict[str, Any] = {"entity_id": entity_id}
+        response: dict[str, Any] = {
+            "success": True,
+            "entity_id": entity_id,
+        }
+        if raw_volume_pct is not None:
+            target_volume_pct = _clamp_percentage(float(raw_volume_pct) * 100) / 100
+            service_data["volume_level"] = target_volume_pct
+            response["volume_pct"] = float(target_volume_pct)
+        else:
+            volume_step_pct = _clamp_step_percentage(float(raw_volume_step_pct) * 100) / 100
+            # get entity_id volume
+            state = self.hass.states.get(entity_id)
+            if state is None:
+                raise ToolExecutionError(f"Entity not found: {entity_id}")
+            current_volume = state.attributes.get("volume_level")
+            new_volume = _clamp_step_percentage((current_volume + volume_step_pct) * 100) / 100
+            service_data["volume_level"] = new_volume
+            response["volume_pct"] = float(new_volume)
+
+        try:
+            await self.hass.services.async_call(
+                domain="media_player",
+                service="volume_set",
+                service_data=service_data,
+                blocking=True,
+            )
+            return response
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
 
     async def _adjust_light_brightness(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = self._resolve_entity_id("light", arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id_no_fallback("light", arguments.get("entity_id"))
         raw_brightness_pct = arguments.get("brightness_pct")
         raw_brightness_step_pct = arguments.get("brightness_step_pct")
 
@@ -528,6 +612,13 @@ class LocalToolExecutor:
             str(arguments.get("id", "")),
         )
 
+    def _resolve_entity_id_no_fallback(self, domain: str, requested_entity_id: Any) -> str:
+        """Resolve a valid entity id for the given domain without fallback."""
+        candidate = str(requested_entity_id or "").strip()
+        if candidate and candidate.startswith(f"{domain}.") and self.hass.states.get(candidate):
+            return candidate
+        raise ToolExecutionError(f"Entity not found: {candidate}")
+
     def _resolve_entity_id(self, domain: str, requested_entity_id: Any) -> str:
         """Resolve a valid entity id for the given domain with fallback to first entity of that domain."""
         candidate = str(requested_entity_id or "").strip()
@@ -552,6 +643,8 @@ class LocalToolExecutor:
         end_time = arguments.get("end_time")
         if not start_time or not end_time:
             return {"retry": "start_time and end_time are required for get_calendar_events"}
+        if end_time <= start_time:
+            return {"retry": "end_time must be after start_time"}
         try:
             result = await self.hass.services.async_call(
                 domain="calendar",

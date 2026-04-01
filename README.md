@@ -17,7 +17,7 @@ Hey Auri Client is a Home Assistant custom integration that connects your smart 
    - Save your `client_id` and `client_secret` in a secure place.
 
 2. **Install HACS (Home Assistant Community Store)**
-   - Follow the official HACS installation guide: https://hacs.xyz/docs/setup/download/
+   - Follow the official HACS installation guide: https://hacs.xyz/docs/use/
 
 3. **Add Hey Auri Client in HACS**
    - In Home Assistant, open **HACS**.
