@@ -209,6 +209,10 @@ class LocalToolExecutor:
             result = await self._get_skill_data(arguments)
         elif function_name == "get_entity_state":
             result = await self._get_entity_state(arguments)
+        elif function_name == "turn_on_light":
+            result = await self._turn_on_light(arguments)
+        elif function_name == "turn_off_light":
+            result = await self._turn_off_light(arguments)
         elif function_name == "adjust_light_brightness":
             result = await self._adjust_light_brightness(arguments)
         elif function_name == "adjust_media_volume":
@@ -440,6 +444,46 @@ class LocalToolExecutor:
                 blocking=True,
             )
             return response
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+        
+    async def _turn_on_light(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            entity_id = self._resolve_entity_id_no_fallback("light", arguments.get("entity_id"))
+        except ToolExecutionError as err:
+            entity_id = self._resolve_entity_id_no_fallback("switch", arguments.get("entity_id"))
+
+        domain = entity_id.split(".")[0]
+        try:
+            await self.hass.services.async_call(
+                domain=domain,
+                service="turn_on",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+        
+    async def _turn_off_light(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            entity_id = self._resolve_entity_id_no_fallback("light", arguments.get("entity_id"))
+        except ToolExecutionError as err:
+            entity_id = self._resolve_entity_id_no_fallback("switch", arguments.get("entity_id"))
+
+        domain = entity_id.split(".")[0]
+        try:
+            await self.hass.services.async_call(
+                domain=domain,
+                service="turn_off",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
         except vol.error.MultipleInvalid as err:
             return {"retry": str(err)}
         except HomeAssistantError as err:
