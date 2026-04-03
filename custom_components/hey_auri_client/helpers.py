@@ -851,7 +851,10 @@ class LocalToolExecutor:
             blocking=True,
             return_response=True,
         )
-        return result
+        return {
+            "temperature_unit": str(self.hass.config.units.temperature_unit),
+            "result": result,
+        }
 
     async def _update_user_preferences(self, arguments: dict[str, Any]) -> dict[str, Any]:
         user_id = arguments.get("user_id")
@@ -871,34 +874,16 @@ class LocalToolExecutor:
             "user_preferences": await get_user_preferences_helper(user_id),
         }
 
-    def _resolve_todo_entity_id(self, requested_entity_id: Any) -> str:
-        """Resolve a valid todo entity id with fallback to first todo entity."""
-        candidate = str(requested_entity_id or "").strip()
-        if candidate and candidate.startswith("todo.") and self.hass.states.get(candidate):
-            return candidate
-
-        fallback = next(
-            (
-                state.entity_id
-                for state in self.hass.states.async_all()
-                if state.entity_id.startswith("todo.")
-            ),
-            None,
-        )
-        if fallback is None:
-            raise ToolExecutionError("No todo/shopping list entity is available")
-        return fallback
-
     async def _get_shopping_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = self._resolve_todo_entity_id(arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id("todo", arguments.get("entity_id"))
         raw_status = arguments.get("status")
 
         if not isinstance(raw_status, list) or not raw_status:
-            raise ToolExecutionError("status is required and must be a non-empty list")
+            return {"retry": "status is required and must be a non-empty list"}
 
         status = [str(item).strip() for item in raw_status if str(item).strip()]
         if not status:
-            raise ToolExecutionError("status is required and must include at least one value")
+            return {"retry": "status is required and must include at least one value"}
 
         try:
             result = await self.hass.services.async_call(
@@ -914,10 +899,10 @@ class LocalToolExecutor:
             raise ToolExecutionError(str(err)) from err
 
     async def _add_shopping_list_item(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = self._resolve_todo_entity_id(arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id("todo", arguments.get("entity_id"))
         item = str(arguments.get("item", "")).strip()
         if not item:
-            raise ToolExecutionError("item is required")
+            return {"retry": "item is required"}
 
         try:
             await self.hass.services.async_call(
@@ -934,7 +919,7 @@ class LocalToolExecutor:
     async def _remove_completed_shopping_list_item(
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
-        entity_id = self._resolve_todo_entity_id(arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id("todo", arguments.get("entity_id"))
 
         try:
             await self.hass.services.async_call(
