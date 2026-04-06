@@ -249,6 +249,8 @@ class LocalToolExecutor:
             result = await self._set_media_mute(arguments)
         elif function_name == "get_forecasts":
             result = await self._get_forecasts(arguments)
+        elif function_name == "get_all_persons":
+            result = await self._get_all_persons()
         elif function_name == "update_user_preferences":
             result = await self._update_user_preferences(arguments)
         elif function_name == "get_user_preferences":
@@ -257,6 +259,8 @@ class LocalToolExecutor:
             result = await self._get_shopping_list(arguments)
         elif function_name == "add_shopping_list_item":
             result = await self._add_shopping_list_item(arguments)
+        elif function_name == "mark_shopping_list_item_complete":
+            result = await self._mark_shopping_list_item_complete(arguments)
         elif function_name == "remove_completed_shopping_list_item":
             result = await self._remove_completed_shopping_list_item(arguments)
         elif function_name == "get_automation_metadata_service":
@@ -855,27 +859,104 @@ class LocalToolExecutor:
             "temperature_unit": str(self.hass.config.units.temperature_unit),
             "result": result,
         }
+    
+    async def _get_all_persons(self) -> list[dict[str, str]]:
+        """Return Home Assistant persons that are linked to a user/client id."""
+        persons_with_user_id: list[dict[str, str]] = []
+
+        for state in self.hass.states.async_all("person"):
+            user_id = str(state.attributes.get("user_id") or "").strip()
+            if not user_id:
+                continue
+
+            name = str(state.name or state.entity_id).strip()
+            persons_with_user_id.append(
+                {
+                    "name": name,
+                    "user_id": user_id[:8],
+                }
+            )
+
+        return persons_with_user_id
 
     async def _update_user_preferences(self, arguments: dict[str, Any]) -> dict[str, Any]:
         user_id = arguments.get("user_id")
         if not user_id:
-            raise ToolExecutionError("user_id is required")
+            return {"retry": "user_id is required for update_user_preferences"}
+        if not await self._user_exists(user_id):
+            return {"retry": f"user_id '{user_id}' was not found, ensure you are copying the exact user_id instead of hallucinating."}
 
-        updates = arguments.get("updates")
-        user_preference = arguments.get("user_preference")
-        return await apply_user_preference_update(user_id, user_preference, updates)
+        raw_updates = arguments.get("updates")
+        if not isinstance(raw_updates, list) or not raw_updates:
+            return {
+                "retry": "updates is required and must be a non-empty array for update_user_preferences"
+            }
+
+        normalized_updates: dict[str, Any] = {}
+        allowed_importance = {"low", "medium", "high"}
+        timestamp = datetime.now(UTC).isoformat()
+
+        for item in raw_updates:
+            if not isinstance(item, dict):
+                return {"retry": "each updates item must be an object"}
+
+            key = str(item.get("key", "")).strip()
+            if not key:
+                return {"retry": "each updates item must include a non-empty key"}
+
+            if "value" not in item:
+                return {"retry": f"updates item '{key}' is missing value"}
+
+            importance_raw = item.get("importance", "medium")
+            importance = str(importance_raw or "medium").strip().lower()
+            if importance not in allowed_importance:
+                return {
+                    "retry": f"updates item '{key}' has invalid importance '{importance}'. Allowed values: low, medium, high"
+                }
+
+            normalized_updates[key] = {
+                "value": str(item.get("value", "")),
+                "importance": importance,
+                "timestamp": timestamp,
+            }
+
+        await apply_user_preference_update(user_id, normalized_updates)
+        return {"success": True, "user_id": user_id}
 
     async def _get_user_preferences(self, arguments: dict[str, Any]) -> dict[str, Any]:
         user_id = arguments.get("user_id")
         if not user_id:
-            raise ToolExecutionError("user_id is required")
+            return {"retry": "user_id is required for get_user_preferences"}
+        if not await self._user_exists(user_id):
+            return {"retry": f"user_id '{user_id}' was not found, ensure you are copying the exact user_id instead of hallucinating."}
+
+        raw_preferences = await get_user_preferences_helper(user_id)
+        user_preferences: dict[str, Any] | str = raw_preferences
+        try:
+            parsed_preferences = json.loads(raw_preferences)
+            if isinstance(parsed_preferences, dict):
+                user_preferences = parsed_preferences
+        except (TypeError, ValueError, json.JSONDecodeError):
+            user_preferences = raw_preferences
+
         return {
+            "success": True,
             "user_id": user_id,
-            "user_preferences": await get_user_preferences_helper(user_id),
+            "user_preferences": user_preferences,
         }
 
+    async def _user_exists(self, user_id: Any) -> bool:
+        """Return whether a Home Assistant auth user exists for the given id prefix."""
+        candidate = str(user_id or "").strip()
+        if not candidate:
+            return False
+
+        candidate_lower = candidate.lower()
+        users = await self.hass.auth.async_get_users()
+        return any(str(user.id).lower().startswith(candidate_lower) for user in users)
+
     async def _get_shopping_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = self._resolve_entity_id("todo", arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id_no_fallback("todo", arguments.get("entity_id"))
         raw_status = arguments.get("status")
 
         if not isinstance(raw_status, list) or not raw_status:
@@ -894,12 +975,28 @@ class LocalToolExecutor:
                 blocking=True,
                 return_response=True,
             )
+
+            if isinstance(result, dict):
+                for payload in result.values():
+                    if not isinstance(payload, dict):
+                        continue
+                    items = payload.get("items")
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        uid = item.get("uid")
+                        if isinstance(uid, str):
+                            item["uid"] = uid[:8]
+
+            _LOGGER.info(f"get_items result: {result}")
             return result
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
     async def _add_shopping_list_item(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = self._resolve_entity_id("todo", arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id_no_fallback("todo", arguments.get("entity_id"))
         item = str(arguments.get("item", "")).strip()
         if not item:
             return {"retry": "item is required"}
@@ -915,11 +1012,63 @@ class LocalToolExecutor:
             return {"success": True}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
+        
+    async def _get_full_shopping_list_item_id(self, uid: str, entity_id: str) -> str:
+        try:
+            get_items_result = await self.hass.services.async_call(
+                domain="todo",
+                service="get_items",
+                service_data={"status": "needs_action"},
+                target={"entity_id": entity_id},
+                blocking=True,
+                return_response=True,
+            )
+            if isinstance(get_items_result, dict):
+                for payload in get_items_result.values():
+                    if not isinstance(payload, dict):
+                        continue
+                    items = payload.get("items")
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        item_uid = item.get("uid")
+                        if isinstance(item_uid, str) and item_uid.startswith(str(uid)):
+                            return item_uid
+            raise ToolExecutionError(f"Item with uid starting with '{uid}' not found")
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+        
+    async def _mark_shopping_list_item_complete(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("todo", arguments.get("entity_id"))
+
+        uid = arguments.get("uid")
+        if not uid:
+            return {"retry": "uid is required for mark_shopping_list_item_complete"}
+        
+        # the uid is only the first 8 characters of the actual uid, so we need to find the full uid
+        try:
+            full_uid = await self._get_full_shopping_list_item_id(uid, entity_id)
+        except ToolExecutionError as err:
+            return {"retry": str(err)}
+        
+        try:
+            await self.hass.services.async_call(
+                domain="todo",
+                service="update_item",
+                service_data={"item": full_uid, "status": "completed"},
+                target={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
 
     async def _remove_completed_shopping_list_item(
         self, arguments: dict[str, Any]
     ) -> dict[str, Any]:
-        entity_id = self._resolve_entity_id("todo", arguments.get("entity_id"))
+        entity_id = self._resolve_entity_id_no_fallback("todo", arguments.get("entity_id"))
 
         try:
             await self.hass.services.async_call(
@@ -1070,15 +1219,17 @@ async def build_context_snapshot(
 ) -> dict[str, Any]:
     """Build the structured context payload sent to the SaaS backend."""
     user_id = user_input.context.user_id
+    context_user_id = None if user_id is None else str(user_id)[:8]
     user_preferences = "" if user_id is None else await get_user_preferences_helper(user_id)
+    user_name = await get_user_name(hass, user_input)
     now = datetime.now().astimezone()
     return {
-        "user_id": user_id,
+        "user_id": context_user_id,
         "agent_id": user_input.agent_id,
         "device_id": user_input.device_id,
         "language": user_input.language,
         "text": user_input.text,
-        "user_name": await get_user_name(hass, user_input),
+        "user_name": user_name,
         "satellite_speaker": get_device_media_player(hass, user_input.device_id),
         "request_area": get_request_area(hass, user_input.device_id),
         "exposed_entities": get_exposed_entities(hass),

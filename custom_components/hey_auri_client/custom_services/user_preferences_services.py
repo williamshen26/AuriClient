@@ -14,6 +14,7 @@ from ..const import DOMAIN
 from .helpers import read_from_file, write_to_file
 
 _LOGGER = logging.getLogger(__package__)
+_MAX_USER_PREFERENCE_RECORDS = 200
 
 
 def _preferences_file_path(user_id: str) -> str:
@@ -29,7 +30,17 @@ async def get_user_preferences_helper(user_id: str | None) -> str:
         file_path = _preferences_file_path(user_id)
         data = await read_from_file(file_path)
         data_dict = json.loads(data)
-        filtered_dict = {key: value for key, value in data_dict.items() if value is not None}
+        filtered_dict: dict[str, Any] = {}
+        for key, value in data_dict.items():
+            if value is None:
+                continue
+
+            # Stored records may include metadata like importance/timestamp.
+            # Return only the user-facing key/value shape.
+            if isinstance(value, dict) and "value" in value:
+                filtered_dict[key] = value.get("value")
+            else:
+                filtered_dict[key] = value
         return json.dumps(filtered_dict)
     except FileNotFoundError:
         file_path = _preferences_file_path(user_id)
@@ -42,7 +53,6 @@ async def get_user_preferences_helper(user_id: str | None) -> str:
 
 async def apply_user_preference_update(
     user_id: str,
-    user_preference: str | None = None,
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge new preference data into the user's JSON file.
@@ -51,16 +61,44 @@ async def apply_user_preference_update(
     legacy `user_preference` string is provided, it is preserved under `latest_preference`.
     """
     file_path = _preferences_file_path(user_id)
-    current_json = await get_user_preferences_helper(user_id)
+    try:
+        current_json = await read_from_file(file_path)
+    except FileNotFoundError:
+        directory = os.path.dirname(file_path)
+        os.makedirs(directory, exist_ok=True)
+        current_json = "{}"
+
     current_dict = json.loads(current_json or "{}")
 
     if updates:
         for key, value in updates.items():
             current_dict[key] = value
-    elif user_preference:
-        current_dict["latest_preference"] = user_preference
     else:
-        raise HomeAssistantError("Either updates or user_preference must be provided")
+        raise HomeAssistantError("user_preference must be provided")
+
+    # Keep at most N records. Evict lowest importance first, then oldest timestamp.
+    if len(current_dict) > _MAX_USER_PREFERENCE_RECORDS:
+        importance_rank = {"low": 0, "medium": 1, "high": 2}
+
+        def _record_sort_key(item: tuple[str, Any]) -> tuple[int, str, str]:
+            key, value = item
+            if isinstance(value, dict):
+                importance_raw = str(value.get("importance", "medium")).strip().lower()
+                timestamp_raw = str(value.get("timestamp", "")).strip()
+            else:
+                importance_raw = "medium"
+                timestamp_raw = ""
+
+            return (
+                importance_rank.get(importance_raw, importance_rank["medium"]),
+                timestamp_raw,
+                key,
+            )
+
+        records_to_remove = len(current_dict) - _MAX_USER_PREFERENCE_RECORDS
+        removal_candidates = sorted(current_dict.items(), key=_record_sort_key)
+        for key, _ in removal_candidates[:records_to_remove]:
+            current_dict.pop(key, None)
 
     updated_json = json.dumps(current_dict)
     await write_to_file(file_path, "w", updated_json)
