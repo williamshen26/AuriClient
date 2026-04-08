@@ -14,7 +14,7 @@ from ..const import DOMAIN
 from .helpers import read_from_file, write_to_file
 
 _LOGGER = logging.getLogger(__package__)
-_MAX_USER_PREFERENCE_RECORDS = 200
+_MAX_USER_PREFERENCE_RECORDS = 50
 
 
 def _preferences_file_path(user_id: str) -> str:

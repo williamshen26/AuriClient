@@ -709,32 +709,59 @@ class LocalToolExecutor:
     async def _set_temperature(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = self._resolve_entity_id_no_fallback("climate", arguments.get("entity_id"))
         raw_temperature = arguments.get("temperature")
-        if raw_temperature is None:
-            return {"retry": "temperature is required for set_temperature"}
-
-        try:
-            requested_temperature = float(raw_temperature)
-        except (TypeError, ValueError):
-            return {"retry": "temperature must be a number"}
-
+        raw_temperature_high = arguments.get("target_temp_high")
+        raw_temperature_low = arguments.get("target_temp_low")
         state = self.hass.states.get(entity_id)
-        if state is None:
-            raise ToolExecutionError(f"Entity not found: {entity_id}")
-
+        hvac_mode = arguments.get("hvac_mode", state.state)
         requested_unit = _normalize_temperature_unit(arguments.get("temperature_unit"))
-        target_unit = _normalize_temperature_unit(state.attributes.get("temperature_unit"))
-        service_temperature = _convert_temperature(
-            requested_temperature,
-            from_unit=requested_unit,
-            to_unit=target_unit,
-        )
+        target_unit = _normalize_temperature_unit(state.attributes.get("temperature_unit", arguments.get("temperature_unit")))
+        service_data: dict[str, Any] = {}
 
-        service_data: dict[str, Any] = {
-            "entity_id": entity_id,
-            "temperature": service_temperature,
-        }
+        if hvac_mode == "heat_cool" or hvac_mode == "auto":
+            if raw_temperature_high is None or raw_temperature_low is None:
+                return {"retry": "target_temp_high and target_temp_low are required for heat_cool/auto hvac_mode"}
+            
+            try:
+                requested_temperature_high = float(raw_temperature_high)
+                requested_temperature_low = float(raw_temperature_low)
+            except (TypeError, ValueError):
+                return {"retry": "target_temp_high and target_temp_low must be numbers"}
+            
+            service_temperature_high = _convert_temperature(
+                requested_temperature_high,
+                from_unit=requested_unit,
+                to_unit=target_unit,
+            )
+            service_temperature_low = _convert_temperature(
+                requested_temperature_low,
+                from_unit=requested_unit,
+                to_unit=target_unit,
+            )
+            service_data = {
+                "entity_id": entity_id,
+                "target_temp_high": service_temperature_high,
+                "target_temp_low": service_temperature_low,
+            }
+        if hvac_mode == "heat" or hvac_mode == "cool":
+            if raw_temperature is None:
+                return {"retry": "temperature is required for heat/cool hvac_mode"}
 
-        hvac_mode = arguments.get("hvac_mode")
+            try:
+                requested_temperature = float(raw_temperature)
+            except (TypeError, ValueError):
+                return {"retry": "temperature must be a number"}
+
+            service_temperature = _convert_temperature(
+                requested_temperature,
+                from_unit=requested_unit,
+                to_unit=target_unit,
+            )
+
+            service_data = {
+                "entity_id": entity_id,
+                "temperature": service_temperature,
+            }
+
         if hvac_mode is not None:
             service_data["hvac_mode"] = str(hvac_mode)
 
@@ -748,11 +775,8 @@ class LocalToolExecutor:
             result: dict[str, Any] = {
                 "success": True,
                 "entity_id": entity_id,
-                "temperature": service_temperature,
-                "temperature_unit": target_unit,
+                "state": self.hass.states.get(entity_id),
             }
-            if hvac_mode is not None:
-                result["hvac_mode"] = str(hvac_mode)
             return result
         except vol.error.MultipleInvalid as err:
             return {"retry": str(err)}
