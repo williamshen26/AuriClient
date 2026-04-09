@@ -4,21 +4,96 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.typing import ConfigType
-
-from ..const import DOMAIN
 from .helpers import read_from_file, write_to_file
 
 _LOGGER = logging.getLogger(__package__)
 _MAX_USER_PREFERENCE_RECORDS = 50
+_USER_DATA_DIR = "/config/www/user_data"
 
 
 def _preferences_file_path(user_id: str) -> str:
-    return f"/config/www/user_data/{user_id}.json"
+    return f"{_USER_DATA_DIR}/{user_id}.json"
+
+
+def _resolve_preference_file_paths(user_id: Optional[str]) -> list[str]:
+    """Resolve preference JSON file paths for one user or the full directory."""
+    if user_id is not None:
+        return [_preferences_file_path(user_id)]
+
+    if not os.path.isdir(_USER_DATA_DIR):
+        return []
+
+    return [
+        os.path.join(_USER_DATA_DIR, name)
+        for name in os.listdir(_USER_DATA_DIR)
+        if name.endswith(".json")
+    ]
+
+
+async def _read_preference_dict(file_path: str) -> dict[str, Any] | None:
+    """Read one preference file and return a parsed dict, or None when unavailable."""
+    try:
+        data = await read_from_file(file_path)
+    except FileNotFoundError:
+        return None
+
+    try:
+        parsed = json.loads(data or "{}")
+    except json.JSONDecodeError:
+        _LOGGER.warning("Skipping invalid preference JSON file: %s", file_path)
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    return parsed
+
+
+def _normalize_preference_value(value: Any) -> Any:
+    """Return user-facing preference value from raw stored shape."""
+    if isinstance(value, dict) and "value" in value:
+        return value.get("value")
+    return value
+
+
+async def get_preference_keys(user_id: Optional[str] = None) -> set[str]:
+    """Return unique preference keys for one user or all user files."""
+    collected_keys: set[str] = set()
+
+    for file_path in _resolve_preference_file_paths(user_id):
+        parsed = await _read_preference_dict(file_path)
+        if parsed is None:
+            continue
+
+        for key in parsed.keys():
+            if isinstance(key, str):
+                collected_keys.add(key)
+
+    return collected_keys
+
+
+async def get_preference_by_key(key: str, user_id: Optional[str] = None) -> list[Any]:
+    """Return values for a preference key for one user or all user files."""
+    normalized_key = str(key).strip()
+    if not normalized_key:
+        return []
+
+    matched_values: list[Any] = []
+
+    for file_path in _resolve_preference_file_paths(user_id):
+        parsed = await _read_preference_dict(file_path)
+        if parsed is None or normalized_key not in parsed:
+            continue
+
+        value = parsed.get(normalized_key)
+        if value is None:
+            continue
+
+        matched_values.append(_normalize_preference_value(value))
+
+    return matched_values
 
 
 async def get_user_preferences_helper(user_id: str | None) -> str:
@@ -36,11 +111,7 @@ async def get_user_preferences_helper(user_id: str | None) -> str:
                 continue
 
             # Stored records may include metadata like importance/timestamp.
-            # Return only the user-facing key/value shape.
-            if isinstance(value, dict) and "value" in value:
-                filtered_dict[key] = value.get("value")
-            else:
-                filtered_dict[key] = value
+            filtered_dict[key] = _normalize_preference_value(value)
         return json.dumps(filtered_dict)
     except FileNotFoundError:
         file_path = _preferences_file_path(user_id)
@@ -74,7 +145,7 @@ async def apply_user_preference_update(
         for key, value in updates.items():
             current_dict[key] = value
     else:
-        raise HomeAssistantError("user_preference must be provided")
+        raise ValueError("user_preference must be provided")
 
     # Keep at most N records. Evict lowest importance first, then oldest timestamp.
     if len(current_dict) > _MAX_USER_PREFERENCE_RECORDS:
@@ -106,42 +177,3 @@ async def apply_user_preference_update(
         "path": file_path,
         "data": current_dict,
     }
-
-
-async def async_setup_user_preferences_services(hass: HomeAssistant, config: ConfigType) -> None:
-    """Register user preference services."""
-
-    async def update_user_preferences(call: ServiceCall) -> ServiceResponse:
-        try:
-            user_id = call.data.get("user_id")
-            if not user_id:
-                raise HomeAssistantError("user_id is required")
-            user_preference = call.data.get("user_preference")
-            updates = call.data.get("updates")
-            if updates is not None and not isinstance(updates, dict):
-                raise HomeAssistantError("updates must be an object")
-            return await apply_user_preference_update(user_id, user_preference, updates)
-        except Exception as err:
-            _LOGGER.error("Error updating preferences: %s", err)
-            raise HomeAssistantError(f"Error updating preferences: {err}") from err
-
-    hass.services.async_register(
-        DOMAIN,
-        "update_user_preferences",
-        update_user_preferences,
-        supports_response=SupportsResponse.ONLY,
-    )
-
-    async def get_user_preferences(call: ServiceCall) -> ServiceResponse:
-        user_id = call.data.get("user_id")
-        return {
-            "user_id": user_id,
-            "user_preferences": await get_user_preferences_helper(user_id),
-        }
-
-    hass.services.async_register(
-        DOMAIN,
-        "get_user_preferences",
-        get_user_preferences,
-        supports_response=SupportsResponse.ONLY,
-    )

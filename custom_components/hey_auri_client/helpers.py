@@ -37,6 +37,8 @@ from .custom_services.timer_services import (
 )
 from .custom_services.user_preferences_services import (
     apply_user_preference_update,
+    get_preference_by_key,
+    get_preference_keys,
     get_user_preferences_helper,
 )
 from .exceptions import SaaSRequestError, ToolExecutionError
@@ -255,6 +257,10 @@ class LocalToolExecutor:
             result = await self._update_user_preferences(arguments)
         elif function_name == "get_user_preferences":
             result = await self._get_user_preferences(arguments)
+        elif function_name == "get_preference_keys":
+            result = await self._get_preference_keys(arguments)
+        elif function_name == "get_preference_by_key":
+            result = await self._get_preference_by_key(arguments)
         elif function_name == "get_shopping_list":
             result = await self._get_shopping_list(arguments)
         elif function_name == "add_shopping_list_item":
@@ -969,6 +975,39 @@ class LocalToolExecutor:
             "user_preferences": user_preferences,
         }
 
+    async def _get_preference_keys(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        user_id = arguments.get("user_id")
+        if user_id and not await self._user_exists(user_id):
+            return {
+                "retry": f"user_id '{user_id}' was not found, ensure you are copying the exact user_id instead of hallucinating."
+            }
+
+        keys = await get_preference_keys(user_id)
+        return {
+            "success": True,
+            "user_id": user_id,
+            "keys": sorted(keys),
+        }
+
+    async def _get_preference_by_key(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        key = str(arguments.get("key", "")).strip()
+        if not key:
+            return {"retry": "key is required for get_preference_by_key"}
+
+        user_id = arguments.get("user_id")
+        if user_id and not await self._user_exists(user_id):
+            return {
+                "retry": f"user_id '{user_id}' was not found, ensure you are copying the exact user_id instead of hallucinating."
+            }
+
+        values = await get_preference_by_key(key=key, user_id=user_id)
+        return {
+            "success": True,
+            "user_id": user_id,
+            "key": key,
+            "values": values if len(values) > 1 else (values[0] if values else None),
+        }
+
     async def _user_exists(self, user_id: Any) -> bool:
         """Return whether a Home Assistant auth user exists for the given id prefix."""
         candidate = str(user_id or "").strip()
@@ -1244,7 +1283,7 @@ async def build_context_snapshot(
     """Build the structured context payload sent to the SaaS backend."""
     user_id = user_input.context.user_id
     context_user_id = None if user_id is None else str(user_id)[:8]
-    user_preferences = "" if user_id is None else await get_user_preferences_helper(user_id)
+    user_preferences = sorted(await get_preference_keys(context_user_id))
     user_name = await get_user_name(hass, user_input)
     now = datetime.now().astimezone()
     return {
@@ -1257,7 +1296,7 @@ async def build_context_snapshot(
         "satellite_speaker": get_device_media_player(hass, user_input.device_id),
         "request_area": get_request_area(hass, user_input.device_id),
         "exposed_entities": get_exposed_entities(hass),
-        "user_preferences": user_preferences,
+        "user_preference_keys": user_preferences,
         "home_location": {
             "latitude": round(float(hass.config.latitude), 1),
             "longitude": round(float(hass.config.longitude), 1),
