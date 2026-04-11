@@ -22,7 +22,8 @@ from .const import (
     EVENT_CONVERSATION_FINISHED,
 )
 from .exceptions import SaaSRequestError, ToolExecutionError
-from .helpers import LocalToolExecutor, SaaSClient, build_context_snapshot, get_timeout_seconds
+from .helpers import SaaSClient, build_context_snapshot, get_timeout_seconds
+from .local_tool_executor import LocalToolExecutor
 from .metric_service import RequestLatencyMetricService
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,7 +80,6 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                     tool_results.append(
                         await self.tool_executor.execute_tool_call(
                             tool_call,
-                            user_input,
                             context["exposed_entities"],
                         )
                     )

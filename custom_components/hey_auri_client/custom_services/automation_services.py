@@ -12,15 +12,53 @@ import yaml
 from homeassistant.components import automation
 from homeassistant.components.automation.config import _async_validate_config_item
 from homeassistant.config import AUTOMATION_CONFIG_PATH
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_registry import async_get
-from homeassistant.helpers.typing import ConfigType
 
-from ..const import DOMAIN
 from .helpers import read_from_file
 
 _LOGGER = logging.getLogger(__package__)
+
+
+class AutomationToolService:
+    """Handle automation-oriented tool calls."""
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get_automation_metadata(
+        self,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del arguments
+        return {"automation_metadata": await get_automation_metadata(self.hass)}
+
+    async def get_automation_metadata_service(
+        self,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility alias for existing tool name."""
+        return await self.get_automation_metadata(arguments)
+
+    async def add_automation(self, arguments: dict[str, Any]) -> str | dict[str, Any]:
+        return await add_automation_from_yaml(
+            self.hass,
+            str(arguments.get("automation_config", "")),
+        )
+
+    async def update_automation(self, arguments: dict[str, Any]) -> str:
+        return await update_automation_from_yaml(
+            self.hass,
+            str(arguments.get("id", "")),
+            str(arguments.get("automation_config", "")),
+        )
+
+    async def remove_automation(self, arguments: dict[str, Any]) -> str:
+        return await remove_automation_by_id(
+            self.hass,
+            str(arguments.get("id", "")),
+        )
 
 
 async def get_automations_helper() -> list[dict[str, Any]]:
@@ -247,60 +285,3 @@ async def remove_automation_by_id(hass: HomeAssistant, automation_id: str) -> st
         entity_reg.async_remove(entity_id)
 
     return "Success"
-
-
-async def async_setup_automation_services(hass: HomeAssistant, config: ConfigType) -> None:
-    """Register automation services."""
-
-    async def get_automation_metadata_service(call: ServiceCall) -> ServiceResponse:
-        return {"automation_metadata": await get_automation_metadata(hass)}
-
-    async def add_automation(call: ServiceCall) -> ServiceResponse:
-        return {
-            "result": await add_automation_from_yaml(
-                hass,
-                str(call.data.get("automation_config", "")),
-            )
-        }
-
-    async def update_automation(call: ServiceCall) -> ServiceResponse:
-        return {
-            "result": await update_automation_from_yaml(
-                hass,
-                str(call.data.get("id", "")),
-                str(call.data.get("automation_config", "")),
-            )
-        }
-
-    async def remove_automation(call: ServiceCall) -> ServiceResponse:
-        return {
-            "result": await remove_automation_by_id(
-                hass,
-                str(call.data.get("id", "")),
-            )
-        }
-
-    hass.services.async_register(
-        DOMAIN,
-        "get_automation_metadata_service",
-        get_automation_metadata_service,
-        supports_response=SupportsResponse.ONLY,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        "add_automation",
-        add_automation,
-        supports_response=SupportsResponse.ONLY,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        "update_automation",
-        update_automation,
-        supports_response=SupportsResponse.ONLY,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        "remove_automation",
-        remove_automation,
-        supports_response=SupportsResponse.ONLY,
-    )

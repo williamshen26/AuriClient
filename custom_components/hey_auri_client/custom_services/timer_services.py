@@ -6,11 +6,11 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.typing import ConfigType
 
+from ..exceptions import ToolExecutionError
 from ..const import (
     ATTR_DURATION,
     ATTR_ENTITY_ID,
@@ -18,18 +18,8 @@ from ..const import (
     ATTR_SATELLITE_SPEAKER,
     ATTR_TIMER_ID,
     DOMAIN,
-    SERVICE_GET_AURI_TIMERS,
-    SERVICE_START_AURI_TIMER,
 )
 from ..timer_entity import AuriTimerEntity, generate_timer_id
-
-
-START_TIMER_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_DURATION): vol.Any(int, cv.time_period),
-        vol.Optional(ATTR_SATELLITE_SPEAKER): cv.string,
-    }
-)
 
 
 def _normalize_duration_to_seconds(value) -> int:
@@ -68,7 +58,7 @@ async def start_auri_timer_native(
     hass: HomeAssistant,
     duration: Any,
     satellite_speaker: str | None = None,
-) -> ServiceResponse:
+) -> dict[str, Any]:
     """Start an AURI timer via shared native logic."""
     runtime = _get_runtime(hass)
     add_entities = runtime.get("async_add_entities")
@@ -98,7 +88,7 @@ async def start_auri_timer_native(
     }
 
 
-async def get_auri_timers_native(hass: HomeAssistant) -> ServiceResponse:
+async def get_auri_timers_native(hass: HomeAssistant) -> dict[str, Any]:
     """Return active AURI timers via shared native logic."""
     runtime = _get_runtime(hass)
     timers = []
@@ -126,29 +116,30 @@ async def get_auri_timers_native(hass: HomeAssistant) -> ServiceResponse:
     return {"timers": timers}
 
 
-async def async_setup_timer_services(hass: HomeAssistant, config: ConfigType) -> None:
-    """Register thin integration timer services."""
-    async def start_auri_timer(call: ServiceCall) -> ServiceResponse:
-        return await start_auri_timer_native(
-            hass,
-            duration=call.data[ATTR_DURATION],
-            satellite_speaker=call.data.get(ATTR_SATELLITE_SPEAKER),
-        )
+class TimerToolService:
+    """Handle timer-oriented tool calls."""
 
-    async def get_auri_timers(call: ServiceCall) -> ServiceResponse:
-        return await get_auri_timers_native(hass)
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_START_AURI_TIMER,
-        start_auri_timer,
-        schema=START_TIMER_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
-    )
+    async def start_timer(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await start_auri_timer_native(
+                self.hass,
+                duration=arguments.get("duration"),
+                satellite_speaker=arguments.get("satellite_speaker"),
+            )
+        except (vol.error.MultipleInvalid, ValueError) as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_GET_AURI_TIMERS,
-        get_auri_timers,
-        supports_response=SupportsResponse.ONLY,
-    )
+    async def list_timers(
+        self,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del arguments
+        try:
+            return await get_auri_timers_native(self.hass)
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
