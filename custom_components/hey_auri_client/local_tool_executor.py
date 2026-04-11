@@ -67,6 +67,8 @@ class LocalToolExecutor:
             "set_hvac_mode": self.climate.set_hvac_mode,
             "turn_on_media_player": self.media_player.turn_on_media_player,
             "turn_off_media_player": self.media_player.turn_off_media_player,
+            "media_player_play": self.media_player.media_player_play,
+            "media_player_pause": self.media_player.media_player_pause,
             "adjust_media_volume": self.media_player.adjust_media_volume,
             "select_media_source": self.media_player.select_media_source,
             "set_media_mute": self.media_player.set_media_mute,

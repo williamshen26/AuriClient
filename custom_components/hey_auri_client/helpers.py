@@ -375,9 +375,6 @@ def get_request_area(hass: HomeAssistant, device_id: str | None) -> str | None:
         area = area_registry.async_get_area(device.area_id)
         return area.name if area else device.area_id
 
-    if device.suggested_area:
-        return device.suggested_area
-
     return None
 
 

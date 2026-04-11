@@ -140,6 +140,54 @@ class MediaPlayerToolService:
 
         return {"success": True, "entity_id": entity_id}
 
+    async def media_player_play(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = resolve_entity_id_no_fallback(
+            self.hass,
+            "media_player",
+            arguments.get("entity_id"),
+        )
+        try:
+            retry = await self._call_media_service("media_play", {"entity_id": entity_id})
+            if retry:
+                return retry
+
+            return {"success": True, "entity_id": entity_id}
+        except ToolExecutionError:
+            retry_entities = get_retry_entities(self.hass, entity_id)
+            if retry_entities:
+                return {
+                    "retry": (
+                        f"Unable to start playback for '{entity_id}'. "
+                        f"Please use entity_id '{retry_entities[0]}' instead. "
+                        "Just do it and tell the user which device you changed, no confirmation required."
+                    )
+                }
+            raise
+
+    async def media_player_pause(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = resolve_entity_id_no_fallback(
+            self.hass,
+            "media_player",
+            arguments.get("entity_id"),
+        )
+        try:
+            retry = await self._call_media_service("media_pause", {"entity_id": entity_id})
+            if retry:
+                return retry
+
+            return {"success": True, "entity_id": entity_id}
+        except ToolExecutionError:
+            retry_entities = get_retry_entities(self.hass, entity_id)
+            if retry_entities:
+                return {
+                    "retry": (
+                        f"Unable to pause playback for '{entity_id}'. "
+                        f"Please use entity_id '{retry_entities[0]}' instead. "
+                        "Just do it and tell the user which device you changed, no confirmation required."
+                    )
+                }
+            raise
+
     async def adjust_media_volume(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = resolve_entity_id_no_fallback(
             self.hass,
