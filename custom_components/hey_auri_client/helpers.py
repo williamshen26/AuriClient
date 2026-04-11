@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import difflib
 import hashlib
 import hmac
 import json
 import logging
 from time import perf_counter
 import secrets
-from typing import Any
+from typing import Any, List
 
 import aiohttp
 import voluptuous as vol
@@ -243,6 +244,10 @@ class LocalToolExecutor:
             result = await self._set_fan_mode(arguments)
         elif function_name == "set_hvac_mode":
             result = await self._set_hvac_mode(arguments)
+        elif function_name == "turn_on_media_player":
+            result = await self._turn_on_media_player(arguments)
+        elif function_name == "turn_off_media_player":
+            result = await self._turn_off_media_player(arguments)
         elif function_name == "adjust_media_volume":
             result = await self._adjust_media_volume(arguments)
         elif function_name == "select_media_source":
@@ -425,11 +430,96 @@ class LocalToolExecutor:
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
+    def _get_retry_entities(self, entity_id: str) -> List[str]:
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            raise ToolExecutionError(f"Entity not found: {entity_id}")
+        domain = entity_id.split(".", 1)[0]
+        if not domain:
+            raise ToolExecutionError(f"Entity not found: {entity_id}")
+
+        current_area = _resolve_entity_area_id(self.hass, entity_id)
+        current_floor = _resolve_entity_floor_id(self.hass, entity_id)
+        current_name = str(state.name or entity_id)
+        exposed_media_players = [
+            entity
+            for entity in get_exposed_entities(self.hass)
+            if str(entity.get("entity_id", "")).startswith(f"{domain}.")
+            and entity.get("entity_id") != entity_id
+        ]
+
+        exposed_media_players.sort(
+            key=lambda entity: difflib.SequenceMatcher(
+                None,
+                str(entity.get("name") or entity.get("entity_id") or "").casefold(),
+                current_name.casefold(),
+            ).ratio(),
+            reverse=True,
+        )
+
+        same_area_entities = [
+            str(entity.get("entity_id"))
+            for entity in exposed_media_players
+            if current_area and entity.get("area_id") == current_area
+        ]
+        different_area_same_floor_entities = [
+            str(entity.get("entity_id"))
+            for entity in exposed_media_players
+            if current_floor
+            and entity.get("floor_id") == current_floor
+            and entity.get("area_id") != current_area
+        ]
+        other_area_entities = [
+            str(entity.get("entity_id"))
+            for entity in exposed_media_players
+            if (
+                (not current_area or entity.get("area_id") != current_area)
+                and (not current_floor or entity.get("floor_id") != current_floor)
+            )
+        ]
+
+        return (
+            same_area_entities
+            + different_area_same_floor_entities
+            + other_area_entities
+        )
+
     async def _select_media_source(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = self._resolve_entity_id_no_fallback("media_player", arguments.get("entity_id"))
-        source = arguments.get("source")
+        source = str(arguments.get("source", "")).strip()
         if not source:
             return {"retry": "source is required for select_media_source"}
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            raise ToolExecutionError(f"Entity not found: {entity_id}")
+
+        source_list = state.attributes.get("source_list")
+        available_sources = source_list if isinstance(source_list, list) else []
+
+        if source not in available_sources:
+            for candidate_entity_id in self._get_retry_entities(entity_id):
+                candidate_state = self.hass.states.get(candidate_entity_id)
+                if candidate_state is None:
+                    continue
+
+                candidate_sources = candidate_state.attributes.get("source_list")
+                if isinstance(candidate_sources, list) and source in candidate_sources:
+                    return {
+                        "retry": (
+                            f"source '{source}' is not available for '{entity_id}'. "
+                            f"Please use entity_id '{candidate_entity_id}' instead. "
+                            "Just do it and tell the user which device you changed, no confirmation required."
+                        )
+                    }
+
+            return {
+                "retry": (
+                    f"source '{source}' is not available for '{entity_id}'. "
+                    f"Please check the source name. Available sources for '{entity_id}': {available_sources}"
+                )
+            }
+
         try:
             await self.hass.services.async_call(
                 domain="media_player",
@@ -438,6 +528,36 @@ class LocalToolExecutor:
                 blocking=True,
             )
             return {"success": True, "entity_id": entity_id, "source": source}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+        
+    async def _turn_on_media_player(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("media_player", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="media_player",
+                service="turn_on",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+        
+    async def _turn_off_media_player(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = self._resolve_entity_id_no_fallback("media_player", arguments.get("entity_id"))
+        try:
+            await self.hass.services.async_call(
+                domain="media_player",
+                service="turn_off",
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+            return {"success": True, "entity_id": entity_id}
         except vol.error.MultipleInvalid as err:
             return {"retry": str(err)}
         except HomeAssistantError as err:
@@ -465,8 +585,6 @@ class LocalToolExecutor:
             volume_step_pct = _clamp_step_percentage(float(raw_volume_step_pct) * 100) / 100
             # get entity_id volume
             state = self.hass.states.get(entity_id)
-            if state is None:
-                raise ToolExecutionError(f"Entity not found: {entity_id}")
             current_volume = state.attributes.get("volume_level")
             new_volume = _clamp_step_percentage((current_volume + volume_step_pct) * 100) / 100
             service_data["volume_level"] = new_volume
@@ -483,6 +601,15 @@ class LocalToolExecutor:
         except vol.error.MultipleInvalid as err:
             return {"retry": str(err)}
         except HomeAssistantError as err:
+            retry_entities = self._get_retry_entities(entity_id)
+            if retry_entities:
+                return {
+                    "retry": (
+                        f"Unable to adjust volume for '{entity_id}'. "
+                        f"Please use entity_id '{retry_entities[0]}' instead. "
+                        "Just do it and tell the user which device you changed, no confirmation required."
+                    )
+                }
             raise ToolExecutionError(str(err)) from err
         
     async def _turn_on_light(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1357,9 +1484,20 @@ def get_exposed_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
                 ATTR_NAME: state.name,
                 "state": state.state.replace("\n", " ").replace(",", " "),
                 "aliases": aliases,
+                "floor_id": _resolve_entity_floor_id(hass, state.entity_id),
                 "area_id": _resolve_entity_area_id(hass, state.entity_id),
             }
         )
+
+    exposed_entities.sort(
+        key=lambda item: (
+            item.get("floor_id") is None,
+            str(item.get("floor_id") or ""),
+            item.get("area_id") is None,
+            str(item.get("area_id") or ""),
+            str(item.get("entity_id") or ""),
+        )
+    )
 
     return exposed_entities
 
@@ -1406,6 +1544,32 @@ def _resolve_entity_area_id(hass: HomeAssistant, entity_id: str) -> str | None:
             return area.name if area else device.area_id
 
     return None
+
+
+def _resolve_entity_floor_id(hass: HomeAssistant, entity_id: str) -> str | None:
+    """Resolve floor id for an entity through its area mapping."""
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    area_registry = ar.async_get(hass)
+
+    entry = entity_registry.async_get(entity_id)
+    if not entry:
+        return None
+
+    area_id = entry.area_id
+    if area_id is None and entry.device_id:
+        device = device_registry.async_get(entry.device_id)
+        if device:
+            area_id = device.area_id
+
+    if area_id is None:
+        return None
+
+    area = area_registry.async_get_area(area_id)
+    if area is None:
+        return None
+
+    return str(area.floor_id) if area.floor_id else None
 
 
 def get_timeout_seconds(entry_options: dict[str, Any]) -> int:

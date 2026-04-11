@@ -1,6 +1,7 @@
 """Standalone user preference services for the thin frontend integration."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -17,19 +18,22 @@ def _preferences_file_path(user_id: str) -> str:
     return f"{_USER_DATA_DIR}/{user_id}.json"
 
 
-def _resolve_preference_file_paths(user_id: Optional[str]) -> list[str]:
+async def _resolve_preference_file_paths(user_id: Optional[str]) -> list[str]:
     """Resolve preference JSON file paths for one user or the full directory."""
     if user_id is not None:
         return [_preferences_file_path(user_id)]
 
-    if not os.path.isdir(_USER_DATA_DIR):
-        return []
+    def _list_preference_files() -> list[str]:
+        if not os.path.isdir(_USER_DATA_DIR):
+            return []
 
-    return [
-        os.path.join(_USER_DATA_DIR, name)
-        for name in os.listdir(_USER_DATA_DIR)
-        if name.endswith(".json")
-    ]
+        return [
+            os.path.join(_USER_DATA_DIR, name)
+            for name in os.listdir(_USER_DATA_DIR)
+            if name.endswith(".json")
+        ]
+
+    return await asyncio.to_thread(_list_preference_files)
 
 
 async def _read_preference_dict(file_path: str) -> dict[str, Any] | None:
@@ -62,7 +66,7 @@ async def get_preference_keys(user_id: Optional[str] = None) -> set[str]:
     """Return unique preference keys for one user or all user files."""
     collected_keys: set[str] = set()
 
-    for file_path in _resolve_preference_file_paths(user_id):
+    for file_path in await _resolve_preference_file_paths(user_id):
         parsed = await _read_preference_dict(file_path)
         if parsed is None:
             continue
@@ -82,7 +86,7 @@ async def get_preference_by_key(key: str, user_id: Optional[str] = None) -> list
 
     matched_values: list[Any] = []
 
-    for file_path in _resolve_preference_file_paths(user_id):
+    for file_path in await _resolve_preference_file_paths(user_id):
         parsed = await _read_preference_dict(file_path)
         if parsed is None or normalized_key not in parsed:
             continue
