@@ -325,6 +325,7 @@ def get_exposed_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
         state
         for state in hass.states.async_all()
         if async_should_expose(hass, conversation.DOMAIN, state.entity_id)
+        and state.attributes.get("app_id") != "music_assistant"
     ]
     entity_registry = er.async_get(hass)
     exposed_entities: list[dict[str, Any]] = []
