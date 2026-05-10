@@ -21,8 +21,13 @@ from .const import (
     DOMAIN,
     EVENT_CONVERSATION_FINISHED,
 )
+from .cache import reset_processed_entities
 from .exceptions import SaaSRequestError, ToolExecutionError
-from .helpers import SaaSClient, build_context_snapshot, get_timeout_seconds
+from .helpers import (
+    SaaSClient,
+    build_context_snapshot,
+    get_timeout_seconds,
+)
 from .local_tool_executor import LocalToolExecutor
 from .metric_service import RequestLatencyMetricService
 
@@ -60,6 +65,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
     ) -> conversation.ConversationResult:
         """Process one conversation turn via the SaaS backend."""
         conversation_id = user_input.conversation_id or str(uuid.uuid4())
+        reset_processed_entities(conversation_id)
         context = await build_context_snapshot(self.hass, user_input)
         payload = {
             "type": "user_turn",
@@ -81,6 +87,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                         await self.tool_executor.execute_tool_call(
                             tool_call,
                             context["exposed_entities"],
+                            conversation_id=conversation_id,
                         )
                     )
 

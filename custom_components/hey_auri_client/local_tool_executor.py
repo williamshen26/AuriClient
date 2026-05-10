@@ -93,6 +93,7 @@ class LocalToolExecutor:
         self,
         tool_call: dict[str, Any],
         exposed_entities: list[dict[str, Any]],
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         function_payload = tool_call.get("function") or {}
         function_name = function_payload.get("name")
@@ -110,6 +111,9 @@ class LocalToolExecutor:
             raise ToolExecutionError(
                 f"Tool arguments for {function_name} must be a JSON object"
             )
+
+        if conversation_id:
+            arguments["_conversation_id"] = conversation_id
 
         if function_name == "execute_service":
             result = await self.entity.execute_service(arguments, exposed_entities)
