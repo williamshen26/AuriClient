@@ -19,7 +19,7 @@ from ..const import (
     ATTR_TIMER_ID,
     DOMAIN,
 )
-from ..timer_entity import AuriTimerEntity, generate_timer_id
+from ..entities.timer import AuriTimerEntity, generate_timer_id
 
 
 def _normalize_duration_to_seconds(value) -> int:
