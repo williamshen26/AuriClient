@@ -1,6 +1,7 @@
 """Local execution orchestrator for tool calls."""
 from __future__ import annotations
 
+from datetime import date, datetime, time
 import json
 from typing import Any, Awaitable, Callable
 
@@ -69,8 +70,12 @@ class LocalToolExecutor:
             "turn_off_media_player": self.media_player.turn_off_media_player,
             "media_player_play": self.media_player.media_player_play,
             "media_player_pause": self.media_player.media_player_pause,
+            "play_next_track": self.media_player.play_next_track,
+            "play_previous_track": self.media_player.play_previous_track,
+            "set_media_shuffle": self.media_player.set_media_shuffle,
             "adjust_media_volume": self.media_player.adjust_media_volume,
             "select_media_source": self.media_player.select_media_source,
+            "search_and_play_music": self.media_player.search_and_play_music,
             "set_media_mute": self.media_player.set_media_mute,
             "get_forecasts": self.weather.get_forecasts,
             "update_user_preferences": self.user_preferences.update_user_preferences,
@@ -124,6 +129,8 @@ class LocalToolExecutor:
                 f"Unsupported tool: {function_name}, consider update your Auri client to the latest version that supports this tool."
             )
 
+        result = _to_json_safe(result)
+
         return {
             "tool_call_id": tool_call.get("id"),
             "name": function_name,
@@ -154,3 +161,23 @@ class LocalToolExecutor:
             "prompt": skill.get("prompt", ""),
             "tools": skill.get("tools", []),
         }
+
+
+def _to_json_safe(value: Any) -> Any:
+    """Recursively normalize tool results into JSON-serializable values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {
+            str(key): _to_json_safe(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(item) for item in value]
+
+    return str(value)
