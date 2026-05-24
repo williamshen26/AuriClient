@@ -28,9 +28,16 @@ ATTR_REMAINING = "remaining"
 ATTR_TIMER_ID = "timer_id"
 ATTR_ENTITY_ID = "entity_id"
 ATTR_SATELLITE_SPEAKER = "satellite_speaker"
+ATTR_NOTE_ID = "note_id"
+ATTR_TITLE = "title"
+ATTR_MARKDOWN = "markdown"
+STICKY_NOTE_UNIQUE_ID_PREFIX = "auri_sticky_note_"
 
 SERVICE_START_AURI_TIMER = "start_auri_timer"
 SERVICE_GET_AURI_TIMERS = "get_auri_timers"
+SERVICE_CREATE_AURI_STICKY_NOTE = "create_auri_sticky_note"
+SERVICE_DELETE_AURI_STICKY_NOTE = "delete_auri_sticky_note"
+SERVICE_GET_AURI_STICKY_NOTES = "get_auri_sticky_notes"
 
 EVENT_AURI_TIMER_FINISHED = f"{DOMAIN}.auri_timer_finished"
 EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"
@@ -40,5 +47,6 @@ DATA_FRONTEND_CLIENT = "frontend_client"
 
 ROOT_RUNTIME = {
     "timers": {},
+    "sticky_notes": {},
     "async_add_entities": None,
 }

@@ -16,6 +16,7 @@ from .custom_services.light_services import LightToolService
 from .custom_services.media_player_services import MediaPlayerToolService
 from .custom_services.person_services import PersonToolService
 from .custom_services.shopping_list_services import ShoppingListToolService
+from .custom_services.sticky_note_services import StickyNoteToolService
 from .custom_services.timer_services import TimerToolService
 from .custom_services.user_preferences_services import UserPreferencesToolService
 from .custom_services.weather_services import WeatherToolService
@@ -41,6 +42,7 @@ class LocalToolExecutor:
         self.person = PersonToolService(hass)
         self.user_preferences = UserPreferencesToolService(hass)
         self.shopping_list = ShoppingListToolService(hass)
+        self.sticky_note = StickyNoteToolService(hass)
         self.automation = AutomationToolService(hass)
         self.timer = TimerToolService(hass)
         self.calendar = CalendarToolService(hass)
@@ -86,6 +88,7 @@ class LocalToolExecutor:
             "add_shopping_list_item": self.shopping_list.add_shopping_list_item,
             "mark_shopping_list_item_complete": self.shopping_list.mark_shopping_list_item_complete,
             "remove_completed_shopping_list_item": self.shopping_list.remove_completed_shopping_list_item,
+            "create_sticky_note": self.sticky_note.create_sticky_note,
             "add_automation": self.automation.add_automation,
             "update_automation": self.automation.update_automation,
             "remove_automation": self.automation.remove_automation,

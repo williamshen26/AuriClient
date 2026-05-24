@@ -45,13 +45,10 @@ def _normalize_duration_to_seconds(value) -> int:
 
 def _get_runtime(hass: HomeAssistant) -> dict:
     """Return the integration runtime state bucket."""
-    return hass.data.setdefault(DOMAIN, {}).setdefault(
-        "runtime",
-        {
-            "timers": {},
-            "async_add_entities": None,
-        },
-    )
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})
+    runtime.setdefault("timers", {})
+    runtime.setdefault("async_add_entities", None)
+    return runtime
 
 
 async def start_auri_timer_native(

@@ -18,6 +18,7 @@ from .cache import (
     upsert_media_player_sources,
 )
 from .const import DATA_AGENT, DOMAIN, ROOT_RUNTIME
+from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS = ["sensor"]
@@ -27,6 +28,8 @@ MEDIA_PLAYER_SOURCES_STORAGE_KEY = f"{DOMAIN}_media_player_sources"
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the thin frontend integration."""
+    await async_setup_services(hass, config)
+
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", dict(ROOT_RUNTIME))
 
     store: Store[dict[str, list[str]]] = runtime.setdefault(
