@@ -368,6 +368,22 @@ def transform_auri_entity_id_to_ha_entity_id(entity_id: str) -> str:
     return entity_id
 
 
+def get_house_layout(hass: HomeAssistant) -> dict[str, list[str]]:
+    """Return a map of floor_id to area names, with unassigned areas in no_floor."""
+    area_registry = ar.async_get(hass)
+    layout: dict[str, list[str]] = {}
+
+    for area in area_registry.areas.values():
+        floor_key = str(area.floor_id) if area.floor_id else "no_floor"
+        area_name = area.name or area.id
+        layout.setdefault(floor_key, []).append(area_name)
+
+    for areas in layout.values():
+        areas.sort(key=str.casefold)
+
+    return dict(sorted(layout.items(), key=lambda item: (item[0] == "no_floor", item[0])))
+
+
 
 def get_exposed_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
     """Return the exposed entity snapshot sent to SaaS."""

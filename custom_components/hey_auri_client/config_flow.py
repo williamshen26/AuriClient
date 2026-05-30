@@ -10,10 +10,21 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
 
 from .const import (
     API_ENDPOINT,
+    CONF_BOOKING_ID,
+    CONF_CHECK_IN,
+    CONF_CHECK_IN_INSTRUCTION,
+    CONF_CHECK_OUT,
+    CONF_CHECK_OUT_INSTRUCTION,
     CONF_CLIENT_ID,
+    CONF_GUEST_COUNT,
+    CONF_GUEST_NAME,
+    CONF_HOST_CONTACT_INSTRUCTION,
+    CONF_HOUSE_RULES,
+    CONF_LOCAL_RECOMMENDATIONS,
     CONF_METRICS_DATABASE,
     CONF_METRICS_ENABLED,
     CONF_METRICS_HOST,
@@ -22,8 +33,13 @@ from .const import (
     CONF_METRICS_PORT,
     CONF_METRICS_SSL,
     CONF_METRICS_USERNAME,
+    CONF_NOTES,
+    CONF_PARKING_INSTRUCTION,
+    CONF_PROPERTY_KNOWLEDGE,
     CONF_REQUEST_TIMEOUT,
     CONF_SHARED_SECRET,
+    CONF_TRASH_DISPOSAL_INSTRUCTION,
+    CONF_WIFI_INSTRUCTION,
     DEFAULT_METRICS_MEASUREMENT,
     DEFAULT_METRICS_PORT,
     DEFAULT_NAME,
@@ -109,9 +125,20 @@ class OptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage integration options."""
+        """Show options group menu."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["general", "guest", "metrics"],
+        )
+
+    async def async_step_general(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage general options."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            data = dict(self.config_entry.options)
+            data.update(user_input)
+            return self.async_create_entry(title="", data=data)
 
         options = self.config_entry.options
 
@@ -121,6 +148,154 @@ class OptionsFlow(config_entries.OptionsFlow):
                     CONF_REQUEST_TIMEOUT,
                     default=int(options.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1, max=300)),
+            }
+        )
+
+        return self.async_show_form(step_id="general", data_schema=schema)
+
+    async def async_step_guest(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage guest options."""
+        if user_input is not None:
+            data = dict(self.config_entry.options)
+            data.update(user_input)
+            return self.async_create_entry(title="", data=data)
+
+        options = self.config_entry.options
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_BOOKING_ID,
+                    default=str(options.get(CONF_BOOKING_ID, "")),
+                ): str,
+                vol.Optional(
+                    CONF_GUEST_NAME,
+                    default=str(options.get(CONF_GUEST_NAME, "")),
+                ): str,
+                vol.Optional(
+                    CONF_CHECK_IN,
+                    default=str(options.get(CONF_CHECK_IN, "")),
+                ): selector.DateTimeSelector(),
+                vol.Optional(
+                    CONF_CHECK_OUT,
+                    default=str(options.get(CONF_CHECK_OUT, "")),
+                ): selector.DateTimeSelector(),
+                vol.Optional(
+                    CONF_GUEST_COUNT,
+                    default=int(options.get(CONF_GUEST_COUNT, 4)),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1,
+                        max=20,
+                        step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_NOTES,
+                    default=str(options.get(CONF_NOTES, "")),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_CHECK_IN_INSTRUCTION,
+                    default=str(
+                        options.get(
+                            CONF_CHECK_IN_INSTRUCTION,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_CHECK_OUT_INSTRUCTION,
+                    default=str(
+                        options.get(
+                            CONF_CHECK_OUT_INSTRUCTION,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_WIFI_INSTRUCTION,
+                    default=str(
+                        options.get(
+                            CONF_WIFI_INSTRUCTION,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_PARKING_INSTRUCTION,
+                    default=str(
+                        options.get(
+                            CONF_PARKING_INSTRUCTION,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_HOUSE_RULES,
+                    default=str(
+                        options.get(
+                            CONF_HOUSE_RULES,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_TRASH_DISPOSAL_INSTRUCTION,
+                    default=str(
+                        options.get(
+                            CONF_TRASH_DISPOSAL_INSTRUCTION,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_HOST_CONTACT_INSTRUCTION,
+                    default=str(
+                        options.get(
+                            CONF_HOST_CONTACT_INSTRUCTION,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_PROPERTY_KNOWLEDGE,
+                    default=str(
+                        options.get(
+                            CONF_PROPERTY_KNOWLEDGE,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_LOCAL_RECOMMENDATIONS,
+                    default=str(
+                        options.get(
+                            CONF_LOCAL_RECOMMENDATIONS,
+                            "",
+                        )
+                    ),
+                ): selector.TemplateSelector(),
+            }
+        )
+
+        return self.async_show_form(step_id="guest", data_schema=schema)
+
+    async def async_step_metrics(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage metrics options."""
+        if user_input is not None:
+            data = dict(self.config_entry.options)
+            data.update(user_input)
+            return self.async_create_entry(title="", data=data)
+
+        options = self.config_entry.options
+
+        schema = vol.Schema(
+            {
                 vol.Optional(
                     CONF_METRICS_ENABLED,
                     default=bool(options.get(CONF_METRICS_ENABLED, False)),
@@ -158,4 +333,4 @@ class OptionsFlow(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="metrics", data_schema=schema)

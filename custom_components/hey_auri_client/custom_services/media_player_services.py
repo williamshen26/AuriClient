@@ -288,7 +288,7 @@ class MediaPlayerToolService:
                     )
                 }
 
-            max_wait_cycles = 20
+            max_wait_cycles = 25
             for _ in range(max_wait_cycles):
                 await asyncio.sleep(0.5)
                 state = self.hass.states.get(entity_id)

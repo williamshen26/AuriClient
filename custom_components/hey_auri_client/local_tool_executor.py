@@ -12,6 +12,7 @@ from .custom_services.calendar_services import CalendarToolService
 from .custom_services.climate_services import ClimateToolService
 from .custom_services.cover_services import CoverToolService
 from .custom_services.entity_services import EntityToolService
+from .custom_services.guest_services import GuestToolService
 from .custom_services.light_services import LightToolService
 from .custom_services.media_player_services import MediaPlayerToolService
 from .custom_services.person_services import PersonToolService
@@ -41,6 +42,7 @@ class LocalToolExecutor:
         self.weather = WeatherToolService(hass)
         self.person = PersonToolService(hass)
         self.user_preferences = UserPreferencesToolService(hass)
+        self.guest = GuestToolService(hass)
         self.shopping_list = ShoppingListToolService(hass)
         self.sticky_note = StickyNoteToolService(hass)
         self.automation = AutomationToolService(hass)
@@ -84,6 +86,18 @@ class LocalToolExecutor:
             "get_user_preferences": self.user_preferences.get_user_preferences,
             "get_preference_keys": self.user_preferences.get_preference_keys,
             "get_preference_by_key": self.user_preferences.get_preference_by_key,
+            "get_guest_data": self.guest.get_guest_data,
+            "house_layout": self.guest.house_layout,
+            "check_in_instruction": self.guest.check_in_instruction,
+            "check_out_instruction": self.guest.check_out_instruction,
+            "wifi_instruction": self.guest.wifi_instruction,
+            "parking_instruction": self.guest.parking_instruction,
+            "house_rules": self.guest.house_rules,
+            "trash_disposal_instruction": self.guest.trash_disposal_instruction,
+            "host_contact_instruction": self.guest.host_contact_instruction,
+            "send_host_notification": self.guest.send_host_notification,
+            "property_knowledge": self.guest.property_knowledge,
+            "local_recommendations": self.guest.local_recommendations,
             "get_shopping_list": self.shopping_list.get_shopping_list,
             "add_shopping_list_item": self.shopping_list.add_shopping_list_item,
             "mark_shopping_list_item_complete": self.shopping_list.mark_shopping_list_item_complete,
