@@ -293,8 +293,8 @@ async def build_context_snapshot(
         "exposed_entities": get_exposed_entities(hass),
         "user_preference_keys": user_preferences,
         "home_location": {
-            "latitude": round(float(hass.config.latitude), 1),
-            "longitude": round(float(hass.config.longitude), 1),
+            "latitude": float(hass.config.latitude),
+            "longitude": float(hass.config.longitude),
             "time_zone": hass.config.time_zone,
             "country": hass.config.country,
         },
