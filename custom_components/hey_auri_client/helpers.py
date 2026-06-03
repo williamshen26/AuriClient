@@ -62,17 +62,26 @@ class SaaSClient:
         self.shared_secret = shared_secret
         self.metrics_service = metrics_service
 
-    def _build_signed_headers(self, path: str, body: str) -> dict[str, str]:
+    def _build_signed_headers(
+        self,
+        path: str,
+        body: str | bytes,
+        *,
+        content_type: str = "application/json",
+    ) -> dict[str, str]:
         timestamp = str(int(datetime.now(UTC).timestamp()))
         nonce = secrets.token_hex(16)
-        signing_payload = "\n".join(["POST", path, timestamp, nonce, body])
+        if isinstance(body, bytes):
+            body_to_sign = body.decode("latin-1")
+        else:
+            body_to_sign = body
         signature = hmac.new(
             self.shared_secret.encode("utf-8"),
-            signing_payload.encode("utf-8"),
+            "\n".join(["POST", path, timestamp, nonce, body_to_sign]).encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
         return {
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "X-Client-Id": self.client_id,
             "X-Timestamp": timestamp,
             "X-Nonce": nonce,
@@ -80,13 +89,26 @@ class SaaSClient:
         }
 
     async def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        return await self.post_raw(
+            path,
+            body=body,
+            content_type="application/json",
+        )
+
+    async def post_raw(
+        self,
+        path: str,
+        *,
+        body: str | bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
         started = perf_counter()
         success = False
         status_code: int | None = None
         error_type: str | None = None
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        headers = self._build_signed_headers(path, body)
+        headers = self._build_signed_headers(path, body, content_type=content_type)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
@@ -126,6 +148,27 @@ class SaaSClient:
                 status_code=status_code,
                 error_type=error_type,
             )
+
+    async def post_multipart_audio(
+        self,
+        path: str,
+        *,
+        fields: dict[str, str],
+        audio: bytes,
+        filename: str,
+        audio_content_type: str,
+    ) -> dict[str, Any]:
+        body, content_header = _build_multipart_body(
+            fields,
+            audio=audio,
+            filename=filename,
+            audio_content_type=audio_content_type,
+        )
+        return await self.post_raw(
+            path,
+            body=body,
+            content_type=content_header,
+        )
 
     async def _record_request_latency(
         self,
@@ -533,3 +576,42 @@ def _convert_temperature(value: float, *, from_unit: str, to_unit: str) -> float
     if from_unit == "C" and to_unit == "F":
         return round((value * 9.0 / 5.0) + 32.0, 2)
     return value
+
+
+def _build_multipart_body(
+    fields: dict[str, str],
+    *,
+    audio: bytes,
+    filename: str,
+    audio_content_type: str,
+) -> tuple[bytes, str]:
+    """Build a deterministic multipart payload for body signing."""
+    boundary = f"auri-{secrets.token_hex(12)}"
+    boundary_bytes = boundary.encode("utf-8")
+
+    chunks: list[bytes] = []
+    for key, value in fields.items():
+        chunks.extend(
+            [
+                b"--" + boundary_bytes + b"\r\n",
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
+                str(value).encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+
+    chunks.extend(
+        [
+            b"--" + boundary_bytes + b"\r\n",
+            (
+                f'Content-Disposition: form-data; name="audio"; filename="{filename}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {audio_content_type}\r\n\r\n".encode("utf-8"),
+            audio,
+            b"\r\n",
+            b"--" + boundary_bytes + b"--\r\n",
+        ]
+    )
+
+    body = b"".join(chunks)
+    return body, f"multipart/form-data; boundary={boundary}"

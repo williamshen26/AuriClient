@@ -37,6 +37,7 @@ from .const import (
     CONF_PARKING_INSTRUCTION,
     CONF_PROPERTY_KNOWLEDGE,
     CONF_REQUEST_TIMEOUT,
+    CONF_STT_LANGUAGE,
     CONF_SHARED_SECRET,
     CONF_TRASH_DISPOSAL_INSTRUCTION,
     CONF_WIFI_INSTRUCTION,
@@ -44,6 +45,7 @@ from .const import (
     DEFAULT_METRICS_PORT,
     DEFAULT_NAME,
     DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_STT_LANGUAGE,
     DOMAIN,
 )
 
@@ -148,6 +150,10 @@ class OptionsFlow(config_entries.OptionsFlow):
                     CONF_REQUEST_TIMEOUT,
                     default=int(options.get(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1, max=300)),
+                vol.Optional(
+                    CONF_STT_LANGUAGE,
+                    default=str(options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)),
+                ): str,
             }
         )
 

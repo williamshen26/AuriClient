@@ -30,7 +30,8 @@
         "title": "General settings",
         "description": "Configure core integration behavior.",
         "data": {
-          "request_timeout": "Request timeout (seconds)"
+          "request_timeout": "Request timeout (seconds)",
+          "stt_language": "STT default language"
         }
       },
       "guest": {
