@@ -57,6 +57,7 @@ class LocalToolExecutor:
             "turn_on_light": self.light.turn_on_light,
             "turn_off_light": self.light.turn_off_light,
             "adjust_light_brightness": self.light.adjust_light_brightness,
+            "adjust_light_color": self.light.adjust_light_color,
             "open_cover": self.cover.open_cover,
             "close_cover": self.cover.close_cover,
             "set_cover_position": self.cover.set_cover_position,
