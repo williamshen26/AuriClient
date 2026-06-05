@@ -19,6 +19,7 @@ from .const import (
     DEFAULT_STT_PIPELINE_ID,
 )
 from .helpers import SaaSClient, get_timeout_seconds
+from .metric_service import RequestLatencyMetricService
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,12 +43,14 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.entry = entry
         self._attr_unique_id = f"{entry.entry_id}_stt"
+        request_latency_metrics = RequestLatencyMetricService.from_options(hass, entry)
         self._client = SaaSClient(
             hass,
             endpoint=API_ENDPOINT,
             timeout=get_timeout_seconds(entry.options),
             client_id=str(entry.data[CONF_CLIENT_ID]).strip(),
             shared_secret=str(entry.data[CONF_SHARED_SECRET]),
+            metrics_service=request_latency_metrics,
         )
 
     @property

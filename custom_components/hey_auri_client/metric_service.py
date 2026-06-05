@@ -101,6 +101,7 @@ class RequestLatencyMetricService:
         *,
         client_id: str,
         path: str,
+        measurement_key: str,
         latency_ms: int,
         success: bool,
         status_code: int | None,
@@ -114,6 +115,7 @@ class RequestLatencyMetricService:
             self._write_latency_point,
             client_id,
             path,
+            measurement_key,
             latency_ms,
             success,
             status_code,
@@ -124,6 +126,7 @@ class RequestLatencyMetricService:
         self,
         client_id: str,
         path: str,
+        measurement_key: str,
         latency_ms: int,
         success: bool,
         status_code: int | None,
@@ -136,6 +139,7 @@ class RequestLatencyMetricService:
             "tags": {
                 "client_id": client_id,
                 "path": path,
+                "measurement_key": measurement_key,
             },
             "fields": {
                 "latency_ms": int(latency_ms),

@@ -46,6 +46,9 @@ class SaaSTurnResponse:
 class SaaSClient:
     """HTTP client for the SaaS conversation backend."""
 
+    _LATENCY_MEASUREMENT_KEY_DEFAULT = "default"
+    _LATENCY_MEASUREMENT_KEY_AUDIO = "audio"
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -94,6 +97,7 @@ class SaaSClient:
             path,
             body=body,
             content_type="application/json",
+            measurement_key=self._LATENCY_MEASUREMENT_KEY_DEFAULT,
         )
 
     async def post_raw(
@@ -102,6 +106,7 @@ class SaaSClient:
         *,
         body: str | bytes,
         content_type: str,
+        measurement_key: str = _LATENCY_MEASUREMENT_KEY_DEFAULT,
     ) -> dict[str, Any]:
         started = perf_counter()
         success = False
@@ -143,6 +148,7 @@ class SaaSClient:
             latency_ms = max(int((perf_counter() - started) * 1000), 0)
             await self._record_request_latency(
                 path=path,
+                measurement_key=measurement_key,
                 latency_ms=latency_ms,
                 success=success,
                 status_code=status_code,
@@ -168,12 +174,14 @@ class SaaSClient:
             path,
             body=body,
             content_type=content_header,
+            measurement_key=self._LATENCY_MEASUREMENT_KEY_AUDIO,
         )
 
     async def _record_request_latency(
         self,
         *,
         path: str,
+        measurement_key: str,
         latency_ms: int,
         success: bool,
         status_code: int | None,
@@ -186,6 +194,7 @@ class SaaSClient:
         await self.metrics_service.async_record_request_latency(
             client_id=self.client_id,
             path=path,
+            measurement_key=measurement_key,
             latency_ms=latency_ms,
             success=success,
             status_code=status_code,
