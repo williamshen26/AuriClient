@@ -24,12 +24,12 @@ from .const import (
 from .cache import reset_processed_entities
 from .exceptions import SaaSRequestError, ToolExecutionError
 from .helpers import (
-    SaaSClient,
     build_context_snapshot,
     get_timeout_seconds,
 )
 from .local_tool_executor import LocalToolExecutor
 from .metric_service import RequestLatencyMetricService
+from .saas_client import SaaSClient
 
 _LOGGER = logging.getLogger(__name__)
 

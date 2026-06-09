@@ -28,6 +28,7 @@ CONF_LOCAL_RECOMMENDATIONS = "local_recommendations"
 DEFAULT_REQUEST_TIMEOUT = 30
 DEFAULT_STT_PIPELINE_ID = "auri-cloud-voice"
 DEFAULT_STT_LANGUAGE = "en"
+DEFAULT_REALTIME_WS_ENDPOINT = "wss://realtime.hey-auri.com/ws/realtime"
 
 CONF_METRICS_ENABLED = "metrics_enabled"
 CONF_METRICS_HOST = "metrics_host"

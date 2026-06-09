@@ -15,11 +15,13 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_SHARED_SECRET,
     CONF_STT_LANGUAGE,
+    DEFAULT_REALTIME_WS_ENDPOINT,
     DEFAULT_STT_LANGUAGE,
     DEFAULT_STT_PIPELINE_ID,
 )
-from .helpers import SaaSClient, get_timeout_seconds
+from .helpers import get_timeout_seconds
 from .metric_service import RequestLatencyMetricService
+from .saas_client import SaaSClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,11 +102,58 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             metadata.channel,
         )
 
-        audio_chunks = bytearray()
-        async for chunk in stream:
-            if not chunk:
-                break
-            audio_chunks.extend(chunk)
+        configured_language = str(
+            self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
+        ).strip()
+        language_source = "metadata" if metadata.language else "configured_default"
+        language = (metadata.language or configured_language or DEFAULT_STT_LANGUAGE).strip()
+        _LOGGER.info(
+            "Auri STT effective language=%s source=%s realtime_endpoint=%s",
+            language,
+            language_source,
+            DEFAULT_REALTIME_WS_ENDPOINT,
+        )
+
+        buffered_audio = bytearray()
+        realtime_failed = False
+
+        try:
+            streaming_result = await self._client.stream_realtime_transcription(
+                endpoint=DEFAULT_REALTIME_WS_ENDPOINT,
+                stream=stream,
+                language=language,
+            )
+            buffered_audio.extend(streaming_result.buffered_audio)
+            if streaming_result.transcript:
+                return stt.SpeechResult(streaming_result.transcript, stt.SpeechResultState.SUCCESS)
+            realtime_failed = True
+            _LOGGER.warning(
+                "Auri STT realtime streaming produced no transcript, falling back to multipart upload: %s",
+                streaming_result.error or "no transcript",
+            )
+        except Exception as err:
+            realtime_failed = True
+            _LOGGER.warning(
+                "Auri STT realtime streaming failed, falling back to multipart upload: %s",
+                err,
+            )
+
+        # If realtime failed mid-stream, continue draining remaining chunks so
+        # fallback has the full utterance and the Assist pipeline can finish cleanly.
+        if realtime_failed:
+            async for chunk in stream:
+                if not chunk:
+                    break
+                buffered_audio.extend(chunk)
+
+        if buffered_audio:
+            audio_chunks = buffered_audio
+        else:
+            audio_chunks = bytearray()
+            async for chunk in stream:
+                if not chunk:
+                    break
+                audio_chunks.extend(chunk)
 
         if not audio_chunks:
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
@@ -113,11 +162,6 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             metadata,
             bytes(audio_chunks),
         )
-
-        configured_language = str(
-            self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
-        ).strip()
-        language = (metadata.language or configured_language or DEFAULT_STT_LANGUAGE).strip()
 
         try:
             response = await self._client.post_multipart_audio(
@@ -139,7 +183,6 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
 
         return stt.SpeechResult(transcript, stt.SpeechResultState.SUCCESS)
-
 
 def _prepare_audio_for_upload(
     metadata: stt.SpeechMetadata,

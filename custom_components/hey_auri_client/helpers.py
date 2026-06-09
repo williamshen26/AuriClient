@@ -1,18 +1,9 @@
 """Helpers for the thin frontend integration prototype."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 import difflib
-import hashlib
-import hmac
-import json
-import logging
-from time import perf_counter
-import secrets
 from typing import Any
-
-import aiohttp
 
 from homeassistant.components import conversation
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
@@ -26,188 +17,7 @@ from .const import (
     DEFAULT_REQUEST_TIMEOUT,
 )
 from .custom_services.user_preferences_services import get_preference_keys
-from .exceptions import SaaSRequestError, ToolExecutionError
-from .metric_service import RequestLatencyMetricService
-
-_LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class SaaSTurnResponse:
-    """Normalized SaaS response for one step in the loop."""
-
-    response_type: str
-    conversation_id: str
-    content: str | None = None
-    turn_id: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
-
-
-class SaaSClient:
-    """HTTP client for the SaaS conversation backend."""
-
-    _LATENCY_MEASUREMENT_KEY_DEFAULT = "default"
-    _LATENCY_MEASUREMENT_KEY_AUDIO = "audio"
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        endpoint: str,
-        timeout: int,
-        client_id: str,
-        shared_secret: str,
-        metrics_service: RequestLatencyMetricService | None = None,
-    ) -> None:
-        self.hass = hass
-        self.endpoint = endpoint.rstrip("/")
-        self.timeout = timeout
-        self.client_id = client_id
-        self.shared_secret = shared_secret
-        self.metrics_service = metrics_service
-
-    def _build_signed_headers(
-        self,
-        path: str,
-        body: str | bytes,
-        *,
-        content_type: str = "application/json",
-    ) -> dict[str, str]:
-        timestamp = str(int(datetime.now(UTC).timestamp()))
-        nonce = secrets.token_hex(16)
-        if isinstance(body, bytes):
-            body_to_sign = body.decode("latin-1")
-        else:
-            body_to_sign = body
-        signature = hmac.new(
-            self.shared_secret.encode("utf-8"),
-            "\n".join(["POST", path, timestamp, nonce, body_to_sign]).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return {
-            "Content-Type": content_type,
-            "X-Client-Id": self.client_id,
-            "X-Timestamp": timestamp,
-            "X-Nonce": nonce,
-            "X-Signature": signature,
-        }
-
-    async def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        return await self.post_raw(
-            path,
-            body=body,
-            content_type="application/json",
-            measurement_key=self._LATENCY_MEASUREMENT_KEY_DEFAULT,
-        )
-
-    async def post_raw(
-        self,
-        path: str,
-        *,
-        body: str | bytes,
-        content_type: str,
-        measurement_key: str = _LATENCY_MEASUREMENT_KEY_DEFAULT,
-    ) -> dict[str, Any]:
-        started = perf_counter()
-        success = False
-        status_code: int | None = None
-        error_type: str | None = None
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
-        headers = self._build_signed_headers(path, body, content_type=content_type)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{self.endpoint}{path}",
-                    data=body,
-                    headers=headers,
-                ) as response:
-                    status_code = response.status
-                    body = await response.text()
-                    if response.status >= 400:
-                        error_type = "http_error"
-                        raise SaaSRequestError(
-                            f"SaaS request failed: {response.status} {body}",
-                            status_code=response.status,
-                            response_body=body,
-                        )
-                    try:
-                        parsed = json.loads(body)
-                        success = True
-                        return parsed
-                    except json.JSONDecodeError as err:
-                        error_type = "json_decode_error"
-                        raise SaaSRequestError(
-                            f"Invalid JSON response: {body}",
-                            response_body=body,
-                        ) from err
-        except Exception as err:
-            if error_type is None:
-                error_type = type(err).__name__
-            raise
-        finally:
-            latency_ms = max(int((perf_counter() - started) * 1000), 0)
-            await self._record_request_latency(
-                path=path,
-                measurement_key=measurement_key,
-                latency_ms=latency_ms,
-                success=success,
-                status_code=status_code,
-                error_type=error_type,
-            )
-
-    async def post_multipart_audio(
-        self,
-        path: str,
-        *,
-        fields: dict[str, str],
-        audio: bytes,
-        filename: str,
-        audio_content_type: str,
-    ) -> dict[str, Any]:
-        body, content_header = _build_multipart_body(
-            fields,
-            audio=audio,
-            filename=filename,
-            audio_content_type=audio_content_type,
-        )
-        return await self.post_raw(
-            path,
-            body=body,
-            content_type=content_header,
-            measurement_key=self._LATENCY_MEASUREMENT_KEY_AUDIO,
-        )
-
-    async def _record_request_latency(
-        self,
-        *,
-        path: str,
-        measurement_key: str,
-        latency_ms: int,
-        success: bool,
-        status_code: int | None,
-        error_type: str | None,
-    ) -> None:
-        """Emit one request latency datapoint if metrics are enabled."""
-        if self.metrics_service is None or not self.metrics_service.enabled:
-            return
-
-        await self.metrics_service.async_record_request_latency(
-            client_id=self.client_id,
-            path=path,
-            measurement_key=measurement_key,
-            latency_ms=latency_ms,
-            success=success,
-            status_code=status_code,
-            error_type=error_type,
-        )
-
-    async def send_user_turn(self, payload: dict[str, Any]) -> SaaSTurnResponse:
-        response = await self.post_json("/conversation", payload)
-        return normalize_turn_response(response)
-
-    async def send_tool_results(self, payload: dict[str, Any]) -> SaaSTurnResponse:
-        response = await self.post_json("/conversation", payload)
-        return normalize_turn_response(response)
+from .exceptions import ToolExecutionError
 
 
 def resolve_entity_id_no_fallback(
@@ -306,21 +116,6 @@ def get_retry_entities(
     ]
 
     return same_area_entities + different_area_same_floor_entities + other_area_entities
-
-
-def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
-    """Normalize the SaaS contract into a typed object."""
-    response_type = response.get("type")
-    if response_type not in {"final", "tool_calls"}:
-        raise SaaSRequestError(f"Unknown response type: {response}")
-
-    return SaaSTurnResponse(
-        response_type=response_type,
-        conversation_id=response["conversation_id"],
-        content=response.get("content"),
-        turn_id=response.get("turn_id"),
-        tool_calls=response.get("tool_calls"),
-    )
 
 
 async def build_context_snapshot(
@@ -587,40 +382,3 @@ def _convert_temperature(value: float, *, from_unit: str, to_unit: str) -> float
     return value
 
 
-def _build_multipart_body(
-    fields: dict[str, str],
-    *,
-    audio: bytes,
-    filename: str,
-    audio_content_type: str,
-) -> tuple[bytes, str]:
-    """Build a deterministic multipart payload for body signing."""
-    boundary = f"auri-{secrets.token_hex(12)}"
-    boundary_bytes = boundary.encode("utf-8")
-
-    chunks: list[bytes] = []
-    for key, value in fields.items():
-        chunks.extend(
-            [
-                b"--" + boundary_bytes + b"\r\n",
-                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
-                str(value).encode("utf-8"),
-                b"\r\n",
-            ]
-        )
-
-    chunks.extend(
-        [
-            b"--" + boundary_bytes + b"\r\n",
-            (
-                f'Content-Disposition: form-data; name="audio"; filename="{filename}"\r\n'
-            ).encode("utf-8"),
-            f"Content-Type: {audio_content_type}\r\n\r\n".encode("utf-8"),
-            audio,
-            b"\r\n",
-            b"--" + boundary_bytes + b"--\r\n",
-        ]
-    )
-
-    body = b"".join(chunks)
-    return body, f"multipart/form-data; boundary={boundary}"
