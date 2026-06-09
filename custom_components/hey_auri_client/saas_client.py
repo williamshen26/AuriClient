@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable
+import audioop
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -203,6 +204,7 @@ class SaaSClient:
         wav_header_stripped = False
         header_processed = False
         header_probe = bytearray()
+        ratecv_state: tuple[int, ...] | None = None
         final_completed_transcript: str | None = None
         transcript_chunks: list[str] = []
         timeout = aiohttp.ClientTimeout(total=self.timeout)
@@ -253,8 +255,13 @@ class SaaSClient:
 
                         try:
                             if outbound_payload:
-                                await ws.send_bytes(outbound_payload)
-                                realtime_bytes_sent += len(outbound_payload)
+                                upsampled_payload, ratecv_state = _upsample_pcm16_mono_16k_to_24k(
+                                    outbound_payload,
+                                    ratecv_state,
+                                )
+                                if upsampled_payload:
+                                    await ws.send_bytes(upsampled_payload)
+                                    realtime_bytes_sent += len(upsampled_payload)
                         except ConnectionResetError as err:
                             raise ConnectionError(
                                 "Realtime websocket transport closed while sending audio chunk"
@@ -282,8 +289,13 @@ class SaaSClient:
                             probe_limit=0,
                         )
                         if pending_payload:
-                            await ws.send_bytes(pending_payload)
-                            realtime_bytes_sent += len(pending_payload)
+                            upsampled_payload, ratecv_state = _upsample_pcm16_mono_16k_to_24k(
+                                pending_payload,
+                                ratecv_state,
+                            )
+                            if upsampled_payload:
+                                await ws.send_bytes(upsampled_payload)
+                                realtime_bytes_sent += len(upsampled_payload)
 
                     if realtime_bytes_sent <= 0:
                         return SaaSRealtimeSTTResult(
@@ -293,7 +305,7 @@ class SaaSClient:
                         )
 
                     _LOGGER.info(
-                        "Auri realtime STT upstream prepared path=%s language=%s ha_chunks=%d ha_bytes=%d sent_bytes=%d first_chunk=%s wav_header_stripped=%s",
+                        "Auri realtime STT upstream prepared path=%s language=%s ha_chunks=%d ha_bytes=%d sent_bytes=%d first_chunk=%s wav_header_stripped=%s upsampled_to_hz=24000",
                         path,
                         language,
                         ha_chunk_count,
@@ -372,7 +384,7 @@ class SaaSClient:
                     0,
                 )
             _LOGGER.info(
-                "Auri realtime STT stream complete path=%s success=%s ha_chunks=%d ha_bytes=%d sent_bytes=%d post_speech_ms=%s wav_header_stripped=%s",
+                "Auri realtime STT stream complete path=%s success=%s ha_chunks=%d ha_bytes=%d sent_bytes=%d post_speech_ms=%s wav_header_stripped=%s upsampled_to_hz=24000",
                 path,
                 success,
                 ha_chunk_count,
@@ -582,3 +594,14 @@ def _strip_wav_header_if_present(audio: bytes) -> bytes:
             return audio[44:]
         return b""
     return audio
+
+
+def _upsample_pcm16_mono_16k_to_24k(
+    chunk: bytes,
+    state: tuple[int, ...] | None,
+) -> tuple[bytes, tuple[int, ...] | None]:
+    """Upsample signed 16-bit mono PCM from 16kHz to 24kHz."""
+    if not chunk:
+        return b"", state
+    converted, next_state = audioop.ratecv(chunk, 2, 1, 16000, 24000, state)
+    return converted, next_state
