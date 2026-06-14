@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable
+import asyncio
 import audioop
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -206,6 +207,7 @@ class SaaSClient:
         header_probe = bytearray()
         ratecv_state: tuple[int, ...] | None = None
         final_completed_transcript: str | None = None
+        completed_transcripts: list[str] = []
         transcript_chunks: list[str] = []
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         path = _extract_path_from_url(endpoint)
@@ -322,9 +324,33 @@ class SaaSClient:
 
                     await ws.send_json({"type": "audio.end"})
                     post_speech_started = perf_counter()
+                    idle_timeout_seconds = 0.3
+                    max_wait_seconds = 1.5
+                    last_transcription_event_at = post_speech_started
+                    saw_transcription_event = False
 
                     while True:
-                        message = await ws.receive()
+                        if post_speech_started is None:
+                            remaining_total = max_wait_seconds
+                        else:
+                            elapsed = perf_counter() - post_speech_started
+                            remaining_total = max_wait_seconds - elapsed
+
+                        if remaining_total <= 0:
+                            break
+
+                        receive_timeout = min(idle_timeout_seconds, remaining_total)
+
+                        try:
+                            message = await ws.receive(timeout=receive_timeout)
+                        except asyncio.TimeoutError:
+                            if (
+                                saw_transcription_event
+                                and perf_counter() - last_transcription_event_at >= idle_timeout_seconds
+                            ):
+                                break
+                            continue
+
                         if message.type == aiohttp.WSMsgType.TEXT:
                             done, delta_fragment, completed_text, error_message = _extract_realtime_transcript_fragment(
                                 message.data
@@ -333,28 +359,17 @@ class SaaSClient:
                                 raise ConnectionError(error_message)
                             if delta_fragment:
                                 transcript_chunks.append(delta_fragment)
+                                saw_transcription_event = True
+                                last_transcription_event_at = perf_counter()
+                            if completed_text:
+                                completed = completed_text.strip()
+                                if completed:
+                                    completed_transcripts.append(completed)
+                                    saw_transcription_event = True
+                                    last_transcription_event_at = perf_counter()
                             if done:
-                                if completed_text:
-                                    completed = completed_text.strip()
-                                    assembled = "".join(transcript_chunks).strip()
-                                    if assembled:
-                                        if completed == assembled:
-                                            final_completed_transcript = completed
-                                        elif completed in assembled:
-                                            final_completed_transcript = assembled
-                                        elif assembled in completed:
-                                            final_completed_transcript = completed
-                                        else:
-                                            # Completed event should win if it contains a final utterance.
-                                            final_completed_transcript = completed
-                                    else:
-                                        final_completed_transcript = completed
-
-                                if not transcript_chunks and not final_completed_transcript:
-                                    raise ConnectionError(
-                                        "Realtime stream finished without transcript fragments"
-                                    )
-                                break
+                                # Continue receiving until idle/max wait so paused speech segments can merge.
+                                continue
                             continue
 
                         if message.type in {
@@ -372,6 +387,9 @@ class SaaSClient:
                                     f"Realtime websocket closed without transcript (close_code={ws.close_code})"
                                 )
                             break
+
+            if completed_transcripts:
+                final_completed_transcript = " ".join(completed_transcripts).strip()
 
             transcript = (
                 (final_completed_transcript or "").strip()
@@ -547,10 +565,10 @@ def _extract_realtime_transcript_fragment(
                             if part_text:
                                 fragment = part_text
                                 break
-        return True, None, fragment or None, None
+        return False, None, fragment or None, None
 
     if event_type in {"response.done", "response.completed"}:
-        return False, None, None, None
+        return True, None, None, None
 
     return False, None, None, None
 
