@@ -189,7 +189,6 @@ class SaaSClient:
         stream: AsyncIterable[bytes],
     ) -> SaaSRealtimeSTTResult:
         """Stream STT audio to realtime gateway and return transcript + buffered audio."""
-        started = perf_counter()
         post_speech_started: float | None = None
         post_speech_latency_ms: int | None = None
         success = False
@@ -198,11 +197,7 @@ class SaaSClient:
 
         buffered_audio = bytearray()
         sent_any = False
-        ha_chunk_count = 0
-        ha_total_bytes = 0
         realtime_bytes_sent = 0
-        first_chunk_size: int | None = None
-        wav_header_stripped = False
         header_processed = False
         header_probe = bytearray()
         ratecv_state: tuple[int, ...] | None = None
@@ -234,10 +229,6 @@ class SaaSClient:
                                 f"Realtime websocket closed before audio finished (close_code={ws.close_code})"
                             )
 
-                        ha_chunk_count += 1
-                        ha_total_bytes += len(chunk)
-                        if first_chunk_size is None:
-                            first_chunk_size = len(chunk)
                         sent_any = True
                         buffered_audio.extend(chunk)
 
@@ -247,7 +238,7 @@ class SaaSClient:
                             (
                                 header_processed,
                                 outbound_payload,
-                                wav_header_stripped,
+                                _,
                             ) = _prepare_initial_realtime_audio_payload(
                                 bytes(header_probe),
                                 probe_limit=128,
@@ -285,7 +276,7 @@ class SaaSClient:
                         (
                             _,
                             pending_payload,
-                            wav_header_stripped,
+                            _,
                         ) = _prepare_initial_realtime_audio_payload(
                             bytes(header_probe),
                             probe_limit=0,
@@ -305,17 +296,6 @@ class SaaSClient:
                             buffered_audio=bytes(buffered_audio),
                             error="No realtime audio bytes were sent upstream",
                         )
-
-                    _LOGGER.info(
-                        "Auri realtime STT upstream prepared path=%s language=%s ha_chunks=%d ha_bytes=%d sent_bytes=%d first_chunk=%s wav_header_stripped=%s upsampled_to_hz=24000",
-                        path,
-                        language,
-                        ha_chunk_count,
-                        ha_total_bytes,
-                        realtime_bytes_sent,
-                        first_chunk_size,
-                        wav_header_stripped,
-                    )
 
                     if ws.closed or ws.close_code is not None:
                         raise ConnectionError(
@@ -401,16 +381,6 @@ class SaaSClient:
                     int((perf_counter() - post_speech_started) * 1000),
                     0,
                 )
-            _LOGGER.info(
-                "Auri realtime STT stream complete path=%s success=%s ha_chunks=%d ha_bytes=%d sent_bytes=%d post_speech_ms=%s wav_header_stripped=%s upsampled_to_hz=24000",
-                path,
-                success,
-                ha_chunk_count,
-                ha_total_bytes,
-                realtime_bytes_sent,
-                post_speech_latency_ms,
-                wav_header_stripped,
-            )
             return SaaSRealtimeSTTResult(
                 transcript=transcript or None,
                 buffered_audio=bytes(buffered_audio),

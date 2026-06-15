@@ -92,27 +92,10 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
         stream: AsyncIterable[bytes],
     ) -> stt.SpeechResult:
         """Upload audio stream to Auri cloud and return transcript."""
-        _LOGGER.info(
-            "Auri STT metadata language=%s format=%s codec=%s sample_rate=%s bit_rate=%s channel=%s",
-            metadata.language,
-            metadata.format,
-            metadata.codec,
-            metadata.sample_rate,
-            metadata.bit_rate,
-            metadata.channel,
-        )
-
         configured_language = str(
             self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
         ).strip()
-        language_source = "metadata" if metadata.language else "configured_default"
         language = (metadata.language or configured_language or DEFAULT_STT_LANGUAGE).strip()
-        _LOGGER.info(
-            "Auri STT effective language=%s source=%s realtime_endpoint=%s",
-            language,
-            language_source,
-            DEFAULT_REALTIME_WS_ENDPOINT,
-        )
 
         buffered_audio = bytearray()
         realtime_failed = False
