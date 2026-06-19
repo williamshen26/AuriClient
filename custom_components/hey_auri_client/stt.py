@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable
+import asyncio
 import io
 import logging
+from time import monotonic
+import uuid
 import wave
 
 from homeassistant.components import stt
@@ -13,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
+    DOMAIN,
     CONF_SHARED_SECRET,
     CONF_STT_LANGUAGE,
     DEFAULT_REALTIME_WS_ENDPOINT,
@@ -26,6 +30,34 @@ from .saas_client import SaaSClient
 _LOGGER = logging.getLogger(__name__)
 
 _TRANSCRIBE_PATH = "/voice/transcribe"
+_WAKE_WORD_COLLISION_WINDOW_SECONDS = 1.0
+
+
+class _WakeWordCollisionArbiter:
+    """Allow only the earliest STT session in a short collision window."""
+
+    def __init__(self, *, window_seconds: float) -> None:
+        self._window_seconds = window_seconds
+        self._lock = asyncio.Lock()
+        self._last_session_started_at: float | None = None
+        self._last_session_id: str | None = None
+
+    async def claim(self, session_id: str) -> tuple[bool, str | None, float | None]:
+        """Claim STT processing rights for this session."""
+        now = monotonic()
+        async with self._lock:
+            if self._last_session_started_at is None:
+                self._last_session_started_at = now
+                self._last_session_id = session_id
+                return True, None, None
+
+            delta = now - self._last_session_started_at
+            if delta <= self._window_seconds:
+                return False, self._last_session_id, delta
+
+            self._last_session_started_at = now
+            self._last_session_id = session_id
+            return True, None, None
 
 
 async def async_setup_entry(
@@ -45,6 +77,11 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.entry = entry
         self._attr_unique_id = f"{entry.entry_id}_stt"
+        runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})
+        self._collision_arbiter = runtime.setdefault(
+            "wake_word_collision_arbiter",
+            _WakeWordCollisionArbiter(window_seconds=_WAKE_WORD_COLLISION_WINDOW_SECONDS),
+        )
         request_latency_metrics = RequestLatencyMetricService.from_options(hass, entry)
         self._client = SaaSClient(
             hass,
@@ -92,6 +129,17 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
         stream: AsyncIterable[bytes],
     ) -> stt.SpeechResult:
         """Upload audio stream to Auri cloud and return transcript."""
+        session_id = str(uuid.uuid4())[:8]
+        is_primary, winner_session_id, delta_seconds = await self._collision_arbiter.claim(session_id)
+        if not is_primary:
+            _LOGGER.info(
+                "Suppressing duplicate STT session session_id=%s winner_session_id=%s delta_ms=%d",
+                session_id,
+                winner_session_id,
+                int((delta_seconds or 0.0) * 1000),
+            )
+            return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
+
         configured_language = str(
             self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
         ).strip()
