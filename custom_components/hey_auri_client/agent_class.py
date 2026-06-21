@@ -20,6 +20,7 @@ from .const import (
     DATA_FRONTEND_CLIENT,
     DOMAIN,
     EVENT_CONVERSATION_FINISHED,
+    VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
 )
 from .cache import reset_processed_entities
 from .exceptions import SaaSRequestError, ToolExecutionError
@@ -64,6 +65,16 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
         """Process one conversation turn via the SaaS backend."""
+        if user_input.text == VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE:
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_speech(
+                "There is an issue with your account, please log in to resolve it"
+            )
+            return conversation.ConversationResult(
+                response=intent_response,
+                conversation_id=user_input.conversation_id,
+            )
+
         conversation_id = user_input.conversation_id or str(uuid.uuid4())
         reset_processed_entities(conversation_id)
         context = await build_context_snapshot(self.hass, user_input)

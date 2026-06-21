@@ -17,21 +17,22 @@ from .const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
     DOMAIN,
+    ERROR_NO_AUTHENTICATION,
+    VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
     CONF_SHARED_SECRET,
     CONF_STT_LANGUAGE,
     DEFAULT_REALTIME_WS_ENDPOINT,
     DEFAULT_STT_LANGUAGE,
     DEFAULT_STT_PIPELINE_ID,
+    MIN_FALLBACK_AUDIO_BYTES,
+    TRANSCRIBE_PATH,
+    WAKE_WORD_COLLISION_WINDOW_SECONDS,
 )
 from .helpers import get_timeout_seconds
 from .metric_service import RequestLatencyMetricService
 from .saas_client import SaaSClient
 
 _LOGGER = logging.getLogger(__name__)
-
-_TRANSCRIBE_PATH = "/voice/transcribe"
-_WAKE_WORD_COLLISION_WINDOW_SECONDS = 1.0
-_MIN_FALLBACK_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
 
 
 class _WakeWordCollisionArbiter:
@@ -81,7 +82,7 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
         runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})
         self._collision_arbiter = runtime.setdefault(
             "wake_word_collision_arbiter",
-            _WakeWordCollisionArbiter(window_seconds=_WAKE_WORD_COLLISION_WINDOW_SECONDS),
+            _WakeWordCollisionArbiter(window_seconds=WAKE_WORD_COLLISION_WINDOW_SECONDS),
         )
         request_latency_metrics = RequestLatencyMetricService.from_options(hass, entry)
         self._client = SaaSClient(
@@ -147,7 +148,6 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
         language = (metadata.language or configured_language or DEFAULT_STT_LANGUAGE).strip()
 
         buffered_audio = bytearray()
-        realtime_failed = False
 
         try:
             streaming_result = await self._client.stream_realtime_transcription(
@@ -156,41 +156,36 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
                 language=language,
             )
             buffered_audio.extend(streaming_result.buffered_audio)
+            if streaming_result.error_no == ERROR_NO_AUTHENTICATION:
+                return stt.SpeechResult(VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE, stt.SpeechResultState.SUCCESS)
             if streaming_result.transcript:
                 return stt.SpeechResult(streaming_result.transcript, stt.SpeechResultState.SUCCESS)
-            realtime_failed = True
             _LOGGER.warning(
-                "Auri STT realtime streaming produced no transcript, falling back to multipart upload: %s",
+                "Auri STT realtime streaming produced no transcript, falling back to multipart upload (error_no=%s): %s",
+                streaming_result.error_no or "unknown",
                 streaming_result.error or "no transcript",
             )
         except Exception as err:
-            realtime_failed = True
             _LOGGER.warning(
                 "Auri STT realtime streaming failed, falling back to multipart upload: %s",
                 err,
             )
 
-        # If realtime failed mid-stream, continue draining remaining chunks so
-        # fallback has the full utterance and the Assist pipeline can finish cleanly.
-        if realtime_failed:
-            async for chunk in stream:
-                if not chunk:
-                    break
-                buffered_audio.extend(chunk)
+        # Note: reader_task inside stream_realtime_transcription already consumed
+        # the entire stream, so buffered_audio contains all captured audio.
+        # Do not try to drain stream again to avoid race conditions.
 
         if buffered_audio:
             audio_chunks = buffered_audio
         else:
+            # Stream already consumed by reader_task; buffered_audio is empty
+            # because realtime either never sent audio or failed before capturing any
             audio_chunks = bytearray()
-            async for chunk in stream:
-                if not chunk:
-                    break
-                audio_chunks.extend(chunk)
 
         if not audio_chunks:
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
 
-        if len(audio_chunks) < _MIN_FALLBACK_AUDIO_BYTES:
+        if len(audio_chunks) < MIN_FALLBACK_AUDIO_BYTES:
             _LOGGER.warning(
                 "Auri STT fallback audio too short for transcription: %d bytes",
                 len(audio_chunks),
@@ -204,7 +199,7 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
 
         try:
             response = await self._client.post_multipart_audio(
-                _TRANSCRIBE_PATH,
+                TRANSCRIBE_PATH,
                 fields={
                     "pipeline_id": DEFAULT_STT_PIPELINE_ID,
                     "language": language,

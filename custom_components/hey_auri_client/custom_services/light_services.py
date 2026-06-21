@@ -62,6 +62,11 @@ class LightToolService:
 
         return bool(modes.intersection({"hs", "xy", "rgb", "rgbw", "rgbww"}))
 
+    @staticmethod
+    def _is_switch_entity_requested(entity_id: Any) -> bool:
+        """Return True when caller explicitly requested a switch entity."""
+        return str(entity_id or "").strip().startswith("switch.")
+
     async def _call_domain_turn(
         self,
         *,
@@ -134,10 +139,16 @@ class LightToolService:
         return {"success": True, "entity_id": entity_id}
 
     async def adjust_light_brightness(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        requested_entity_id = arguments.get("entity_id")
+        if self._is_switch_entity_requested(requested_entity_id):
+            return {
+                "error": f"{requested_entity_id} is a switch and does not support brightness control"
+            }
+
         entity_id = resolve_entity_id_no_fallback(
             self.hass,
             "light",
-            arguments.get("entity_id"),
+            requested_entity_id,
         )
         if not self._light_supports_brightness(entity_id):
             return {
@@ -178,10 +189,16 @@ class LightToolService:
         return response
 
     async def adjust_light_color(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        requested_entity_id = arguments.get("entity_id")
+        if self._is_switch_entity_requested(requested_entity_id):
+            return {
+                "error": f"{requested_entity_id} is a switch and does not support color control"
+            }
+
         entity_id = resolve_entity_id_no_fallback(
             self.hass,
             "light",
-            arguments.get("entity_id"),
+            requested_entity_id,
         )
         if not self._light_supports_rgb_color(entity_id):
             return {

@@ -19,12 +19,29 @@ import aiohttp
 
 from homeassistant.core import HomeAssistant
 
+from .const import (
+    ERROR_NO_AIOHTTP_CLIENT,
+    ERROR_NO_AUDIO_TOO_SHORT,
+    ERROR_NO_AUTHENTICATION,
+    ERROR_NO_CONNECTION,
+    ERROR_NO_EMPTY_TRANSCRIPT,
+    ERROR_NO_NO_AUDIO_CHUNKS,
+    ERROR_NO_NO_UPSTREAM_AUDIO,
+    ERROR_NO_TIMEOUT,
+    ERROR_NO_UNHANDLED,
+    ERROR_NO_UPSTREAM_REPORTED_ERROR,
+    ERROR_NO_WS_CLOSED_BEFORE_END,
+    ERROR_NO_WS_CLOSED_DURING_STREAM,
+    ERROR_NO_WS_CLOSED_NO_TRANSCRIPT,
+    LATENCY_MEASUREMENT_KEY_AUDIO,
+    LATENCY_MEASUREMENT_KEY_AUDIO_STREAM,
+    LATENCY_MEASUREMENT_KEY_CONVERSATION,
+    MIN_REALTIME_AUDIO_BYTES,
+)
 from .exceptions import SaaSRequestError
 from .metric_service import RequestLatencyMetricService
 
 _LOGGER = logging.getLogger(__name__)
-
-_MIN_REALTIME_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
 
 
 @dataclass(slots=True)
@@ -46,14 +63,15 @@ class SaaSRealtimeSTTResult:
     buffered_audio: bytes
     post_speech_latency_ms: int | None = None
     error: str | None = None
+    error_no: str | None = None
+
+
+class AuthenticationError(Exception):
+    """Raised when realtime websocket authentication is rejected."""
 
 
 class SaaSClient:
     """HTTP client for the SaaS conversation backend."""
-
-    _LATENCY_MEASUREMENT_KEY_CONVERSATION = "conversation"
-    _LATENCY_MEASUREMENT_KEY_AUDIO = "audio"
-    _LATENCY_MEASUREMENT_KEY_AUDIO_STREAM = "audio_stream"
 
     def __init__(
         self,
@@ -119,7 +137,7 @@ class SaaSClient:
             path,
             body=body,
             content_type="application/json",
-            measurement_key=self._LATENCY_MEASUREMENT_KEY_CONVERSATION,
+            measurement_key=LATENCY_MEASUREMENT_KEY_CONVERSATION,
         )
 
     async def post_raw(
@@ -128,7 +146,7 @@ class SaaSClient:
         *,
         body: str | bytes,
         content_type: str,
-        measurement_key: str = _LATENCY_MEASUREMENT_KEY_CONVERSATION,
+        measurement_key: str = LATENCY_MEASUREMENT_KEY_CONVERSATION,
     ) -> dict[str, Any]:
         started = perf_counter()
         success = False
@@ -196,7 +214,7 @@ class SaaSClient:
             path,
             body=body,
             content_type=content_header,
-            measurement_key=self._LATENCY_MEASUREMENT_KEY_AUDIO,
+            measurement_key=LATENCY_MEASUREMENT_KEY_AUDIO,
         )
 
     async def stream_realtime_transcription(
@@ -259,6 +277,10 @@ class SaaSClient:
                             break
 
                         if ws.closed or ws.close_code is not None:
+                            if ws.close_code == 1008:
+                                raise AuthenticationError(
+                                    "Realtime websocket authentication failed (close_code=1008)"
+                                )
                             raise ConnectionError(
                                 f"Realtime websocket closed before audio finished (close_code={ws.close_code})"
                             )
@@ -304,6 +326,7 @@ class SaaSClient:
                             transcript=None,
                             buffered_audio=bytes(buffered_audio),
                             error="No audio chunks were sent",
+                            error_no=ERROR_NO_NO_AUDIO_CHUNKS,
                         )
 
                     if not header_processed:
@@ -325,7 +348,7 @@ class SaaSClient:
                                 await ws.send_bytes(upsampled_payload)
                                 realtime_bytes_sent += len(upsampled_payload)
 
-                    if len(buffered_audio) < _MIN_REALTIME_AUDIO_BYTES:
+                    if len(buffered_audio) < MIN_REALTIME_AUDIO_BYTES:
                         duration_ms = int(len(buffered_audio) / 32000 * 1000)
                         _LOGGER.warning(
                             "Auri realtime STT aborted because audio was too short: %d bytes (%d ms)",
@@ -336,6 +359,7 @@ class SaaSClient:
                             transcript=None,
                             buffered_audio=bytes(buffered_audio),
                             error="Realtime audio too short",
+                            error_no=ERROR_NO_AUDIO_TOO_SHORT,
                         )
 
                     if realtime_bytes_sent <= 0:
@@ -343,9 +367,14 @@ class SaaSClient:
                             transcript=None,
                             buffered_audio=bytes(buffered_audio),
                             error="No realtime audio bytes were sent upstream",
+                            error_no=ERROR_NO_NO_UPSTREAM_AUDIO,
                         )
 
                     if ws.closed or ws.close_code is not None:
+                        if ws.close_code == 1008:
+                            raise AuthenticationError(
+                                "Realtime websocket authentication failed (close_code=1008)"
+                            )
                         raise ConnectionError(
                             f"Realtime websocket closed before audio.end (close_code={ws.close_code})"
                         )
@@ -411,6 +440,10 @@ class SaaSClient:
                                 ws.close_code,
                             )
                             if not transcript_chunks:
+                                if ws.close_code == 1008:
+                                    raise AuthenticationError(
+                                        "Realtime websocket authentication failed (close_code=1008)"
+                                    )
                                 raise ConnectionError(
                                     f"Realtime websocket closed without transcript (close_code={ws.close_code})"
                                 )
@@ -444,6 +477,7 @@ class SaaSClient:
                 buffered_audio=bytes(buffered_audio),
                 post_speech_latency_ms=post_speech_latency_ms,
                 error=None if transcript else "Realtime transcript was empty",
+                error_no=None if transcript else ERROR_NO_EMPTY_TRANSCRIPT,
             )
         except Exception as err:
             error_type = type(err).__name__
@@ -454,6 +488,7 @@ class SaaSClient:
                 buffered_audio=bytes(buffered_audio),
                 post_speech_latency_ms=post_speech_latency_ms,
                 error=str(err),
+                error_no=self._classify_realtime_error_no(err),
             )
         finally:
             if not reader_task.done():
@@ -461,7 +496,7 @@ class SaaSClient:
             if post_speech_latency_ms is not None:
                 await self._record_request_latency(
                     path=path,
-                    measurement_key=self._LATENCY_MEASUREMENT_KEY_AUDIO_STREAM,
+                    measurement_key=LATENCY_MEASUREMENT_KEY_AUDIO_STREAM,
                     latency_ms=post_speech_latency_ms,
                     success=success,
                     status_code=status_code,
@@ -491,6 +526,31 @@ class SaaSClient:
             status_code=status_code,
             error_type=error_type,
         )
+
+    def _classify_realtime_error_no(self, err: Exception) -> str:
+        """Map runtime exceptions to stable realtime STT error numbers."""
+        if isinstance(err, AuthenticationError):
+            return ERROR_NO_AUTHENTICATION
+
+        if isinstance(err, asyncio.TimeoutError):
+            return ERROR_NO_TIMEOUT
+
+        if isinstance(err, aiohttp.ClientError):
+            return ERROR_NO_AIOHTTP_CLIENT
+
+        if isinstance(err, ConnectionError):
+            message = str(err)
+            if "closed before audio finished" in message:
+                return ERROR_NO_WS_CLOSED_DURING_STREAM
+            if "closed before audio.end" in message:
+                return ERROR_NO_WS_CLOSED_BEFORE_END
+            if "closed without transcript" in message:
+                return ERROR_NO_WS_CLOSED_NO_TRANSCRIPT
+            if "Realtime upstream error" in message:
+                return ERROR_NO_UPSTREAM_REPORTED_ERROR
+            return ERROR_NO_CONNECTION
+
+        return ERROR_NO_UNHANDLED
 
     async def send_user_turn(self, payload: dict[str, Any]) -> SaaSTurnResponse:
         response = await self.post_json("/conversation", payload)
