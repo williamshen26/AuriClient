@@ -24,6 +24,8 @@ from .metric_service import RequestLatencyMetricService
 
 _LOGGER = logging.getLogger(__name__)
 
+_MIN_REALTIME_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
+
 
 @dataclass(slots=True)
 class SaaSTurnResponse:
@@ -89,6 +91,22 @@ class SaaSClient:
         ).hexdigest()
         return {
             "Content-Type": content_type,
+            "X-Client-Id": self.client_id,
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "X-Signature": signature,
+        }
+
+    def _build_websocket_auth_headers(self, path: str) -> dict[str, str]:
+        """Build HMAC-signed headers for WebSocket upgrade request (GET with empty body)."""
+        timestamp = str(int(datetime.now(UTC).timestamp()))
+        nonce = secrets.token_hex(16)
+        signature = hmac.new(
+            self.shared_secret.encode("utf-8"),
+            "\n".join(["GET", path, timestamp, nonce, ""]).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
             "X-Client-Id": self.client_id,
             "X-Timestamp": timestamp,
             "X-Nonce": nonce,
@@ -206,10 +224,25 @@ class SaaSClient:
         transcript_chunks: list[str] = []
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         path = _extract_path_from_url(endpoint)
+        ws_auth_headers = self._build_websocket_auth_headers(path)
+
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
+
+        async def read_ha_audio() -> None:
+            try:
+                async for chunk in stream:
+                    if not chunk:
+                        break
+                    buffered_audio.extend(chunk)
+                    await audio_queue.put(chunk)
+            finally:
+                await audio_queue.put(None)
+
+        reader_task = asyncio.create_task(read_ha_audio())
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.ws_connect(endpoint, heartbeat=20) as ws:
+                async with session.ws_connect(endpoint, headers=ws_auth_headers, heartbeat=20) as ws:
                     await ws.send_json(
                         {
                             "type": "session.update",
@@ -220,8 +253,9 @@ class SaaSClient:
                         }
                     )
 
-                    async for chunk in stream:
-                        if not chunk:
+                    while True:
+                        chunk = await audio_queue.get()
+                        if chunk is None:
                             break
 
                         if ws.closed or ws.close_code is not None:
@@ -230,8 +264,6 @@ class SaaSClient:
                             )
 
                         sent_any = True
-                        buffered_audio.extend(chunk)
-
                         outbound_payload = chunk
                         if not header_processed:
                             header_probe.extend(chunk)
@@ -265,6 +297,9 @@ class SaaSClient:
                             ) from err
 
                     if not sent_any:
+                        _LOGGER.warning(
+                            "Auri realtime STT no audio chunks sent before stream ended"
+                        )
                         return SaaSRealtimeSTTResult(
                             transcript=None,
                             buffered_audio=bytes(buffered_audio),
@@ -289,6 +324,19 @@ class SaaSClient:
                             if upsampled_payload:
                                 await ws.send_bytes(upsampled_payload)
                                 realtime_bytes_sent += len(upsampled_payload)
+
+                    if len(buffered_audio) < _MIN_REALTIME_AUDIO_BYTES:
+                        duration_ms = int(len(buffered_audio) / 32000 * 1000)
+                        _LOGGER.warning(
+                            "Auri realtime STT aborted because audio was too short: %d bytes (%d ms)",
+                            len(buffered_audio),
+                            duration_ms,
+                        )
+                        return SaaSRealtimeSTTResult(
+                            transcript=None,
+                            buffered_audio=bytes(buffered_audio),
+                            error="Realtime audio too short",
+                        )
 
                     if realtime_bytes_sent <= 0:
                         return SaaSRealtimeSTTResult(
@@ -381,6 +429,16 @@ class SaaSClient:
                     int((perf_counter() - post_speech_started) * 1000),
                     0,
                 )
+
+            if not transcript:
+                duration_ms = int(len(buffered_audio) / 32000 * 1000)
+                _LOGGER.warning(
+                    "Auri realtime STT returned empty transcript after sending %d bytes and buffering %d bytes (%d ms of 16k audio)",
+                    realtime_bytes_sent,
+                    len(buffered_audio),
+                    duration_ms,
+                )
+
             return SaaSRealtimeSTTResult(
                 transcript=transcript or None,
                 buffered_audio=bytes(buffered_audio),
@@ -389,6 +447,8 @@ class SaaSClient:
             )
         except Exception as err:
             error_type = type(err).__name__
+            if not reader_task.done():
+                await reader_task
             return SaaSRealtimeSTTResult(
                 transcript=None,
                 buffered_audio=bytes(buffered_audio),
@@ -396,6 +456,8 @@ class SaaSClient:
                 error=str(err),
             )
         finally:
+            if not reader_task.done():
+                await reader_task
             if post_speech_latency_ms is not None:
                 await self._record_request_latency(
                     path=path,

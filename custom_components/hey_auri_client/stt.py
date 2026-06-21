@@ -31,6 +31,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _TRANSCRIBE_PATH = "/voice/transcribe"
 _WAKE_WORD_COLLISION_WINDOW_SECONDS = 1.0
+_MIN_FALLBACK_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
 
 
 class _WakeWordCollisionArbiter:
@@ -187,6 +188,13 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
                 audio_chunks.extend(chunk)
 
         if not audio_chunks:
+            return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
+
+        if len(audio_chunks) < _MIN_FALLBACK_AUDIO_BYTES:
+            _LOGGER.warning(
+                "Auri STT fallback audio too short for transcription: %d bytes",
+                len(audio_chunks),
+            )
             return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
 
         filename, mime_type, prepared_audio = _prepare_audio_for_upload(
