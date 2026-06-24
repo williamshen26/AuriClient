@@ -10,6 +10,9 @@ CONF_CLIENT_ID = "client_id"
 CONF_SHARED_SECRET = "shared_secret"
 CONF_REQUEST_TIMEOUT = "request_timeout"
 CONF_STT_LANGUAGE = "stt_language"
+CONF_TTS_STREAM_ENDPOINT = "tts_stream_endpoint"
+CONF_TTS_LANGUAGE = "tts_language"
+CONF_TTS_VOICE = "tts_voice"
 CONF_BOOKING_ID = "booking_id"
 CONF_GUEST_NAME = "guest_name"
 CONF_CHECK_IN = "check_in"
@@ -28,9 +31,25 @@ CONF_LOCAL_RECOMMENDATIONS = "local_recommendations"
 DEFAULT_REQUEST_TIMEOUT = 30
 DEFAULT_STT_PIPELINE_ID = "auri-cloud-voice"
 DEFAULT_STT_LANGUAGE = "en"
+DEFAULT_TTS_LANGUAGE = "en"
+DEFAULT_TTS_VOICE = "alloy"
+DEFAULT_TTS_STREAM_ENDPOINT = f"{API_ENDPOINT}/tts/stream"
+DEFAULT_TTS_SUPPORTED_VOICES = [
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "fable",
+    "onyx",
+    "nova",
+    "sage",
+    "shimmer",
+]
 DEFAULT_REALTIME_WS_ENDPOINT = "wss://realtime.hey-auri.com/ws/realtime"
 
 TRANSCRIBE_PATH = "/voice/transcribe"
+TTS_STREAM_PATH = "/tts/stream"
 WAKE_WORD_COLLISION_WINDOW_SECONDS = 1.0
 MIN_REALTIME_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
 MIN_FALLBACK_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
@@ -38,6 +57,8 @@ MIN_FALLBACK_AUDIO_BYTES = 24000  # 200 ms of 16 kHz mono 16-bit PCM
 LATENCY_MEASUREMENT_KEY_CONVERSATION = "conversation"
 LATENCY_MEASUREMENT_KEY_AUDIO = "audio"
 LATENCY_MEASUREMENT_KEY_AUDIO_STREAM = "audio_stream"
+LATENCY_MEASUREMENT_KEY_TTS = "tts"
+LATENCY_MEASUREMENT_KEY_TTS_STREAM = "tts_stream"
 
 ERROR_NO_NO_AUDIO_CHUNKS = "RT001"
 ERROR_NO_AUDIO_TOO_SHORT = "RT002"

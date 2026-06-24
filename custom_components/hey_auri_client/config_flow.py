@@ -46,7 +46,9 @@ from .const import (
     DEFAULT_NAME,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_STT_LANGUAGE,
+    DEFAULT_TTS_STREAM_ENDPOINT,
     DOMAIN,
+    CONF_TTS_STREAM_ENDPOINT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -153,6 +155,10 @@ class OptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_STT_LANGUAGE,
                     default=str(options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)),
+                ): str,
+                vol.Optional(
+                    CONF_TTS_STREAM_ENDPOINT,
+                    default=str(options.get(CONF_TTS_STREAM_ENDPOINT, DEFAULT_TTS_STREAM_ENDPOINT)),
                 ): str,
             }
         )

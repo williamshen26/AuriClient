@@ -1,7 +1,7 @@
 """SaaS client transport and realtime STT helpers."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable
 import asyncio
 import audioop
 from dataclasses import dataclass
@@ -36,7 +36,10 @@ from .const import (
     LATENCY_MEASUREMENT_KEY_AUDIO,
     LATENCY_MEASUREMENT_KEY_AUDIO_STREAM,
     LATENCY_MEASUREMENT_KEY_CONVERSATION,
+    LATENCY_MEASUREMENT_KEY_TTS,
+    LATENCY_MEASUREMENT_KEY_TTS_STREAM,
     MIN_REALTIME_AUDIO_BYTES,
+    TTS_STREAM_PATH,
 )
 from .exceptions import SaaSRequestError
 from .metric_service import RequestLatencyMetricService
@@ -80,6 +83,7 @@ class SaaSClient:
         timeout: int,
         client_id: str,
         shared_secret: str,
+        tts_stream_endpoint: str | None = None,
         metrics_service: RequestLatencyMetricService | None = None,
     ) -> None:
         self.hass = hass
@@ -87,6 +91,9 @@ class SaaSClient:
         self.timeout = timeout
         self.client_id = client_id
         self.shared_secret = shared_secret
+        self.tts_stream_endpoint = (
+            tts_stream_endpoint.strip() if tts_stream_endpoint else None
+        )
         self.metrics_service = metrics_service
 
     def _build_signed_headers(
@@ -194,6 +201,129 @@ class SaaSClient:
                 status_code=status_code,
                 error_type=error_type,
             )
+
+    async def post_binary(
+        self,
+        path: str,
+        *,
+        body: str | bytes,
+        content_type: str,
+        measurement_key: str = LATENCY_MEASUREMENT_KEY_TTS,
+        timeout_seconds: int | None = None,
+    ) -> tuple[bytes, str]:
+        """POST and return binary response bytes with content-type."""
+        started = perf_counter()
+        success = False
+        status_code: int | None = None
+        error_type: str | None = None
+        effective_timeout = timeout_seconds or self.timeout
+        timeout = aiohttp.ClientTimeout(total=effective_timeout)
+        headers = self._build_signed_headers(path, body, content_type=content_type)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{self.endpoint}{path}",
+                    data=body,
+                    headers=headers,
+                ) as response:
+                    status_code = response.status
+                    response_bytes = await response.read()
+                    if response.status >= 400:
+                        error_type = "http_error"
+                        raise SaaSRequestError(
+                            f"SaaS request failed: {response.status} {_extract_error_message(response_bytes)}",
+                            status_code=response.status,
+                            response_body=response_bytes.decode("utf-8", errors="ignore"),
+                        )
+                    success = True
+                    response_content_type = str(response.headers.get("Content-Type") or "application/octet-stream")
+                    return response_bytes, response_content_type
+        except Exception as err:
+            if error_type is None:
+                error_type = type(err).__name__
+            raise
+        finally:
+            latency_ms = max(int((perf_counter() - started) * 1000), 0)
+            await self._record_request_latency(
+                path=path,
+                measurement_key=measurement_key,
+                latency_ms=latency_ms,
+                success=success,
+                status_code=status_code,
+                error_type=error_type,
+            )
+
+    async def stream_binary(
+        self,
+        path: str,
+        *,
+        body: str | bytes,
+        content_type: str,
+        measurement_key: str = LATENCY_MEASUREMENT_KEY_TTS_STREAM,
+        chunk_size: int = 4096,
+        timeout_seconds: int | None = None,
+        request_url: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """POST and yield binary response chunks progressively."""
+        started = perf_counter()
+        success = False
+        status_code: int | None = None
+        error_type: str | None = None
+        effective_timeout = timeout_seconds or self.timeout
+        timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=effective_timeout,
+            sock_connect=effective_timeout,
+            sock_read=effective_timeout,
+        )
+        headers = self._build_signed_headers(path, body, content_type=content_type)
+        url = request_url or f"{self.endpoint}{path}"
+
+        session = aiohttp.ClientSession(timeout=timeout)
+        response: aiohttp.ClientResponse | None = None
+        try:
+            response = await session.post(
+                url,
+                data=body,
+                headers=headers,
+            )
+            status_code = response.status
+            if response.status >= 400:
+                error_type = "http_error"
+                response_bytes = await response.read()
+                raise SaaSRequestError(
+                    f"SaaS request failed: {response.status} {_extract_error_message(response_bytes)}",
+                    status_code=response.status,
+                    response_body=response_bytes.decode("utf-8", errors="ignore"),
+                )
+
+            async for chunk in response.content.iter_chunked(chunk_size):
+                if chunk:
+                    yield chunk
+
+            success = True
+        except asyncio.CancelledError:
+            error_type = "cancelled"
+            raise
+        except Exception as err:
+            if error_type is None:
+                error_type = type(err).__name__
+            raise
+        finally:
+            try:
+                if response is not None:
+                    response.release()
+            finally:
+                await session.close()
+                latency_ms = max(int((perf_counter() - started) * 1000), 0)
+                await self._record_request_latency(
+                    path=path,
+                    measurement_key=measurement_key,
+                    latency_ms=latency_ms,
+                    success=success,
+                    status_code=status_code,
+                    error_type=error_type,
+                )
 
     async def post_multipart_audio(
         self,
@@ -560,6 +690,57 @@ class SaaSClient:
         response = await self.post_json("/conversation", payload)
         return normalize_turn_response(response)
 
+    async def request_tts_audio(
+        self,
+        payload: dict[str, Any],
+    ) -> bytes:
+        """Request complete WAV audio by collecting stream chunks."""
+        collected = bytearray()
+        async for chunk in self.stream_tts_audio(payload):
+            if chunk:
+                collected.extend(chunk)
+        return bytes(collected)
+
+    async def stream_tts_audio(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncGenerator[bytes, None]:
+        """Request stream-first TTS WAV audio chunks."""
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+        if self.tts_stream_endpoint:
+            request_url, sign_path = _resolve_tts_stream_target(self.tts_stream_endpoint)
+            _LOGGER.warning(
+                "Auri TTS stream target url=%s sign_path=%s configured_endpoint=%s",
+                request_url,
+                sign_path,
+                self.tts_stream_endpoint,
+            )
+            async for chunk in self.stream_binary(
+                sign_path,
+                body=body,
+                content_type="application/json",
+                measurement_key=LATENCY_MEASUREMENT_KEY_TTS_STREAM,
+                timeout_seconds=max(self.timeout, 120),
+                request_url=request_url,
+            ):
+                yield chunk
+            return
+
+        _LOGGER.warning(
+            "Auri TTS stream target url=%s sign_path=%s configured_endpoint=<empty>",
+            f"{self.endpoint}{TTS_STREAM_PATH}",
+            TTS_STREAM_PATH,
+        )
+        async for chunk in self.stream_binary(
+            TTS_STREAM_PATH,
+            body=body,
+            content_type="application/json",
+            measurement_key=LATENCY_MEASUREMENT_KEY_TTS_STREAM,
+            timeout_seconds=max(self.timeout, 120),
+        ):
+            yield chunk
+
 
 def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
     """Normalize the SaaS contract into a typed object."""
@@ -618,6 +799,44 @@ def _build_multipart_body(
 def _extract_path_from_url(url: str) -> str:
     parsed = urlparse(url)
     return parsed.path or "/"
+
+
+def _resolve_tts_stream_target(endpoint: str) -> tuple[str, str]:
+    """Return (request_url, signing_path) for configured TTS stream endpoint.
+
+    Accepts either:
+    - full endpoint: https://.../tts/stream
+    - base Function URL: https://.../
+    """
+    parsed = urlparse(endpoint.strip())
+    normalized_path = (parsed.path or "/").strip()
+
+    if not normalized_path or normalized_path == "/":
+        # Function URL base was provided; append the stream route.
+        normalized_path = TTS_STREAM_PATH
+    elif normalized_path != "/" and normalized_path.endswith("/"):
+        normalized_path = normalized_path.rstrip("/")
+
+    request_url = parsed._replace(path=normalized_path).geturl()
+    return request_url, normalized_path
+
+
+def _extract_error_message(body: bytes) -> str:
+    """Extract readable error text from HTTP response bytes."""
+    if not body:
+        return ""
+
+    try:
+        payload = json.loads(body.decode("utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return body.decode("utf-8", errors="ignore")[:300]
+
+    if isinstance(payload, dict):
+        message = payload.get("message") or payload.get("error")
+        if message:
+            return str(message)
+
+    return str(payload)[:300]
 
 
 def _extract_realtime_transcript_fragment(
