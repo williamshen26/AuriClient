@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..exceptions import ToolExecutionError
+from ...exceptions import ToolExecutionError
 from ..helpers import (
     _clamp_percentage,
     _clamp_step_percentage,

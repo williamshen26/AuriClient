@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.typing import ConfigType
 
-from .const import (
+from ..const import (
     ATTR_DURATION,
     ATTR_SATELLITE_SPEAKER,
     ATTR_MARKDOWN,

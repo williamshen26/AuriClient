@@ -10,8 +10,8 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..cache import get_media_player_sources
-from ..exceptions import ToolExecutionError
+from ...cache import get_media_player_sources
+from ...exceptions import ToolExecutionError
 
 
 class EntityToolService:

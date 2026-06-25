@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..exceptions import ToolExecutionError
+from ...exceptions import ToolExecutionError
 from ..helpers import _clamp_percentage_zero_to_hundred, resolve_entity_id_no_fallback
 
 

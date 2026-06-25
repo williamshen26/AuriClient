@@ -11,8 +11,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from ..cache import get_media_player_sources
-from ..exceptions import ToolExecutionError
+from ...cache import get_media_player_sources
+from ...exceptions import ToolExecutionError
 from ..helpers import (
     _clamp_percentage,
     _clamp_step_percentage,

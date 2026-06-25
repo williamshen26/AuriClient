@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components import conversation
+import homeassistant.components.conversation as ha_conversation
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -11,17 +11,17 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from .agent_class import ThinOpenAIAgent
+from .conversation.agent_class import ThinOpenAIAgent
 from .cache import (
     dump_media_player_sources,
     set_media_player_sources,
     upsert_media_player_sources,
 )
 from .const import DATA_AGENT, DOMAIN, ROOT_RUNTIME
-from .services import async_setup_services
+from .conversation.services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = ["sensor", "stt"]
+PLATFORMS = ["stt", "sensor"]
 MEDIA_PLAYER_SOURCES_STORAGE_VERSION = 1
 MEDIA_PLAYER_SOURCES_STORAGE_KEY = f"{DOMAIN}_media_player_sources"
 
@@ -92,7 +92,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data[DATA_AGENT] = agent
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    conversation.async_set_agent(hass, entry, agent)
+    ha_conversation.async_set_agent(hass, entry, agent)
     return True
 
 
@@ -102,5 +102,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     hass.data[DOMAIN].pop(entry.entry_id, None)
-    conversation.async_unset_agent(hass, entry)
+    ha_conversation.async_unset_agent(hass, entry)
     return True

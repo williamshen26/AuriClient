@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_registry import async_get
 
-from .helpers import read_from_file
+from ..file_util import read_from_file
 
 _LOGGER = logging.getLogger(__package__)
 

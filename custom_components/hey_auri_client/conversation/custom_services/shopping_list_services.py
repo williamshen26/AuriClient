@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..exceptions import ToolExecutionError
+from ...exceptions import ToolExecutionError
 from ..helpers import resolve_entity_id_no_fallback
 
 _LOGGER = logging.getLogger(__package__)

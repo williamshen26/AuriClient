@@ -21,7 +21,7 @@ from .custom_services.sticky_note_services import StickyNoteToolService
 from .custom_services.timer_services import TimerToolService
 from .custom_services.user_preferences_services import UserPreferencesToolService
 from .custom_services.weather_services import WeatherToolService
-from .exceptions import ToolExecutionError
+from ..exceptions import ToolExecutionError
 
 try:
     from const import SKILL_REGISTRY  # type: ignore

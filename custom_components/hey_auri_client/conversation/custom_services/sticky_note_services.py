@@ -10,9 +10,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
-from ..exceptions import ToolExecutionError
-from ..const import DOMAIN, STICKY_NOTE_UNIQUE_ID_PREFIX
-from ..entities.sticky_note import (
+from ...exceptions import ToolExecutionError
+from ...const import DOMAIN, STICKY_NOTE_UNIQUE_ID_PREFIX
+from ...entities.sticky_note import (
     AuriStickyNoteEntity,
     generate_sticky_note_id,
 )

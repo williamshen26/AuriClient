@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..exceptions import ToolExecutionError
+from ...exceptions import ToolExecutionError
 from ..helpers import (
     _convert_temperature,
     _normalize_temperature_unit,

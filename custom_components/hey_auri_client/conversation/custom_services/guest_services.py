@@ -5,7 +5,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from ..const import (
+from ...const import (
     CONF_BOOKING_ID,
     CONF_CHECK_IN,
     CONF_CHECK_IN_INSTRUCTION,

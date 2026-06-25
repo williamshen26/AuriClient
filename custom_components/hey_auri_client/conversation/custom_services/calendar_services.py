@@ -6,7 +6,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ..exceptions import ToolExecutionError
+from ...exceptions import ToolExecutionError
 from ..helpers import resolve_entity_id
 
 

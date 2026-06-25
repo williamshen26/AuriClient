@@ -10,8 +10,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
-from ..exceptions import ToolExecutionError
-from ..const import (
+from ...exceptions import ToolExecutionError
+from ..helpers import resolve_entity_id_no_fallback
+from ...const import (
     ATTR_DURATION,
     ATTR_ENTITY_ID,
     ATTR_REMAINING,
@@ -19,7 +20,7 @@ from ..const import (
     ATTR_TIMER_ID,
     DOMAIN,
 )
-from ..entities.timer import AuriTimerEntity, generate_timer_id
+from ...entities.timer import AuriTimerEntity, generate_timer_id
 
 
 def _normalize_duration_to_seconds(value) -> int:
@@ -120,11 +121,23 @@ class TimerToolService:
         self.hass = hass
 
     async def start_timer(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        satellite_speaker = arguments.get("satellite_speaker")
+        if satellite_speaker is not None:
+            if not satellite_speaker.startswith("media_player."):
+                normalized_entity = satellite_speaker.removeprefix("media_player").lstrip("._ ")
+                satellite_speaker = f"media_player.{normalized_entity}"
+                
+            satellite_speaker = resolve_entity_id_no_fallback(
+                self.hass,
+                "media_player",
+                satellite_speaker,
+            )
+
         try:
             return await start_auri_timer_native(
                 self.hass,
                 duration=arguments.get("duration"),
-                satellite_speaker=arguments.get("satellite_speaker"),
+                satellite_speaker=satellite_speaker,
             )
         except (vol.error.MultipleInvalid, ValueError) as err:
             return {"retry": str(err)}

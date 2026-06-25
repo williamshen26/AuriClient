@@ -1,4 +1,4 @@
-"""Standalone file helpers for the thin frontend integration."""
+"""File utility helpers for conversation-related services."""
 from __future__ import annotations
 
 import os

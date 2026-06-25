@@ -5,7 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .custom_services.sticky_note_services import async_restore_sticky_notes
+from .conversation.custom_services.sticky_note_services import async_restore_sticky_notes
 
 
 async def async_setup_entry(
