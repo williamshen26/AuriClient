@@ -16,6 +16,9 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_guest_phone_number": "Enter a valid US/Canada phone number (for example, +16045551234 or 6045551234)."
+    },
     "step": {
       "init": {
         "title": "Hey Auri Client options",
@@ -40,6 +43,7 @@
         "data": {
           "booking_id": "Booking ID",
           "guest_name": "Guest name",
+          "guest_phone_number": "Guest Phone Number",
           "check_in": "Check-in",
           "check_out": "Check-out",
           "guest_count": "Guest count",
@@ -55,6 +59,7 @@
           "local_recommendations": "Local recommendations"
         },
         "data_description": {
+          "guest_phone_number": "Only US/Canada numbers are supported. Use +1 format (for example, +16045551234) or a 10-digit local number (for example, 6045551234).",
           "property_knowledge": "Where non-IoT items are and how to use them. Example: Extra towels are in the hallway linen closet on the second shelf. Used towels should be placed in the laundry basket in the bathroom before checkout.",
           "local_recommendations": "What is around the house. Example: For coffee, the host recommends Corner Bean Cafe on West 4th Avenue. It is a cozy local coffee shop that is good for morning coffee, pastries, and a quick breakfast before heading out. It is usually quieter before 9 AM."
         }

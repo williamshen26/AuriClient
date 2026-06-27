@@ -122,7 +122,7 @@ async def build_context_snapshot(
     user_id = user_input.context.user_id
     context_user_id = None if user_id is None else str(user_id)[:8]
     user_preferences = sorted(await get_preference_keys(context_user_id))
-    user_name = await get_user_name(hass, user_input)
+    user_name = await get_user_name(hass, user_id)
     now = datetime.now().astimezone()
     return {
         "user_id": context_user_id,
@@ -148,12 +148,12 @@ async def build_context_snapshot(
 
 
 async def get_user_name(
-    hass: HomeAssistant, user_input: conversation.ConversationInput
+    hass: HomeAssistant, user_id: str
 ) -> str | None:
     """Resolve the current Home Assistant user's display name."""
-    if user_input.context.user_id is None:
+    if user_id is None:
         return None
-    user = await hass.auth.async_get_user(user_input.context.user_id)
+    user = await hass.auth.async_get_user(user_id)
     return None if user is None else user.name
 
 

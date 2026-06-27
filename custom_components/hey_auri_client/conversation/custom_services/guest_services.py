@@ -13,6 +13,7 @@ from ...const import (
     CONF_CHECK_OUT_INSTRUCTION,
     CONF_GUEST_COUNT,
     CONF_GUEST_NAME,
+    CONF_GUEST_PHONE_NUMBER,
     CONF_HOST_CONTACT_INSTRUCTION,
     CONF_HOUSE_RULES,
     CONF_LOCAL_RECOMMENDATIONS,
@@ -55,6 +56,12 @@ class GuestToolService:
         return {
             "booking_id": str(self._get_option(CONF_BOOKING_ID, "There is no booking ID configured.")),
             "guest_name": str(self._get_option(CONF_GUEST_NAME, "There is no guest name configured.")),
+            "guest_phone_number": str(
+                self._get_option(
+                    CONF_GUEST_PHONE_NUMBER,
+                    "There is no guest phone number configured.",
+                )
+            ),
             "check_in": str(self._get_option(CONF_CHECK_IN, "There is no check-in time configured.")),
             "check_out": str(self._get_option(CONF_CHECK_OUT, "There is no check-out time configured.")),
             "guest_count": self._get_int_option(CONF_GUEST_COUNT, 0),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -22,6 +23,7 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_GUEST_COUNT,
     CONF_GUEST_NAME,
+    CONF_GUEST_PHONE_NUMBER,
     CONF_HOST_CONTACT_INSTRUCTION,
     CONF_HOUSE_RULES,
     CONF_LOCAL_RECOMMENDATIONS,
@@ -52,6 +54,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -77,6 +80,40 @@ async def validate_input(data: dict[str, Any]) -> None:
         async with session.get(f"{API_ENDPOINT}/health") as response:
             if response.status >= 400:
                 raise ConnectionError(f"Health check failed with status {response.status}")
+
+
+def _normalize_guest_phone_number(phone_number: Any) -> str | None:
+    """Normalize guest phone number to +1 E.164 for reliable SMS routing.
+
+    Returns an empty string when no phone number is provided, so this field can stay optional.
+    Returns None when the phone number format is invalid.
+    """
+    raw = str(phone_number or "").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("+"):
+        digits = re.sub(r"\D", "", raw[1:])
+        if len(digits) == 11 and digits.startswith("1") and _PHONE_NANP_10_PATTERN.fullmatch(digits[1:]):
+            normalized = f"+{digits}"
+        else:
+            return None
+    elif raw.startswith("00"):
+        digits = re.sub(r"\D", "", raw[2:])
+        if len(digits) == 11 and digits.startswith("1") and _PHONE_NANP_10_PATTERN.fullmatch(digits[1:]):
+            normalized = f"+{digits}"
+        else:
+            return None
+    else:
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) == 10 and _PHONE_NANP_10_PATTERN.fullmatch(digits):
+            normalized = f"+1{digits}"
+        elif len(digits) == 11 and digits.startswith("1") and _PHONE_NANP_10_PATTERN.fullmatch(digits[1:]):
+            normalized = f"+{digits}"
+        else:
+            return None
+
+    return normalized
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -169,12 +206,24 @@ class OptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage guest options."""
-        if user_input is not None:
-            data = dict(self.config_entry.options)
-            data.update(user_input)
-            return self.async_create_entry(title="", data=data)
+        errors: dict[str, str] = {}
 
-        options = self.config_entry.options
+        if user_input is not None:
+            normalized_phone_number = _normalize_guest_phone_number(
+                user_input.get(CONF_GUEST_PHONE_NUMBER, "")
+            )
+            if normalized_phone_number is None:
+                errors[CONF_GUEST_PHONE_NUMBER] = "invalid_guest_phone_number"
+            else:
+                user_input = dict(user_input)
+                user_input[CONF_GUEST_PHONE_NUMBER] = normalized_phone_number
+
+            if not errors:
+                data = dict(self.config_entry.options)
+                data.update(user_input)
+                return self.async_create_entry(title="", data=data)
+
+        options = user_input or self.config_entry.options
 
         schema = vol.Schema(
             {
@@ -185,6 +234,10 @@ class OptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_GUEST_NAME,
                     default=str(options.get(CONF_GUEST_NAME, "")),
+                ): str,
+                vol.Optional(
+                    CONF_GUEST_PHONE_NUMBER,
+                    default=str(options.get(CONF_GUEST_PHONE_NUMBER, "")),
                 ): str,
                 vol.Optional(
                     CONF_CHECK_IN,
@@ -293,7 +346,7 @@ class OptionsFlow(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="guest", data_schema=schema)
+        return self.async_show_form(step_id="guest", data_schema=schema, errors=errors)
 
     async def async_step_metrics(
         self, user_input: dict[str, Any] | None = None
