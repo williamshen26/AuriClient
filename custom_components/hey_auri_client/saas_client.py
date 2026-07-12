@@ -353,8 +353,10 @@ class SaaSClient:
         endpoint: str,
         language: str,
         stream: AsyncIterable[bytes],
+        client_session_id: str | None = None,
     ) -> SaaSRealtimeSTTResult:
         """Stream STT audio to realtime gateway and return transcript + buffered audio."""
+        session_id = client_session_id or "unknown"
         post_speech_started: float | None = None
         post_speech_latency_ms: int | None = None
         success = False
@@ -374,16 +376,55 @@ class SaaSClient:
         path = _extract_path_from_url(endpoint)
         ws_auth_headers = self._build_websocket_auth_headers(path)
 
-        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
+        # Unbounded: the gateway now defers accepting this connection until its own
+        # upstream OpenAI connect resolves (up to connect_timeout), so this queue must
+        # not backpressure-block read_ha_audio() while that's in flight. Chunks are
+        # small and bounded by utterance length, so unbounded growth here is safe.
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        stream_stats: dict[str, Any] = {
+            "chunk_count": 0,
+            "ended_reason": "stream_exhausted",
+            "time_to_first_chunk_ms": None,
+            "elapsed_ms": None,
+        }
 
         async def read_ha_audio() -> None:
+            read_started = perf_counter()
+            first_chunk_at: float | None = None
             try:
                 async for chunk in stream:
                     if not chunk:
+                        stream_stats["ended_reason"] = "empty_chunk_received"
+                        _LOGGER.warning(
+                            "Auri realtime STT stream reader got a falsy chunk and is ending "
+                            "capture early session_id=%s chunk_count=%d elapsed_ms=%d",
+                            session_id,
+                            stream_stats["chunk_count"],
+                            int((perf_counter() - read_started) * 1000),
+                        )
                         break
+                    if first_chunk_at is None:
+                        first_chunk_at = perf_counter()
+                    stream_stats["chunk_count"] += 1
                     buffered_audio.extend(chunk)
                     await audio_queue.put(chunk)
             finally:
+                stream_stats["elapsed_ms"] = int((perf_counter() - read_started) * 1000)
+                stream_stats["time_to_first_chunk_ms"] = (
+                    int((first_chunk_at - read_started) * 1000)
+                    if first_chunk_at is not None
+                    else None
+                )
+                _LOGGER.info(
+                    "Auri realtime STT stream reader finished session_id=%s reason=%s "
+                    "chunk_count=%d bytes=%d elapsed_ms=%d time_to_first_chunk_ms=%s",
+                    session_id,
+                    stream_stats["ended_reason"],
+                    stream_stats["chunk_count"],
+                    len(buffered_audio),
+                    stream_stats["elapsed_ms"],
+                    stream_stats["time_to_first_chunk_ms"],
+                )
                 await audio_queue.put(None)
 
         reader_task = asyncio.create_task(read_ha_audio())
@@ -397,6 +438,7 @@ class SaaSClient:
                             "session": {
                                 "language": language,
                                 "input_audio_format": "pcm16",
+                                "client_session_id": client_session_id,
                             },
                         }
                     )
@@ -450,7 +492,8 @@ class SaaSClient:
 
                     if not sent_any:
                         _LOGGER.warning(
-                            "Auri realtime STT no audio chunks sent before stream ended"
+                            "Auri realtime STT no audio chunks sent before stream ended session_id=%s",
+                            session_id,
                         )
                         return SaaSRealtimeSTTResult(
                             transcript=None,
@@ -481,9 +524,17 @@ class SaaSClient:
                     if len(buffered_audio) < MIN_REALTIME_AUDIO_BYTES:
                         duration_ms = int(len(buffered_audio) / 32000 * 1000)
                         _LOGGER.warning(
-                            "Auri realtime STT aborted because audio was too short: %d bytes (%d ms)",
+                            "Auri realtime STT aborted because audio was too short: %d bytes (%d ms) "
+                            "session_id=%s chunk_count=%d stream_ended_reason=%s "
+                            "stream_elapsed_ms=%s time_to_first_chunk_ms=%s (threshold=%d bytes)",
                             len(buffered_audio),
                             duration_ms,
+                            session_id,
+                            stream_stats["chunk_count"],
+                            stream_stats["ended_reason"],
+                            stream_stats["elapsed_ms"],
+                            stream_stats["time_to_first_chunk_ms"],
+                            MIN_REALTIME_AUDIO_BYTES,
                         )
                         return SaaSRealtimeSTTResult(
                             transcript=None,
@@ -596,10 +647,12 @@ class SaaSClient:
             if not transcript:
                 duration_ms = int(len(buffered_audio) / 32000 * 1000)
                 _LOGGER.warning(
-                    "Auri realtime STT returned empty transcript after sending %d bytes and buffering %d bytes (%d ms of 16k audio)",
+                    "Auri realtime STT returned empty transcript after sending %d bytes and "
+                    "buffering %d bytes (%d ms of 16k audio) session_id=%s",
                     realtime_bytes_sent,
                     len(buffered_audio),
                     duration_ms,
+                    session_id,
                 )
 
             return SaaSRealtimeSTTResult(

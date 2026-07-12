@@ -11,7 +11,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from ...exceptions import ToolExecutionError
-from ..helpers import resolve_entity_id_no_fallback
+from ..helpers import resolve_entity_id_no_fallback, transform_auri_entity_id_to_ha_entity_id
 from ...const import (
     ATTR_DURATION,
     ATTR_ENTITY_ID,
@@ -123,10 +123,12 @@ class TimerToolService:
     async def start_timer(self, arguments: dict[str, Any]) -> dict[str, Any]:
         satellite_speaker = arguments.get("satellite_speaker")
         if satellite_speaker is not None:
-            if not satellite_speaker.startswith("media_player."):
-                normalized_entity = satellite_speaker.removeprefix("media_player").lstrip("._ ")
-                satellite_speaker = f"media_player.{normalized_entity}"
-                
+            # The LLM sees entities in "AI processing format" (e.g.
+            # "satellite_speaker.X"), per transform_ha_entity_id_to_auri_entity_id
+            # in get_exposed_entities(), so translate back with the matching
+            # canonical helper rather than ad-hoc prefix stripping.
+            satellite_speaker = transform_auri_entity_id_to_ha_entity_id(satellite_speaker)
+
             satellite_speaker = resolve_entity_id_no_fallback(
                 self.hass,
                 "media_player",

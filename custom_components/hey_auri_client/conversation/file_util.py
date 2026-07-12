@@ -20,3 +20,13 @@ async def write_to_file(file_path: str, mode: str, data: str) -> None:
 
     async with aiofiles.open(file_path, mode, encoding="utf-8") as handle:
         await handle.write(data)
+
+
+async def write_bytes_to_file(file_path: str, mode: str, data: bytes) -> None:
+    """Write binary data to a file, creating directories as needed."""
+    directory = os.path.dirname(file_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    async with aiofiles.open(file_path, mode) as handle:
+        await handle.write(data)

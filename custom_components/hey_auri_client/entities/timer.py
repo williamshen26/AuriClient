@@ -8,16 +8,43 @@ import uuid
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_point_in_utc_time
 
 from ..const import (
     ATTR_DURATION,
     ATTR_REMAINING,
     ATTR_SATELLITE_SPEAKER,
+    ATTR_SATELLITE_TIMER_RING,
     ATTR_TIMER_ID,
     DOMAIN,
     EVENT_AURI_TIMER_FINISHED,
 )
+
+# Must match the switch's `name:` in the satellite's ESPHome YAML.
+_TIMER_RINGING_ENTITY_NAME = "Timer Ringing"
+
+
+def _derive_satellite_timer_ring_entity_id(
+    hass: HomeAssistant, satellite_speaker: str | None
+) -> str | None:
+    """Find the switch entity named 'Timer Ringing' on the same device as satellite_speaker."""
+    if not satellite_speaker:
+        return None
+
+    entity_registry = er.async_get(hass)
+    speaker_entry = entity_registry.async_get(satellite_speaker)
+    if speaker_entry is None or speaker_entry.device_id is None:
+        return None
+
+    for entry in er.async_entries_for_device(entity_registry, speaker_entry.device_id):
+        if entry.domain != "switch":
+            continue
+        if (entry.name or entry.original_name) == _TIMER_RINGING_ENTITY_NAME:
+            return entry.entity_id
+
+    return None
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -120,10 +147,15 @@ class AuriTimerEntity(SensorEntity):
 
             self.async_write_ha_state()
 
+            satellite_timer_ring_entity_id = _derive_satellite_timer_ring_entity_id(
+                self.hass, self._satellite_speaker
+            )
+
             _LOGGER.info(
-                "AURI timer %s finished. Satellite speaker: %s",
+                "AURI timer %s finished. Satellite speaker: %s, Satellite timer ring entity: %s",
                 self.timer_id,
                 self._satellite_speaker,
+                satellite_timer_ring_entity_id,
             )
 
             self.hass.bus.async_fire(
@@ -133,6 +165,7 @@ class AuriTimerEntity(SensorEntity):
                     "entity_id": self.entity_id,
                     ATTR_DURATION: self._duration_seconds,
                     ATTR_SATELLITE_SPEAKER: self._satellite_speaker,
+                    ATTR_SATELLITE_TIMER_RING: satellite_timer_ring_entity_id,
                 },
             )
 
