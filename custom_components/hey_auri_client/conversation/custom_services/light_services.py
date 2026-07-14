@@ -96,11 +96,16 @@ class LightToolService:
                 arguments.get("entity_id"),
             )
         except ToolExecutionError:
-            entity_id = resolve_entity_id_no_fallback(
-                self.hass,
-                "switch",
-                arguments.get("entity_id"),
-            )
+            try:
+                entity_id = resolve_entity_id_no_fallback(
+                    self.hass,
+                    "switch",
+                    arguments.get("entity_id"),
+                )
+            except ToolExecutionError:
+                return {
+                    "retry": "entity_id is required and must be a valid light or switch entity, double-check your spelling and that the entity is available in list of entities",
+                }
 
         domain = entity_id.split(".")[0]
         retry = await self._call_domain_turn(
@@ -121,11 +126,16 @@ class LightToolService:
                 arguments.get("entity_id"),
             )
         except ToolExecutionError:
-            entity_id = resolve_entity_id_no_fallback(
-                self.hass,
-                "switch",
-                arguments.get("entity_id"),
-            )
+            try:
+                entity_id = resolve_entity_id_no_fallback(
+                    self.hass,
+                    "switch",
+                    arguments.get("entity_id"),
+                )
+            except ToolExecutionError:
+                return {
+                    "retry": "entity_id is required and must be a valid light or switch entity, double-check your spelling and that the entity is available in list of entities",
+                }
 
         domain = entity_id.split(".")[0]
         retry = await self._call_domain_turn(
