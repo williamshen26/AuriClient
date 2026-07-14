@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable
 import asyncio
+import audioop
+from dataclasses import dataclass, field
 from datetime import datetime
 import io
 import json
@@ -20,6 +22,7 @@ from ..const import (
     CONF_CLIENT_ID,
     DOMAIN,
     ERROR_NO_AUTHENTICATION,
+    ERROR_NO_LOST_COLLISION,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
     CONF_SHARED_SECRET,
     CONF_STT_LANGUAGE,
@@ -49,31 +52,118 @@ DEBUG_WAV_ON_FAILURE = False  # save whenever a session ends without a transcrip
 DEBUG_WAV_ALWAYS = False  # save every session regardless of outcome
 
 
+def _rms(buffered_audio: bytearray) -> int:
+    """Return RMS loudness of captured 16-bit PCM audio so far (0 if none/misaligned)."""
+    # Only used as a relative comparison between candidates in the same window,
+    # so we don't bother stripping a possible leading WAV header - any skew it
+    # introduces is small and applies equally to every candidate.
+    sample_bytes = bytes(buffered_audio[: len(buffered_audio) - (len(buffered_audio) % 2)])
+    if not sample_bytes:
+        return 0
+    return audioop.rms(sample_bytes, 2)
+
+
+@dataclass(slots=True)
+class _CollisionCandidate:
+    session_id: str
+    buffered_audio: bytearray
+
+
+@dataclass(slots=True)
+class _CollisionWindow:
+    started_at: float
+    candidates: list[_CollisionCandidate] = field(default_factory=list)
+    decided: asyncio.Event = field(default_factory=asyncio.Event)
+    winner_session_id: str | None = None
+
+
 class _WakeWordCollisionArbiter:
-    """Allow only the earliest STT session in a short collision window."""
+    """Let only the loudest of any concurrent wake-word sessions proceed.
+
+    Registration (which session joins which window) is separated from
+    waiting for the decision: register() must be called as early as possible
+    - before any per-session network setup like the realtime gateway
+    connect, whose variable latency would otherwise skew which sessions
+    appear to be "within the window" of each other. wait_for_decision() is
+    the blocking half, and can still happen later (e.g. right before we'd
+    otherwise start sending audio), so connection setup time still gets
+    hidden behind whatever of the window remains at that point.
+    """
 
     def __init__(self, *, window_seconds: float) -> None:
         self._window_seconds = window_seconds
         self._lock = asyncio.Lock()
-        self._last_session_started_at: float | None = None
-        self._last_session_id: str | None = None
+        self._window: _CollisionWindow | None = None
+        self._windows_by_session: dict[str, _CollisionWindow] = {}
 
-    async def claim(self, session_id: str) -> tuple[bool, str | None, float | None]:
-        """Claim STT processing rights for this session."""
-        now = monotonic()
+    async def register(self, session_id: str, buffered_audio: bytearray) -> None:
+        """Join the current collision window (starting a new one if none is open)."""
         async with self._lock:
-            if self._last_session_started_at is None:
-                self._last_session_started_at = now
-                self._last_session_id = session_id
-                return True, None, None
+            now = monotonic()
+            started_new_window = self._window is None or (
+                now - self._window.started_at
+            ) >= self._window_seconds
+            if started_new_window:
+                self._window = _CollisionWindow(started_at=now)
+            window = self._window
+            window.candidates.append(_CollisionCandidate(session_id, buffered_audio))
+            is_decider = len(window.candidates) == 1
+            self._windows_by_session[session_id] = window
+            age_ms = int((now - window.started_at) * 1000)
 
-            delta = now - self._last_session_started_at
-            if delta <= self._window_seconds:
-                return False, self._last_session_id, delta
+        _LOGGER.info(
+            "Wake word collision registered session_id=%s %s window_age_ms=%d "
+            "candidate_count=%d",
+            session_id,
+            "started new window" if started_new_window else "joined existing window",
+            age_ms,
+            len(window.candidates),
+        )
 
-            self._last_session_started_at = now
-            self._last_session_id = session_id
-            return True, None, None
+        if is_decider:
+            # Runs independently of the registering coroutine's own lifecycle,
+            # so the window still resolves on schedule even if that coroutine
+            # errors out before ever calling wait_for_decision().
+            asyncio.create_task(self._decide(window))
+
+    async def _decide(self, window: _CollisionWindow) -> None:
+        remaining = window.started_at + self._window_seconds - monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+        winner = max(window.candidates, key=lambda candidate: _rms(candidate.buffered_audio))
+        async with self._lock:
+            window.winner_session_id = winner.session_id
+            if self._window is window:
+                self._window = None
+        _LOGGER.info(
+            "Wake word collision resolved winner=%s candidates=%s",
+            winner.session_id,
+            [(c.session_id, _rms(c.buffered_audio)) for c in window.candidates],
+        )
+        window.decided.set()
+
+    async def wait_for_decision(self, session_id: str) -> bool:
+        """Block until this session's window is resolved; return True if it won."""
+        window = self._windows_by_session.pop(session_id, None)
+        if window is None:
+            # No registration on record for this session; don't block a
+            # session we never tracked.
+            return True
+
+        try:
+            await asyncio.wait_for(
+                window.decided.wait(), timeout=self._window_seconds + 5.0
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "Wake word collision arbitration timed out waiting for a decision "
+                "session_id=%s",
+                session_id,
+            )
+            return False
+
+        return window.winner_session_id == session_id
 
 
 async def async_setup_entry(
@@ -146,15 +236,10 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
     ) -> stt.SpeechResult:
         """Upload audio stream to Auri cloud and return transcript."""
         session_id = str(uuid.uuid4())[:8]
-        is_primary, winner_session_id, delta_seconds = await self._collision_arbiter.claim(session_id)
-        if not is_primary:
-            _LOGGER.info(
-                "Suppressing duplicate STT session session_id=%s winner_session_id=%s delta_ms=%d",
-                session_id,
-                winner_session_id,
-                int((delta_seconds or 0.0) * 1000),
-            )
-            return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
+        _LOGGER.info(
+            "Auri STT async_process_audio_stream invoked session_id=%s",
+            session_id,
+        )
 
         configured_language = str(
             self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
@@ -169,8 +254,19 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
                 stream=stream,
                 language=language,
                 client_session_id=session_id,
+                collision_register=lambda buf: self._collision_arbiter.register(
+                    session_id, buf
+                ),
+                collision_wait=lambda: self._collision_arbiter.wait_for_decision(session_id),
             )
             buffered_audio.extend(streaming_result.buffered_audio)
+            if streaming_result.error_no == ERROR_NO_LOST_COLLISION:
+                _LOGGER.info(
+                    "Auri STT session_id=%s lost wake-word collision arbitration to a "
+                    "louder satellite; standing down",
+                    session_id,
+                )
+                return stt.SpeechResult(None, stt.SpeechResultState.SUCCESS)
             if streaming_result.error_no == ERROR_NO_AUTHENTICATION:
                 return stt.SpeechResult(VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE, stt.SpeechResultState.SUCCESS)
             if streaming_result.transcript:

@@ -1,7 +1,7 @@
 """SaaS client transport and realtime STT helpers."""
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Callable
 import asyncio
 import audioop
 from dataclasses import dataclass
@@ -25,6 +25,7 @@ from .const import (
     ERROR_NO_AUTHENTICATION,
     ERROR_NO_CONNECTION,
     ERROR_NO_EMPTY_TRANSCRIPT,
+    ERROR_NO_LOST_COLLISION,
     ERROR_NO_NO_AUDIO_CHUNKS,
     ERROR_NO_NO_UPSTREAM_AUDIO,
     ERROR_NO_TIMEOUT,
@@ -354,6 +355,8 @@ class SaaSClient:
         language: str,
         stream: AsyncIterable[bytes],
         client_session_id: str | None = None,
+        collision_register: Callable[[bytearray], Awaitable[None]] | None = None,
+        collision_wait: Callable[[], Awaitable[bool]] | None = None,
     ) -> SaaSRealtimeSTTResult:
         """Stream STT audio to realtime gateway and return transcript + buffered audio."""
         session_id = client_session_id or "unknown"
@@ -429,6 +432,12 @@ class SaaSClient:
 
         reader_task = asyncio.create_task(read_ha_audio())
 
+        if collision_register is not None:
+            # As early as possible, before any per-session network setup (gateway
+            # connect, auth) whose variable latency would otherwise skew which
+            # sessions land within the same collision window as each other.
+            await collision_register(buffered_audio)
+
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.ws_connect(endpoint, headers=ws_auth_headers, heartbeat=20) as ws:
@@ -442,6 +451,27 @@ class SaaSClient:
                             },
                         }
                     )
+
+                    if collision_wait is not None:
+                        # Connection is already warm; buffered_audio keeps growing via
+                        # read_ha_audio() regardless of whether we've started draining
+                        # audio_queue, so waiting here doesn't lose any captured audio -
+                        # it just delays when we start forwarding it upstream. Whatever
+                        # of the window already elapsed during connect setup is time we
+                        # don't have to wait again here.
+                        cleared = await collision_wait()
+                        if not cleared:
+                            _LOGGER.info(
+                                "Auri realtime STT session_id=%s lost wake-word collision "
+                                "arbitration, aborting before sending audio upstream",
+                                session_id,
+                            )
+                            return SaaSRealtimeSTTResult(
+                                transcript=None,
+                                buffered_audio=bytes(buffered_audio),
+                                error="Lost wake-word collision arbitration",
+                                error_no=ERROR_NO_LOST_COLLISION,
+                            )
 
                     while True:
                         chunk = await audio_queue.get()
