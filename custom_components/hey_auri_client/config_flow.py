@@ -41,6 +41,7 @@ from .const import (
     CONF_REQUEST_TIMEOUT,
     CONF_STT_LANGUAGE,
     CONF_SHARED_SECRET,
+    SUPPORTED_LANGUAGES,
     CONF_TRASH_DISPOSAL_INSTRUCTION,
     CONF_WIFI_INSTRUCTION,
     DEFAULT_METRICS_MEASUREMENT,
@@ -55,6 +56,68 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 _PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
+
+# Display names for the STT language dropdown only — SUPPORTED_LANGUAGES
+# itself stays plain ISO 639-1 codes for everything else (py3langid,
+# Cartesia's API, OpenAI's transcription language param). Scoped to this
+# file rather than const.py since nothing else needs it.
+_LANGUAGE_DISPLAY_NAMES: dict[str, str] = {
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "hi": "Hindi",
+    "it": "Italian",
+    "ko": "Korean",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "sv": "Swedish",
+    "tr": "Turkish",
+    "tl": "Tagalog",
+    "bg": "Bulgarian",
+    "ro": "Romanian",
+    "ar": "Arabic",
+    "cs": "Czech",
+    "el": "Greek",
+    "fi": "Finnish",
+    "hr": "Croatian",
+    "ms": "Malay",
+    "sk": "Slovak",
+    "da": "Danish",
+    "ta": "Tamil",
+    "uk": "Ukrainian",
+    "hu": "Hungarian",
+    "no": "Norwegian",
+    "vi": "Vietnamese",
+    "bn": "Bengali",
+    "th": "Thai",
+    "he": "Hebrew",
+    "ka": "Georgian",
+    "id": "Indonesian",
+    "te": "Telugu",
+    "gu": "Gujarati",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "pa": "Punjabi",
+}
+
+
+def _stt_language_options() -> list[selector.SelectOptionDict]:
+    """STT language dropdown options, sorted alphabetically by display name."""
+    options = [
+        selector.SelectOptionDict(
+            value=code,
+            label=_LANGUAGE_DISPLAY_NAMES.get(code, code),
+        )
+        for code in SUPPORTED_LANGUAGES
+    ]
+    options.sort(key=lambda option: option["label"])
+    return options
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -192,7 +255,12 @@ class OptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_STT_LANGUAGE,
                     default=str(options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)),
-                ): str,
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=_stt_language_options(),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 vol.Optional(
                     CONF_TTS_STREAM_ENDPOINT,
                     default=str(options.get(CONF_TTS_STREAM_ENDPOINT, DEFAULT_TTS_STREAM_ENDPOINT)),

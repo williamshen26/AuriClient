@@ -75,11 +75,15 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
 
     @property
     def supported_languages(self) -> list[str]:
-        """Return all languages selectable per-pipeline in HA's Assist
-        pipeline editor (Speech-to-text: Language). Capped to
-        SUPPORTED_LANGUAGES rather than everything OpenAI's STT model can
-        transcribe, so nothing gets configured here that Cartesia TTS
-        couldn't speak back in the same pipeline.
+        """Return all languages this entity can be selected for as a
+        pipeline's STT engine (HA excludes an engine from the picker
+        entirely if none of its declared languages match the pipeline's
+        configured language). Kept broad so this stays selectable for any
+        of our supported languages — actual per-request language no longer
+        trusts what HA's pipeline Language dropdown reports back (see
+        async_process_audio_stream), since it's proven unreliable, so it
+        doesn't matter that these are bare codes rather than the
+        region-qualified tags that dropdown would need to populate properly.
         """
         return list(SUPPORTED_LANGUAGES)
 
@@ -116,10 +120,22 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
         """Upload audio stream to Auri cloud and return transcript."""
         session_id = str(uuid.uuid4())[:8]
 
+        # HA's Assist pipeline Language dropdown for this entity has proven
+        # unreliable (doesn't consistently reflect what's actually
+        # selectable), so metadata.language is no longer trusted as the
+        # primary source — configured_language (now a proper dropdown in
+        # config_flow.py) wins, with metadata.language only as a fallback
+        # for the rare case the option is somehow unset.
         configured_language = str(
             self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
         ).strip()
-        language = (metadata.language or configured_language or DEFAULT_STT_LANGUAGE).strip()
+        raw_language = (configured_language or metadata.language or DEFAULT_STT_LANGUAGE).strip()
+        # Tolerate a region-qualified value (e.g. "en-US") from either
+        # source — the backend (OpenAI transcription, matching Cartesia's
+        # own convention on the TTS side) expects a bare ISO 639-1 code.
+        language = raw_language.lower().split("-", 1)[0]
+        if language not in SUPPORTED_LANGUAGES:
+            language = DEFAULT_STT_LANGUAGE
 
         buffered_audio = bytearray()
 

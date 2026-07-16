@@ -763,12 +763,6 @@ class SaaSClient:
 
         if self.tts_stream_endpoint:
             request_url, sign_path = _resolve_tts_stream_target(self.tts_stream_endpoint)
-            _LOGGER.warning(
-                "Auri TTS stream target url=%s sign_path=%s configured_endpoint=%s",
-                request_url,
-                sign_path,
-                self.tts_stream_endpoint,
-            )
             async for chunk in self.stream_binary(
                 sign_path,
                 body=body,
@@ -780,11 +774,6 @@ class SaaSClient:
                 yield chunk
             return
 
-        _LOGGER.warning(
-            "Auri TTS stream target url=%s sign_path=%s configured_endpoint=<empty>",
-            f"{self.endpoint}{TTS_STREAM_PATH}",
-            TTS_STREAM_PATH,
-        )
         async for chunk in self.stream_binary(
             TTS_STREAM_PATH,
             body=body,

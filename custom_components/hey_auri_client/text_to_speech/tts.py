@@ -90,11 +90,6 @@ async def async_setup_entry(
     """Set up Hey Auri TTS provider entity."""
     entity = AuriTextToSpeechEntity(hass, entry)
 
-    _LOGGER.warning(
-        "Auri TTS setup: supports_streaming_input=%s",
-        entity.async_supports_streaming_input(),
-    )
-
     async_add_entities([entity])
 
 
@@ -224,7 +219,6 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         )
 
         async def _data_gen() -> AsyncGenerator[bytes, None]:
-            _LOGGER.warning("Auri TTS data gen payload message is %s", payload.get("text"))
             stream_started = perf_counter()
             stream_has_data = False
             try:

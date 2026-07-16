@@ -241,7 +241,12 @@ def get_exposed_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
         entity = entity_registry.async_get(state.entity_id)
         aliases: list[str] = []
         if entity and entity.aliases:
-            aliases = list(entity.aliases)
+            # entity.aliases can contain ComputedNameType, a HA-internal
+            # sentinel meaning "use the entity's computed name as an alias"
+            # (not a real string — not JSON serializable). The computed name
+            # is already carried separately as "name" above, so just drop
+            # the sentinel rather than try to resolve it here.
+            aliases = [alias for alias in entity.aliases if isinstance(alias, str)]
 
         exposed_entities.append(
             {
