@@ -33,25 +33,36 @@ DEFAULT_REQUEST_TIMEOUT = 30
 DEFAULT_STT_PIPELINE_ID = "auri-cloud-voice"
 DEFAULT_STT_LANGUAGE = "en"
 DEFAULT_TTS_LANGUAGE = "en"
-DEFAULT_TTS_VOICE = "alloy"
+# Shared ceiling for both STT (populates the language dropdown in HA's Assist
+# pipeline editor) and TTS (restricts language detection so Cartesia is never
+# asked to speak something it can't) — keeping one list means a language you
+# can pick for STT is always one TTS can actually speak back.
+# Cartesia's /tts/bytes `language` field only accepts this exact set of ISO
+# 639-1 codes (all confirmed present in py3langid's own 97-language model, so
+# restricting the TTS classifier to this set is safe). Source: Cartesia
+# /tts/bytes API reference request-schema enum (checked 2026-07-14) — update
+# this list (and text_to_speech/tts.py's _LANGUAGE_IDENTIFIER) if Cartesia
+# adds languages.
+SUPPORTED_LANGUAGES = (
+    "en", "fr", "de", "es", "pt", "zh", "ja", "hi", "it", "ko",
+    "nl", "pl", "ru", "sv", "tr", "tl", "bg", "ro", "ar", "cs",
+    "el", "fi", "hr", "ms", "sk", "da", "ta", "uk", "hu", "no",
+    "vi", "bn", "th", "he", "ka", "id", "te", "gu", "kn", "ml",
+    "mr", "pa",
+)
+# Persona names, not provider voice names — the backend resolves each to a
+# real per-provider/per-language voice (see AuriService cartesia_client.py
+# PERSONA_TO_GENDER / tts_stream_app.py _OPENAI_VOICE_BY_PERSONA).
+DEFAULT_TTS_VOICE = "auri"
 DEFAULT_TTS_STREAM_ENDPOINT = f"{API_ENDPOINT}/tts/stream"
 DEFAULT_TTS_SUPPORTED_VOICES = [
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "fable",
-    "onyx",
-    "nova",
-    "sage",
-    "shimmer",
+    "glen",
+    "auri",
 ]
 DEFAULT_REALTIME_WS_ENDPOINT = "wss://realtime.hey-auri.com/ws/realtime"
 
 TRANSCRIBE_PATH = "/voice/transcribe"
 TTS_STREAM_PATH = "/tts/stream"
-WAKE_WORD_COLLISION_WINDOW_SECONDS = 1.0
 MIN_REALTIME_AUDIO_BYTES = 9600  # 300 ms of 16 kHz mono 16-bit PCM
 MIN_FALLBACK_AUDIO_BYTES = 9600  # 300 ms of 16 kHz mono 16-bit PCM
 

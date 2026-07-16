@@ -10,12 +10,13 @@
     "recorder",
     "stt",
     "rest",
-    "scrape"
+    "scrape",
+    "tts"
   ],
   "documentation": "https://github.com/williamshen26/AuriClient",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/williamshen26/AuriClient/issues",
-  "requirements": ["influxdb==5.3.2"],
+  "requirements": ["influxdb==5.3.2", "py3langid==0.3.0"],
   "version": "0.1.0"
 }

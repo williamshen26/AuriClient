@@ -11,6 +11,8 @@ import struct
 from typing import Any
 import wave
 
+from py3langid.langid import MODEL_FILE, LanguageIdentifier
+
 from homeassistant.components import tts
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -24,6 +26,7 @@ from ..const import (
     DEFAULT_TTS_SUPPORTED_VOICES,
     DEFAULT_TTS_STREAM_ENDPOINT,
     DEFAULT_TTS_VOICE,
+    SUPPORTED_LANGUAGES,
 )
 from ..helpers import get_timeout_seconds
 from ..metric_service import RequestLatencyMetricService
@@ -56,6 +59,27 @@ _MAX_PRE_SPEECH_WAIT_SECONDS = 30.0
 
 # Number of PCM frames yielded from the completed OpenAI WAV at a time.
 _PCM_FRAMES_PER_CHUNK = 4096
+
+# Text shorter than this is too unreliable to classify (e.g. "ok", "yes") —
+# fall back to the pipeline-provided language instead of guessing.
+_LANGUAGE_DETECTION_MIN_CHARS = 3
+
+# Restricting the classifier's candidate set (rather than filtering its output
+# after the fact) both improves accuracy and guarantees classify() can never
+# return a language Cartesia can't speak. Built once at import time — the
+# underlying model load is the expensive part, and this identifier is never
+# mutated again after set_languages(), so sharing one instance across
+# concurrent async TTS requests is safe. See const.SUPPORTED_LANGUAGES for
+# where this list comes from and why it's shared with STT.
+_LANGUAGE_IDENTIFIER = LanguageIdentifier.from_pickled_model(MODEL_FILE)
+_LANGUAGE_IDENTIFIER.set_languages(list(SUPPORTED_LANGUAGES))
+
+# Spoken (in English) when the detected/fallback language isn't one Cartesia
+# supports, instead of silently mispronouncing text in the wrong language.
+_UNSUPPORTED_LANGUAGE_MESSAGE = (
+    "It seems like I cannot understand the language you are speaking, "
+    "would you like to communicate in English?"
+)
 
 
 async def async_setup_entry(
@@ -106,8 +130,19 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
 
     @property
     def supported_languages(self) -> list[str]:
-        """Return the list of supported languages."""
-        return [DEFAULT_TTS_LANGUAGE]
+        """Return the list of supported languages.
+
+        Real language codes, not a placeholder: HA's pipeline editor only
+        offers/keeps an entity selectable if its declared languages actually
+        match the pipeline's configured language (homeassistant.util.language
+        .matches() scores non-real codes like "auto" as a hard mismatch,
+        which excludes the entity from the picker entirely — learned this the
+        hard way). The language actually used per-request is still
+        auto-detected from the reply text (see _detect_language); this list
+        only exists so HA considers the entity a valid choice for any of
+        them.
+        """
+        return list(SUPPORTED_LANGUAGES)
 
     @property
     def default_language(self) -> str:
@@ -268,12 +303,33 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
             (options or {}).get("voice") or DEFAULT_TTS_VOICE
         ).strip().lower()
 
+        # Defensive: normalize anything HA passes that isn't one of our
+        # declared SUPPORTED_LANGUAGES to a real fallback before using it as
+        # one — _detect_language's short-text fallback path needs a real
+        # language, not whatever arbitrary string ends up here.
+        pipeline_language = str(language or "").strip().lower()
+        if pipeline_language not in SUPPORTED_LANGUAGES:
+            pipeline_language = DEFAULT_TTS_LANGUAGE
+        detected_language = _detect_language(clean_message, fallback=pipeline_language)
+
+        if detected_language not in SUPPORTED_LANGUAGES:
+            # The classifier itself can't return this (it's restricted to
+            # SUPPORTED_LANGUAGES) — this only fires via the short-text
+            # fallback, when the HA pipeline's own configured language isn't
+            # one Cartesia can speak either.
+            _LOGGER.warning(
+                "Auri TTS language=%s is not supported; replying in English instead",
+                detected_language,
+            )
+            return {
+                "text": _UNSUPPORTED_LANGUAGE_MESSAGE,
+                "language": DEFAULT_TTS_LANGUAGE,
+                "voice": voice,
+            }
+
         return {
             "text": clean_message,
-            "language": (
-                str(language or DEFAULT_TTS_LANGUAGE).strip()
-                or DEFAULT_TTS_LANGUAGE
-            ),
+            "language": detected_language,
             "voice": voice,
         }
 
@@ -384,6 +440,30 @@ def _iter_validated_wav_pcm(audio: bytes) -> Iterator[bytes]:
                 break
 
             yield pcm_chunk
+
+
+def _detect_language(text: str, *, fallback: str) -> str:
+    """Detect the actual language of TTS text so providers that use it for
+    pronunciation (e.g. Cartesia) get it right, instead of always receiving
+    whatever language the HA pipeline is configured for. Falls back to
+    `fallback` for text too short to classify reliably.
+    """
+    if len(text) < _LANGUAGE_DETECTION_MIN_CHARS:
+        _LOGGER.info(
+            "Auri TTS language=%s (fallback: text too short to classify, len=%d)",
+            fallback,
+            len(text),
+        )
+        return fallback
+
+    detected, confidence = _LANGUAGE_IDENTIFIER.classify(text)
+    _LOGGER.info(
+        "Auri TTS language=%s (detected, confidence=%.2f, fallback_was=%s)",
+        detected,
+        confidence,
+        fallback,
+    )
+    return detected
 
 
 def _format_voice_name(voice_id: str) -> str:

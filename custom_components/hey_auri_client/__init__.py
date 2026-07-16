@@ -21,7 +21,7 @@ from .const import DATA_AGENT, DOMAIN, ROOT_RUNTIME
 from .conversation.services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = ["stt", "sensor"]
+PLATFORMS = ["stt", "sensor", "tts"]
 MEDIA_PLAYER_SOURCES_STORAGE_VERSION = 1
 MEDIA_PLAYER_SOURCES_STORAGE_KEY = f"{DOMAIN}_media_player_sources"
 

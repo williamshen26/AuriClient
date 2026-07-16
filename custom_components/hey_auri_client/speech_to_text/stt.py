@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable
-import asyncio
 from datetime import datetime
 import io
 import json
 import logging
-from time import monotonic
 import uuid
 import wave
 
@@ -18,7 +16,6 @@ from homeassistant.core import HomeAssistant
 from ..const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
-    DOMAIN,
     ERROR_NO_AUTHENTICATION,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
     CONF_SHARED_SECRET,
@@ -27,8 +24,8 @@ from ..const import (
     DEFAULT_STT_LANGUAGE,
     DEFAULT_STT_PIPELINE_ID,
     MIN_FALLBACK_AUDIO_BYTES,
+    SUPPORTED_LANGUAGES,
     TRANSCRIBE_PATH,
-    WAKE_WORD_COLLISION_WINDOW_SECONDS,
 )
 from ..conversation.file_util import write_bytes_to_file
 from ..exceptions import SaaSRequestError
@@ -49,33 +46,6 @@ DEBUG_WAV_ON_FAILURE = False  # save whenever a session ends without a transcrip
 DEBUG_WAV_ALWAYS = False  # save every session regardless of outcome
 
 
-class _WakeWordCollisionArbiter:
-    """Allow only the earliest STT session in a short collision window."""
-
-    def __init__(self, *, window_seconds: float) -> None:
-        self._window_seconds = window_seconds
-        self._lock = asyncio.Lock()
-        self._last_session_started_at: float | None = None
-        self._last_session_id: str | None = None
-
-    async def claim(self, session_id: str) -> tuple[bool, str | None, float | None]:
-        """Claim STT processing rights for this session."""
-        now = monotonic()
-        async with self._lock:
-            if self._last_session_started_at is None:
-                self._last_session_started_at = now
-                self._last_session_id = session_id
-                return True, None, None
-
-            delta = now - self._last_session_started_at
-            if delta <= self._window_seconds:
-                return False, self._last_session_id, delta
-
-            self._last_session_started_at = now
-            self._last_session_id = session_id
-            return True, None, None
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -93,11 +63,6 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.entry = entry
         self._attr_unique_id = f"{entry.entry_id}_stt"
-        runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})
-        self._collision_arbiter = runtime.setdefault(
-            "wake_word_collision_arbiter",
-            _WakeWordCollisionArbiter(window_seconds=WAKE_WORD_COLLISION_WINDOW_SECONDS),
-        )
         request_latency_metrics = RequestLatencyMetricService.from_options(hass, entry)
         self._client = SaaSClient(
             hass,
@@ -110,9 +75,13 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
 
     @property
     def supported_languages(self) -> list[str]:
-        """Return a list of supported languages."""
-        configured = str(self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)).strip()
-        return [configured] if configured else [DEFAULT_STT_LANGUAGE]
+        """Return all languages selectable per-pipeline in HA's Assist
+        pipeline editor (Speech-to-text: Language). Capped to
+        SUPPORTED_LANGUAGES rather than everything OpenAI's STT model can
+        transcribe, so nothing gets configured here that Cartesia TTS
+        couldn't speak back in the same pipeline.
+        """
+        return list(SUPPORTED_LANGUAGES)
 
     @property
     def supported_formats(self) -> list[stt.AudioFormats]:
@@ -146,15 +115,6 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
     ) -> stt.SpeechResult:
         """Upload audio stream to Auri cloud and return transcript."""
         session_id = str(uuid.uuid4())[:8]
-        is_primary, winner_session_id, delta_seconds = await self._collision_arbiter.claim(session_id)
-        if not is_primary:
-            _LOGGER.info(
-                "Suppressing duplicate STT session session_id=%s winner_session_id=%s delta_ms=%d",
-                session_id,
-                winner_session_id,
-                int((delta_seconds or 0.0) * 1000),
-            )
-            return stt.SpeechResult(None, stt.SpeechResultState.ERROR)
 
         configured_language = str(
             self.entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE)
