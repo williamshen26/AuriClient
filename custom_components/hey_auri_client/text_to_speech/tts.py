@@ -436,6 +436,26 @@ def _iter_validated_wav_pcm(audio: bytes) -> Iterator[bytes]:
             yield pcm_chunk
 
 
+_KANA_RANGES = (
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+)
+
+
+def _contains_kana(text: str) -> bool:
+    """Return True if text contains any Hiragana/Katakana character.
+
+    Japanese text almost always mixes kanji with kana; Chinese text never
+    does. langid's character n-gram model is weak on short kanji-only text
+    and readily misclassifies it as Japanese — this is a cheap, far more
+    reliable signal for that specific zh/ja ambiguity.
+    """
+    return any(
+        any(start <= ord(char) <= end for start, end in _KANA_RANGES)
+        for char in text
+    )
+
+
 def _detect_language(text: str, *, fallback: str) -> str:
     """Detect the actual language of TTS text so providers that use it for
     pronunciation (e.g. Cartesia) get it right, instead of always receiving
@@ -451,6 +471,16 @@ def _detect_language(text: str, *, fallback: str) -> str:
         return fallback
 
     detected, confidence = _LANGUAGE_IDENTIFIER.classify(text)
+
+    if detected == "ja" and "zh" in SUPPORTED_LANGUAGES and not _contains_kana(text):
+        _LOGGER.info(
+            "Auri TTS language=zh (overriding ja: no kana characters present, "
+            "raw_confidence=%.2f, fallback_was=%s)",
+            confidence,
+            fallback,
+        )
+        return "zh"
+
     _LOGGER.info(
         "Auri TTS language=%s (detected, confidence=%.2f, fallback_was=%s)",
         detected,

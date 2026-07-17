@@ -345,6 +345,16 @@ class MediaPlayerToolService:
         return {"success": True, "entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, entity_id)}
 
     async def search_and_play_music(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not arguments.get("entity_id").startswith("music_source."):
+            return {
+                "retry": (
+                    f"{arguments.get('entity_id')} does not support search_and_play_music because it is not "
+                    "a music_source entity, only music_source entities can be used to play music, "
+                    "based on context, decide whether to retry with a different entity, do nothing, "
+                    "or inform the user that this action is not supported for this device."
+                )
+            }
+
         entity_id = resolve_entity_id_no_fallback(
             self.hass,
             "media_player",
