@@ -24,6 +24,7 @@ from ...const import (
     CONF_WIFI_INSTRUCTION,
     DOMAIN,
 )
+from ...exceptions import ToolExecutionError
 
 
 class GuestToolService:
@@ -129,8 +130,37 @@ class GuestToolService:
             )
         )
 
-    async def send_host_notification(self, arguments: dict[str, Any]) -> str:
-        return "Host notifications are not configured for this property."
+    async def send_host_notification(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        message = str(arguments.get("message") or "").strip()
+        if not message:
+            return {"retry": "message is required for send_host_notification"}
+
+        if not self.hass.services.has_service("notify", "notify"):
+            return {"error": "Host notifications are not configured for this property."}
+
+        try:
+            await self.hass.services.async_call(
+                domain="notify",
+                service="notify",
+                service_data={
+                    "title": "User Request",
+                    "message": message,
+                },
+                blocking=True,
+            )
+            await self.hass.services.async_call(
+                domain="notify",
+                service="persistent_notification",
+                service_data={
+                    "title": "User Request",
+                    "message": message,
+                },
+                blocking=True,
+            )
+        except Exception as err:
+            raise ToolExecutionError(str(err)) from err
+
+        return {"success": True}
 
     async def property_knowledge(self, arguments: dict[str, Any]) -> str:
         return str(
