@@ -19,9 +19,10 @@ from .cache import (
 )
 from .const import DATA_AGENT, DOMAIN, ROOT_RUNTIME
 from .conversation.services import async_setup_services
+from .frontend import async_register_frontend_resources
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = ["stt", "sensor", "tts"]
+PLATFORMS = ["stt", "sensor", "tts", "button"]
 MEDIA_PLAYER_SOURCES_STORAGE_VERSION = 1
 MEDIA_PLAYER_SOURCES_STORAGE_KEY = f"{DOMAIN}_media_player_sources"
 
@@ -31,6 +32,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     await async_setup_services(hass, config)
 
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", dict(ROOT_RUNTIME))
+
+    if runtime.get("frontend_resources_registered") is None:
+        await async_register_frontend_resources(hass)
+        runtime["frontend_resources_registered"] = True
 
     store: Store[dict[str, list[str]]] = runtime.setdefault(
         "media_player_sources_store",
