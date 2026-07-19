@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..helpers import transform_auri_entity_id_to_ha_entity_id, transform_ha_entity_id_to_auri_entity_id
+from ..helpers import (
+    resolve_entity_id_no_fallback,
+    transform_auri_entity_id_to_ha_entity_id,
+    transform_ha_entity_id_to_auri_entity_id,
+)
 import voluptuous as vol
 
 from homeassistant.core import HomeAssistant
@@ -12,6 +16,9 @@ from homeassistant.exceptions import HomeAssistantError
 
 from ...cache import get_media_player_sources
 from ...exceptions import ToolExecutionError
+
+
+_TURN_ON_OFF_SUPPORTED_DOMAINS = {"light", "switch", "media_player", "climate"}
 
 
 class EntityToolService:
@@ -91,6 +98,58 @@ class EntityToolService:
                     results.append({"success": False, "error": str(err)})
 
         return results
+
+    async def turn_on(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._turn_on_off(arguments, service="turn_on")
+
+    async def turn_off(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._turn_on_off(arguments, service="turn_off")
+
+    async def _turn_on_off(self, arguments: dict[str, Any], *, service: str) -> dict[str, Any]:
+        """Fallback for hallucinated generic turn_on/turn_off tool calls.
+
+        The agent occasionally calls the raw HA service name instead of the
+        domain-specific tool (turn_on_light, turn_on_climate, etc.). Rather
+        than failing the turn outright, resolve the entity's domain and
+        dispatch the equivalent domain service directly.
+        """
+        raw_entity_id = arguments.get("entity_id")
+        if not raw_entity_id:
+            return {"retry": f"entity_id is required for {service}"}
+
+        candidate = transform_auri_entity_id_to_ha_entity_id(str(raw_entity_id).strip())
+        domain = candidate.split(".")[0]
+        if domain not in _TURN_ON_OFF_SUPPORTED_DOMAINS:
+            return {
+                "retry": (
+                    f"{candidate} does not support {service}; use the domain-specific tool for "
+                    f"this entity instead (e.g. {service}_light, {service}_climate, {service}_media_player)."
+                )
+            }
+
+        try:
+            entity_id = resolve_entity_id_no_fallback(self.hass, domain, candidate)
+        except ToolExecutionError:
+            return {
+                "retry": f"Entity not found: {candidate}, double-check your spelling and that the entity is available in list of entities"
+            }
+
+        try:
+            await self.hass.services.async_call(
+                domain=domain,
+                service=service,
+                service_data={"entity_id": entity_id},
+                blocking=True,
+            )
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+
+        return {
+            "success": True,
+            "entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, entity_id),
+        }
 
     async def get_entity_state(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = transform_auri_entity_id_to_ha_entity_id(arguments.get("entity_id"))
