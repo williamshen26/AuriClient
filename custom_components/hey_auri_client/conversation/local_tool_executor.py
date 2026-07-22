@@ -51,10 +51,13 @@ class LocalToolExecutor:
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
             "get_entity_state": self.entity.get_entity_state,
             "get_skill_data": self._get_skill_data,
-            # Fallback for hallucinated generic turn_on/turn_off calls; see
-            # EntityToolService._turn_on_off for the domain dispatch logic.
+            # Fallback for hallucinated generic turn_on/turn_off/call_service
+            # calls; see EntityToolService._turn_on_off / .call_service for
+            # the domain dispatch logic.
             "turn_on": self.entity.turn_on,
             "turn_off": self.entity.turn_off,
+            "call_service": self.entity.call_service,
+            "set_language": self.entity.set_language,
             "get_all_persons": self.person.get_all_persons,
             "get_automation_metadata_service": self.automation.get_automation_metadata,
             "list_timers": self.timer.list_timers,
