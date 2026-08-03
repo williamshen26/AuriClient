@@ -63,8 +63,15 @@ DEFAULT_REALTIME_WS_ENDPOINT = "wss://realtime.hey-auri.com/ws/realtime"
 
 TRANSCRIBE_PATH = "/voice/transcribe"
 TTS_STREAM_PATH = "/tts/stream"
-MIN_REALTIME_AUDIO_BYTES = 9600  # 300 ms of 16 kHz mono 16-bit PCM
-MIN_FALLBACK_AUDIO_BYTES = 9600  # 300 ms of 16 kHz mono 16-bit PCM
+# Raised from 300ms (9600 bytes): captures in the 300-1000ms range still
+# passed this gate, got sent to the realtime service, then burned the full
+# post-audio.end max_wait_seconds (1.5s, see stream_realtime_transcription)
+# waiting for a transcript that never arrives for audio this short --
+# dead time on top of the fallback-skip below. Real captures so far are all
+# 1.5s+; raising this to match MIN_FALLBACK_AUDIO_BYTES means audio this
+# short skips the realtime attempt (and its 1.5s dead wait) entirely.
+MIN_REALTIME_AUDIO_BYTES = 32000  # 1000 ms of 16 kHz mono 16-bit PCM
+MIN_FALLBACK_AUDIO_BYTES = 32000  # 1000 ms of 16 kHz mono 16-bit PCM
 
 LATENCY_MEASUREMENT_KEY_CONVERSATION = "conversation"
 LATENCY_MEASUREMENT_KEY_AUDIO = "audio"
