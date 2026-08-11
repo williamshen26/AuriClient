@@ -150,9 +150,18 @@ class LocalToolExecutor:
         elif function_name in self._handlers:
             result = await self._handlers[function_name](arguments)
         else:
-            raise ToolExecutionError(
-                f"Unsupported tool: {function_name}, consider update your Auri client to the latest version that supports this tool."
-            )
+            result = {
+                "retry": (
+                    f"Unsupported tool: {function_name}. Before retrying, check whether this "
+                    "exact tool name was returned by a get_skill_data call earlier in this "
+                    "conversation, or whether you guessed/invented it. If it was not returned by "
+                    "get_skill_data verbatim, call get_skill_data for the relevant skill and use "
+                    "one of the exact tool names it returns instead — do not call this name again. "
+                    "If it genuinely was returned by get_skill_data, this client does not yet "
+                    "support it; tell the user this action isn't available until the client is "
+                    "updated, instead of retrying."
+                )
+            }
 
         result = _to_json_safe(result)
 
