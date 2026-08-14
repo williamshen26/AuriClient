@@ -55,6 +55,7 @@ class GuestToolService:
 
     async def get_guest_data(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {
+            "success": True,
             "booking_id": str(self._get_option(CONF_BOOKING_ID, "There is no booking ID configured.")),
             "guest_name": str(self._get_option(CONF_GUEST_NAME, "There is no guest name configured.")),
             "guest_phone_number": str(
@@ -69,66 +70,87 @@ class GuestToolService:
             "notes": str(self._get_option(CONF_NOTES, "There are no guest notes configured.")),
         }
 
-    async def house_layout(self, arguments: dict[str, Any]) -> dict[str, list[str]]:
+    async def house_layout(self, arguments: dict[str, Any]) -> dict[str, Any]:
         from ..helpers import get_house_layout
 
-        return get_house_layout(self.hass)
+        return {"success": True, "layout": get_house_layout(self.hass)}
 
-    async def check_in_instruction(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_CHECK_IN_INSTRUCTION,
-                "There is no check-in instruction configured.",
-            )
-        )
+    async def check_in_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_CHECK_IN_INSTRUCTION,
+                    "There is no check-in instruction configured.",
+                )
+            ),
+        }
 
-    async def check_out_instruction(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_CHECK_OUT_INSTRUCTION,
-                "There is no check-out instruction configured.",
-            )
-        )
+    async def check_out_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_CHECK_OUT_INSTRUCTION,
+                    "There is no check-out instruction configured.",
+                )
+            ),
+        }
 
-    async def wifi_instruction(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_WIFI_INSTRUCTION,
-                "There is no Wi-Fi instruction configured.",
-            )
-        )
+    async def wifi_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_WIFI_INSTRUCTION,
+                    "There is no Wi-Fi instruction configured.",
+                )
+            ),
+        }
 
-    async def parking_instruction(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_PARKING_INSTRUCTION,
-                "There is no parking instruction configured.",
-            )
-        )
+    async def parking_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_PARKING_INSTRUCTION,
+                    "There is no parking instruction configured.",
+                )
+            ),
+        }
 
-    async def house_rules(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_HOUSE_RULES,
-                "There are no house rules configured.",
-            )
-        )
+    async def house_rules(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_HOUSE_RULES,
+                    "There are no house rules configured.",
+                )
+            ),
+        }
 
-    async def trash_disposal_instruction(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_TRASH_DISPOSAL_INSTRUCTION,
-                "There is no trash disposal instruction configured.",
-            )
-        )
+    async def trash_disposal_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_TRASH_DISPOSAL_INSTRUCTION,
+                    "There is no trash disposal instruction configured.",
+                )
+            ),
+        }
 
-    async def host_contact_instruction(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_HOST_CONTACT_INSTRUCTION,
-                "There is no host contact instruction configured.",
-            )
-        )
+    async def host_contact_instruction(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_HOST_CONTACT_INSTRUCTION,
+                    "There is no host contact instruction configured.",
+                )
+            ),
+        }
 
     async def send_host_notification(self, arguments: dict[str, Any]) -> dict[str, Any]:
         message = str(arguments.get("message") or "").strip()
@@ -162,18 +184,24 @@ class GuestToolService:
 
         return {"success": True}
 
-    async def property_knowledge(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_PROPERTY_KNOWLEDGE,
-                "There is no property knowledge configured.",
-            )
-        )
+    async def property_knowledge(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_PROPERTY_KNOWLEDGE,
+                    "There is no property knowledge configured.",
+                )
+            ),
+        }
 
-    async def local_recommendations(self, arguments: dict[str, Any]) -> str:
-        return str(
-            self._get_option(
-                CONF_LOCAL_RECOMMENDATIONS,
-                "There are no local recommendations configured.",
-            )
-        )
+    async def local_recommendations(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": str(
+                self._get_option(
+                    CONF_LOCAL_RECOMMENDATIONS,
+                    "There are no local recommendations configured.",
+                )
+            ),
+        }

@@ -15,7 +15,7 @@ class PersonToolService:
     async def get_all_persons(
         self,
         arguments: dict[str, Any] | None = None,
-    ) -> list[dict[str, str]]:
+    ) -> dict[str, Any]:
         """Return Home Assistant persons linked to a user/client id."""
         del arguments
         persons_with_user_id: list[dict[str, str]] = []
@@ -33,4 +33,4 @@ class PersonToolService:
                 }
             )
 
-        return persons_with_user_id
+        return {"success": True, "persons": persons_with_user_id}

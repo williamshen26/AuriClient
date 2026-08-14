@@ -136,7 +136,7 @@ class TimerToolService:
             )
 
         try:
-            return await start_auri_timer_native(
+            result = await start_auri_timer_native(
                 self.hass,
                 duration=arguments.get("duration"),
                 satellite_speaker=satellite_speaker,
@@ -146,12 +146,16 @@ class TimerToolService:
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
+        return {"success": True, **result}
+
     async def list_timers(
         self,
         arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         del arguments
         try:
-            return await get_auri_timers_native(self.hass)
+            result = await get_auri_timers_native(self.hass)
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
+
+        return {"success": True, **result}

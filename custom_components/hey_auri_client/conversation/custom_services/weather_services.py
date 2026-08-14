@@ -30,6 +30,7 @@ class WeatherToolService:
             return_response=True,
         )
         return {
+            "success": True,
             "temperature_unit": str(self.hass.config.units.temperature_unit),
             "result": result,
         }

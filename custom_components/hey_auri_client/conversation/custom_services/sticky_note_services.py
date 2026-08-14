@@ -231,7 +231,7 @@ class StickyNoteToolService:
             }
 
         try:
-            return await create_auri_sticky_note_native(
+            result = await create_auri_sticky_note_native(
                 self.hass,
                 title=title,
                 markdown=markdown,
@@ -240,6 +240,8 @@ class StickyNoteToolService:
             return {"retry": str(err)}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
+
+        return {"success": True, **result}
 
 
 __all__ = [

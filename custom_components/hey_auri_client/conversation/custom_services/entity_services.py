@@ -155,7 +155,7 @@ class EntityToolService:
             raise ToolExecutionError(str(err)) from err
 
         auri_entity_id = transform_ha_entity_id_to_auri_entity_id(self.hass, entity_id)
-        return {"retry": _fallback_correction_message(auri_entity_id, service)}
+        return {"success": True, "retry": _fallback_correction_message(auri_entity_id, service)}
 
     async def call_service(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Fallback for hallucinated generic call_service tool calls.
@@ -216,7 +216,7 @@ class EntityToolService:
             raise ToolExecutionError(str(err)) from err
 
         auri_entity_id = transform_ha_entity_id_to_auri_entity_id(self.hass, entity_id)
-        return {"retry": _fallback_correction_message(auri_entity_id, "call_service")}
+        return {"success": True, "retry": _fallback_correction_message(auri_entity_id, "call_service")}
 
     async def set_language(self, arguments: dict[str, Any]) -> dict[str, Any]:
         language = str(arguments.get("language") or "").strip().lower()

@@ -244,7 +244,9 @@ def get_house_layout(hass: HomeAssistant) -> dict[str, list[str]]:
 # a capability bitmask; supported_color_modes) aren't meaningful without domain
 # knowledge the model doesn't have. This snapshot is the only source of entity
 # attributes sent to SaaS -- there is no tool to fetch a fresher live reading.
-_NOISY_ATTRIBUTE_KEYS = {"entity_picture", "icon", "friendly_name"}
+_NOISY_ATTRIBUTE_KEYS = {"entity_picture", "icon", "friendly_name", "group_members",
+                         "app_id", "entity_picture_local", "supported_features",
+                         "mass_player_type", "active_queue"}
 
 
 def _filter_entity_attributes(entity_id: str, state_state: str, attributes: Mapping[str, Any]) -> dict[str, Any]:

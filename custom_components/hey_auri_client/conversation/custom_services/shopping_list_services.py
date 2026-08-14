@@ -50,7 +50,9 @@ class ShoppingListToolService:
                     item["uid"] = uid[:8]
 
             _LOGGER.info("get_items result: %s", result)
-            return result
+            if isinstance(result, dict):
+                return {"success": True, **result}
+            return {"success": True, "result": result}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 

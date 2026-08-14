@@ -23,11 +23,6 @@ from .custom_services.user_preferences_services import UserPreferencesToolServic
 from .custom_services.weather_services import WeatherToolService
 from ..exceptions import ToolExecutionError
 
-try:
-    from const import SKILL_REGISTRY  # type: ignore
-except Exception:  # pragma: no cover
-    SKILL_REGISTRY = {}
-
 
 class LocalToolExecutor:
     """Executes supported tool calls locally in Home Assistant."""
@@ -49,7 +44,6 @@ class LocalToolExecutor:
         self.timer = TimerToolService(hass)
         self.calendar = CalendarToolService(hass)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
-            "get_skill_data": self._get_skill_data,
             # Fallback for hallucinated generic turn_on/turn_off/call_service
             # calls; see EntityToolService._turn_on_off / .call_service for
             # the domain dispatch logic.
@@ -168,29 +162,4 @@ class LocalToolExecutor:
             "tool_call_id": tool_call.get("id"),
             "name": function_name,
             "result": result,
-        }
-
-    async def _get_skill_data(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        skill_name = str(arguments.get("skill", "")).strip().lower()
-        if not skill_name:
-            return {
-                "success": False,
-                "error": "skill is required",
-                "available_skills": list(SKILL_REGISTRY.keys()),
-            }
-
-        skill = SKILL_REGISTRY.get(skill_name)
-        if not skill:
-            return {
-                "success": False,
-                "error": f"Unknown skill: {skill_name}",
-                "available_skills": list(SKILL_REGISTRY.keys()),
-            }
-
-        return {
-            "success": True,
-            "skill": skill_name,
-            "description": skill.get("description", ""),
-            "prompt": skill.get("prompt", ""),
-            "tools": skill.get("tools", []),
         }

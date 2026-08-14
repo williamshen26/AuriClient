@@ -32,7 +32,7 @@ class AutomationToolService:
         arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         del arguments
-        return {"automation_metadata": await get_automation_metadata(self.hass)}
+        return {"success": True, "automation_metadata": await get_automation_metadata(self.hass)}
 
     async def get_automation_metadata_service(
         self,
@@ -41,20 +41,20 @@ class AutomationToolService:
         """Compatibility alias for existing tool name."""
         return await self.get_automation_metadata(arguments)
 
-    async def add_automation(self, arguments: dict[str, Any]) -> str | dict[str, Any]:
+    async def add_automation(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return await add_automation_from_yaml(
             self.hass,
             str(arguments.get("automation_config", "")),
         )
 
-    async def update_automation(self, arguments: dict[str, Any]) -> str:
+    async def update_automation(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return await update_automation_from_yaml(
             self.hass,
             str(arguments.get("id", "")),
             str(arguments.get("automation_config", "")),
         )
 
-    async def remove_automation(self, arguments: dict[str, Any]) -> str:
+    async def remove_automation(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return await remove_automation_by_id(
             self.hass,
             str(arguments.get("id", "")),
@@ -121,7 +121,7 @@ async def get_automation_metadata(hass: HomeAssistant) -> list[dict[str, Any]]:
 
 async def add_automation_from_yaml(
     hass: HomeAssistant, automation_config_yaml: str
-) -> str | dict[str, Any]:
+) -> dict[str, Any]:
     """Append a new automation to automations.yaml with validation and retry feedback."""
     try:
         automation_config = yaml.safe_load(automation_config_yaml)
@@ -201,14 +201,14 @@ async def add_automation_from_yaml(
         _LOGGER.debug("Failed to reload automations", exc_info=True)
         return {"success": False, "retry": f"Automation saved but reload failed: {err}"}
 
-    return "Success"
+    return {"success": True}
 
 
 async def update_automation_from_yaml(
     hass: HomeAssistant,
     automation_id: str,
     automation_config_yaml: str,
-) -> str:
+) -> dict[str, Any]:
     """Replace an existing automation in automations.yaml."""
     automation_config = yaml.safe_load(automation_config_yaml)
     config = {"id": automation_id}
@@ -225,7 +225,7 @@ async def update_automation_from_yaml(
             content = await handle.read()
             current_automations = yaml.safe_load(content) or []
     except FileNotFoundError:
-        return f"Error: No automations found in {AUTOMATION_CONFIG_PATH}"
+        return {"error": f"No automations found in {AUTOMATION_CONFIG_PATH}"}
 
     automation_found = False
     for index, auto in enumerate(current_automations):
@@ -235,17 +235,17 @@ async def update_automation_from_yaml(
             break
 
     if not automation_found:
-        return f"Error: Automation with id '{automation_id}' not found"
+        return {"retry": f"Automation with id '{automation_id}' not found"}
 
     async with aiofiles.open(automation_file_path, "w", encoding="utf-8") as handle:
         raw_config = yaml.dump(current_automations, allow_unicode=True, sort_keys=False)
         await handle.write(raw_config)
 
     await hass.services.async_call(automation.config.DOMAIN, "reload", blocking=True)
-    return "Success"
+    return {"success": True}
 
 
-async def remove_automation_by_id(hass: HomeAssistant, automation_id: str) -> str:
+async def remove_automation_by_id(hass: HomeAssistant, automation_id: str) -> dict[str, Any]:
     """Remove an automation by id from automations.yaml and the entity registry."""
     automation_file_path = os.path.join(hass.config.config_dir, AUTOMATION_CONFIG_PATH)
     try:
@@ -253,7 +253,7 @@ async def remove_automation_by_id(hass: HomeAssistant, automation_id: str) -> st
             content = await handle.read()
             current_automations = yaml.safe_load(content) or []
     except FileNotFoundError:
-        return f"Error: No automations found in {AUTOMATION_CONFIG_PATH}"
+        return {"error": f"No automations found in {AUTOMATION_CONFIG_PATH}"}
 
     automation_found = False
     updated_automations: list[dict[str, Any]] = []
@@ -264,7 +264,7 @@ async def remove_automation_by_id(hass: HomeAssistant, automation_id: str) -> st
             updated_automations.append(auto)
 
     if not automation_found:
-        return f"Error: Automation with id '{automation_id}' not found"
+        return {"retry": f"Automation with id '{automation_id}' not found"}
 
     async with aiofiles.open(automation_file_path, "w", encoding="utf-8") as handle:
         if updated_automations:
@@ -284,4 +284,4 @@ async def remove_automation_by_id(hass: HomeAssistant, automation_id: str) -> st
     if entity_id:
         entity_reg.async_remove(entity_id)
 
-    return "Success"
+    return {"success": True}

@@ -25,7 +25,7 @@ class CalendarToolService:
         if end_time <= start_time:
             return {"retry": "end_time must be after start_time"}
         try:
-            return await self.hass.services.async_call(
+            result = await self.hass.services.async_call(
                 domain="calendar",
                 service="get_events",
                 service_data={
@@ -38,6 +38,10 @@ class CalendarToolService:
             )
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
+
+        if isinstance(result, dict):
+            return {"success": True, **result}
+        return {"success": True, "result": result}
 
     async def add_calendar_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = resolve_entity_id(self.hass, "calendar", arguments.get("entity_id"))
