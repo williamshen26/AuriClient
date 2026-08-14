@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import difflib
-from typing import Any
+from typing import Any, Mapping
 
 from homeassistant.components import conversation
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
@@ -11,9 +11,11 @@ from homeassistant.const import ATTR_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
-from ..cache import add_processed_entity, get_processed_entities
+from ..cache import add_processed_entity, get_media_player_sources, get_processed_entities
+from ..const import CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, DOMAIN
 from .custom_services.user_preferences_services import get_preference_keys
 from ..exceptions import ToolExecutionError
+from ..helpers import to_json_safe
 
 
 def resolve_entity_id_no_fallback(
@@ -129,6 +131,7 @@ async def build_context_snapshot(
         "agent_id": user_input.agent_id,
         "device_id": user_input.device_id,
         "language": user_input.language,
+        "response_language": get_response_language(hass),
         "text": user_input.text,
         "user_name": user_name,
         "satellite_speaker": get_device_media_player(hass, user_input.device_id),
@@ -155,6 +158,14 @@ async def get_user_name(
         return None
     user = await hass.auth.async_get_user(user_id)
     return None if user is None else user.name
+
+
+def get_response_language(hass: HomeAssistant) -> str:
+    """Return the persisted reply language most recently set via set_language."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
+        return DEFAULT_STT_LANGUAGE
+    return str(entries[0].options.get(CONF_STT_LANGUAGE) or DEFAULT_STT_LANGUAGE)
 
 
 def get_device_media_player(hass: HomeAssistant, device_id: str | None) -> str | None:
@@ -227,6 +238,34 @@ def get_house_layout(hass: HomeAssistant) -> dict[str, list[str]]:
     return dict(sorted(layout.items(), key=lambda item: (item[0] == "no_floor", item[0])))
 
 
+# Low-value fields dropped from the attributes sent for every exposed entity:
+# entity_picture/icon are UI-only, friendly_name duplicates the "name" field
+# already carried alongside it, and supported_* fields (e.g. supported_features,
+# a capability bitmask; supported_color_modes) aren't meaningful without domain
+# knowledge the model doesn't have. This snapshot is the only source of entity
+# attributes sent to SaaS -- there is no tool to fetch a fresher live reading.
+_NOISY_ATTRIBUTE_KEYS = {"entity_picture", "icon", "friendly_name"}
+
+
+def _filter_entity_attributes(entity_id: str, state_state: str, attributes: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip low-value attribute keys before sending an entity snapshot to SaaS."""
+    filtered = {
+        key: to_json_safe(value)
+        for key, value in attributes.items()
+        if key not in _NOISY_ATTRIBUTE_KEYS and not key.startswith("supported_")
+    }
+
+    # A media player commonly reports an empty/missing source_list while off,
+    # so backfill from the last known list (populated whenever the player was
+    # last seen on) to keep source names usable for select_media_source.
+    if entity_id.startswith("media_player.") and state_state == "off" and "source_list" in filtered:
+        cached_sources = get_media_player_sources(entity_id)
+        if cached_sources:
+            filtered["source_list"] = cached_sources
+
+    return filtered
+
+
 def get_exposed_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
     """Return the exposed entity snapshot sent to SaaS."""
     states = [
@@ -257,6 +296,7 @@ def get_exposed_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
                 "aliases": aliases,
                 "floor_id": _resolve_entity_floor_id(hass, state.entity_id),
                 "area_id": _resolve_entity_area_id(hass, state.entity_id),
+                "attributes": _filter_entity_attributes(state.entity_id, state.state, state.attributes),
             }
         )
 

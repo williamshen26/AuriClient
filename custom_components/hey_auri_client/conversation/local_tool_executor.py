@@ -1,12 +1,12 @@
 """Local execution orchestrator for tool calls."""
 from __future__ import annotations
 
-from datetime import date, datetime, time
 import json
 from typing import Any, Awaitable, Callable
 
 from homeassistant.core import HomeAssistant
 
+from ..helpers import to_json_safe
 from .custom_services.automation_services import AutomationToolService
 from .custom_services.calendar_services import CalendarToolService
 from .custom_services.climate_services import ClimateToolService
@@ -49,7 +49,6 @@ class LocalToolExecutor:
         self.timer = TimerToolService(hass)
         self.calendar = CalendarToolService(hass)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
-            "get_entity_state": self.entity.get_entity_state,
             "get_skill_data": self._get_skill_data,
             # Fallback for hallucinated generic turn_on/turn_off/call_service
             # calls; see EntityToolService._turn_on_off / .call_service for
@@ -163,7 +162,7 @@ class LocalToolExecutor:
                 )
             }
 
-        result = _to_json_safe(result)
+        result = to_json_safe(result)
 
         return {
             "tool_call_id": tool_call.get("id"),
@@ -195,23 +194,3 @@ class LocalToolExecutor:
             "prompt": skill.get("prompt", ""),
             "tools": skill.get("tools", []),
         }
-
-
-def _to_json_safe(value: Any) -> Any:
-    """Recursively normalize tool results into JSON-serializable values."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-
-    if isinstance(value, (datetime, date, time)):
-        return value.isoformat()
-
-    if isinstance(value, dict):
-        return {
-            str(key): _to_json_safe(item)
-            for key, item in value.items()
-        }
-
-    if isinstance(value, (list, tuple, set)):
-        return [_to_json_safe(item) for item in value]
-
-    return str(value)

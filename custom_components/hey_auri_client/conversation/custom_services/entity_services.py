@@ -14,7 +14,6 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from ...cache import get_media_player_sources
 from ...const import CONF_STT_LANGUAGE, DOMAIN, SUPPORTED_LANGUAGES
 from ...exceptions import ToolExecutionError
 
@@ -239,28 +238,3 @@ class EntityToolService:
         self.hass.config_entries.async_update_entry(entry, options=data)
 
         return {"success": True, "language": language}
-
-    async def get_entity_state(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = transform_auri_entity_id_to_ha_entity_id(arguments.get("entity_id"))
-        if not entity_id:
-            return {"retry": "entity_id is required for get_entity_state"}
-
-        state = self.hass.states.get(entity_id)
-        if state is None:
-            raise ToolExecutionError(f"Entity not found: {entity_id}")
-
-        attributes = dict(state.attributes)
-        if (
-            entity_id.startswith("media_player.")
-            and state.state == "off"
-            and "source_list" in attributes
-        ):
-            cached_sources = get_media_player_sources(entity_id)
-            if cached_sources:
-                attributes["source_list"] = cached_sources
-
-        return {
-            "entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, entity_id),
-            "state": state.state,
-            "attributes": attributes,
-        }
