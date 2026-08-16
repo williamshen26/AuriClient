@@ -34,15 +34,12 @@ DEFAULT_STT_PIPELINE_ID = "auri-cloud-voice"
 DEFAULT_STT_LANGUAGE = "en"
 DEFAULT_TTS_LANGUAGE = "en"
 # Shared ceiling for both STT (populates the language dropdown in HA's Assist
-# pipeline editor) and TTS (restricts language detection so Cartesia is never
-# asked to speak something it can't) — keeping one list means a language you
-# can pick for STT is always one TTS can actually speak back.
-# Cartesia's /tts/bytes `language` field only accepts this exact set of ISO
-# 639-1 codes (all confirmed present in py3langid's own 97-language model, so
-# restricting the TTS classifier to this set is safe). Source: Cartesia
-# /tts/bytes API reference request-schema enum (checked 2026-07-14) — update
-# this list (and text_to_speech/tts.py's _LANGUAGE_IDENTIFIER) if Cartesia
-# adds languages.
+# pipeline editor) and TTS (the set of languages get_response_language() can
+# resolve to, validated by set_language before persisting) — keeping one list
+# means a language you can pick for STT is always one TTS can actually speak
+# back. Cartesia's /tts/bytes `language` field only accepts this exact set of
+# ISO 639-1 codes. Source: Cartesia /tts/bytes API reference request-schema
+# enum (checked 2026-07-14) — update this list if Cartesia adds languages.
 SUPPORTED_LANGUAGES = (
     "en", "fr", "de", "es", "pt", "zh", "ja", "hi", "it", "ko",
     "nl", "pl", "ru", "sv", "tr", "tl", "bg", "ro", "ar", "cs",
@@ -50,6 +47,57 @@ SUPPORTED_LANGUAGES = (
     "vi", "bn", "th", "he", "ka", "id", "te", "gu", "kn", "ml",
     "mr", "pa",
 )
+# Short spoken acknowledgment ("OK"/"done") per SUPPORTED_LANGUAGES code, used
+# by the fast-path reply in conversation/agent_class.py so a quick device
+# action doesn't have to wait on a full LLM-generated confirmation just to
+# speak back in the right language. One entry per SUPPORTED_LANGUAGES code --
+# keep the two lists in sync. Best-effort translations, not native-speaker
+# verified for every language; worth a native-speaker pass before relying on
+# it for the less common ones.
+FAST_PATH_ACK_PHRASES: dict[str, str] = {
+    "en": "OK",
+    "fr": "D'accord",
+    "de": "Erledigt",
+    "es": "Listo",
+    "pt": "Pronto",
+    "zh": "好的",
+    "ja": "了解",
+    "hi": "ठीक है",
+    "it": "Fatto",
+    "ko": "완료",
+    "nl": "Gedaan",
+    "pl": "Gotowe",
+    "ru": "Готово",
+    "sv": "Klart",
+    "tr": "Tamam",
+    "tl": "Sige",
+    "bg": "Готово",
+    "ro": "Gata",
+    "ar": "تم",
+    "cs": "Hotovo",
+    "el": "Έγινε",
+    "fi": "Valmis",
+    "hr": "Gotovo",
+    "ms": "Selesai",
+    "sk": "Hotovo",
+    "da": "Klar",
+    "ta": "சரி",
+    "uk": "Готово",
+    "hu": "Kész",
+    "no": "Klart",
+    "vi": "Xong",
+    "bn": "ঠিক আছে",
+    "th": "เรียบร้อย",
+    "he": "בסדר",
+    "ka": "კარგი",
+    "id": "Selesai",
+    "te": "సరే",
+    "gu": "ઠીક છે",
+    "kn": "ಸರಿ",
+    "ml": "ശരി",
+    "mr": "ठीक आहे",
+    "pa": "ਠੀਕ ਹੈ",
+}
 # Persona names, not provider voice names — the backend resolves each to a
 # real per-provider/per-language voice (see AuriService cartesia_client.py
 # PERSONA_TO_GENDER / tts_stream_app.py _OPENAI_VOICE_BY_PERSONA).

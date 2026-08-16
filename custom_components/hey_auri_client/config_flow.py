@@ -58,9 +58,9 @@ _LOGGER = logging.getLogger(__name__)
 _PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
 
 # Display names for the STT language dropdown only — SUPPORTED_LANGUAGES
-# itself stays plain ISO 639-1 codes for everything else (py3langid,
-# Cartesia's API, OpenAI's transcription language param). Scoped to this
-# file rather than const.py since nothing else needs it.
+# itself stays plain ISO 639-1 codes for everything else (Cartesia's API,
+# OpenAI's transcription language param). Scoped to this file rather than
+# const.py since nothing else needs it.
 _LANGUAGE_DISPLAY_NAMES: dict[str, str] = {
     "en": "English",
     "fr": "French",

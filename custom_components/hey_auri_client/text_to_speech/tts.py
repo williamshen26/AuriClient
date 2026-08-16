@@ -11,8 +11,6 @@ import struct
 from typing import Any
 import wave
 
-from py3langid.langid import MODEL_FILE, LanguageIdentifier
-
 from homeassistant.components import tts
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -28,6 +26,7 @@ from ..const import (
     DEFAULT_TTS_VOICE,
     SUPPORTED_LANGUAGES,
 )
+from ..conversation.helpers import get_response_language
 from ..helpers import get_timeout_seconds
 from ..metric_service import RequestLatencyMetricService
 from ..saas_client import SaaSClient
@@ -60,22 +59,11 @@ _MAX_PRE_SPEECH_WAIT_SECONDS = 30.0
 # Number of PCM frames yielded from the completed OpenAI WAV at a time.
 _PCM_FRAMES_PER_CHUNK = 4096
 
-# Text shorter than this is too unreliable to classify (e.g. "ok", "yes") —
-# fall back to the pipeline-provided language instead of guessing.
-_LANGUAGE_DETECTION_MIN_CHARS = 3
-
-# Restricting the classifier's candidate set (rather than filtering its output
-# after the fact) both improves accuracy and guarantees classify() can never
-# return a language Cartesia can't speak. Built once at import time — the
-# underlying model load is the expensive part, and this identifier is never
-# mutated again after set_languages(), so sharing one instance across
-# concurrent async TTS requests is safe. See const.SUPPORTED_LANGUAGES for
-# where this list comes from and why it's shared with STT.
-_LANGUAGE_IDENTIFIER = LanguageIdentifier.from_pickled_model(MODEL_FILE)
-_LANGUAGE_IDENTIFIER.set_languages(list(SUPPORTED_LANGUAGES))
-
-# Spoken (in English) when the detected/fallback language isn't one Cartesia
-# supports, instead of silently mispronouncing text in the wrong language.
+# Spoken (in English) on the near-impossible case that get_response_language()
+# returns something outside SUPPORTED_LANGUAGES, instead of silently
+# mispronouncing text in an unsupported language. set_language validates
+# against SUPPORTED_LANGUAGES before persisting, so this should only fire if
+# the config entry's options were edited/corrupted outside that path.
 _UNSUPPORTED_LANGUAGE_MESSAGE = (
     "It seems like I cannot understand the language you are speaking, "
     "would you like to communicate in English?"
@@ -132,10 +120,10 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         match the pipeline's configured language (homeassistant.util.language
         .matches() scores non-real codes like "auto" as a hard mismatch,
         which excludes the entity from the picker entirely — learned this the
-        hard way). The language actually used per-request is still
-        auto-detected from the reply text (see _detect_language); this list
-        only exists so HA considers the entity a valid choice for any of
-        them.
+        hard way). The language actually used per-request comes from
+        get_response_language() (the persisted language set via set_language),
+        not from whatever HA's pipeline passes in; this list only exists so HA
+        considers the entity a valid choice for any of them.
         """
         return list(SUPPORTED_LANGUAGES)
 
@@ -180,11 +168,13 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         options: dict[str, Any] | None = None,
     ) -> tts.TtsAudioType:
         """Generate complete WAV bytes by collecting stream chunks."""
+        # language is part of the required TextToSpeechEntity interface, but
+        # ignored here -- see _build_payload for why.
+        del language
         started = perf_counter()
 
         payload = self._build_payload(
             message=message,
-            language=language,
             options=options,
         )
 
@@ -211,10 +201,10 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         request: tts.TTSAudioRequest,
     ) -> tts.TTSAudioResponse:
         """Generate stream-first TTS audio with stream-collected fallback."""
+        # request.language is ignored -- see _build_payload for why.
         message = await _collect_message(request.message_gen)
         payload = self._build_payload(
             message=message,
-            language=request.language,
             options=request.options,
         )
 
@@ -284,10 +274,16 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         self,
         *,
         message: str,
-        language: str,
         options: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build the authenticated Auri TTS request payload."""
+        """Build the authenticated Auri TTS request payload.
+
+        Replies are always generated in the currently configured Response
+        Language now (see AuriService's response_language_instruction), so the
+        language to speak in comes from get_response_language() -- the same
+        persisted setting -- rather than detecting it from the reply text or
+        trusting whatever HA's pipeline happens to pass in.
+        """
         clean_message = str(message or "").strip()
 
         if not clean_message:
@@ -297,23 +293,12 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
             (options or {}).get("voice") or DEFAULT_TTS_VOICE
         ).strip().lower()
 
-        # Defensive: normalize anything HA passes that isn't one of our
-        # declared SUPPORTED_LANGUAGES to a real fallback before using it as
-        # one — _detect_language's short-text fallback path needs a real
-        # language, not whatever arbitrary string ends up here.
-        pipeline_language = str(language or "").strip().lower()
-        if pipeline_language not in SUPPORTED_LANGUAGES:
-            pipeline_language = DEFAULT_TTS_LANGUAGE
-        detected_language = _detect_language(clean_message, fallback=pipeline_language)
+        response_language = get_response_language(self.hass)
 
-        if detected_language not in SUPPORTED_LANGUAGES:
-            # The classifier itself can't return this (it's restricted to
-            # SUPPORTED_LANGUAGES) — this only fires via the short-text
-            # fallback, when the HA pipeline's own configured language isn't
-            # one Cartesia can speak either.
+        if response_language not in SUPPORTED_LANGUAGES:
             _LOGGER.warning(
-                "Auri TTS language=%s is not supported; replying in English instead",
-                detected_language,
+                "Auri TTS response_language=%s is not supported; replying in English instead",
+                response_language,
             )
             return {
                 "text": _UNSUPPORTED_LANGUAGE_MESSAGE,
@@ -321,9 +306,16 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
                 "voice": voice,
             }
 
+        _LOGGER.warning(
+            "Auri TTS payload language=%s text_preview=%r text_length=%d",
+            response_language,
+            clean_message[:80],
+            len(clean_message),
+        )
+
         return {
             "text": clean_message,
-            "language": detected_language,
+            "language": response_language,
             "voice": voice,
         }
 
@@ -434,60 +426,6 @@ def _iter_validated_wav_pcm(audio: bytes) -> Iterator[bytes]:
                 break
 
             yield pcm_chunk
-
-
-_KANA_RANGES = (
-    (0x3040, 0x309F),  # Hiragana
-    (0x30A0, 0x30FF),  # Katakana
-)
-
-
-def _contains_kana(text: str) -> bool:
-    """Return True if text contains any Hiragana/Katakana character.
-
-    Japanese text almost always mixes kanji with kana; Chinese text never
-    does. langid's character n-gram model is weak on short kanji-only text
-    and readily misclassifies it as Japanese — this is a cheap, far more
-    reliable signal for that specific zh/ja ambiguity.
-    """
-    return any(
-        any(start <= ord(char) <= end for start, end in _KANA_RANGES)
-        for char in text
-    )
-
-
-def _detect_language(text: str, *, fallback: str) -> str:
-    """Detect the actual language of TTS text so providers that use it for
-    pronunciation (e.g. Cartesia) get it right, instead of always receiving
-    whatever language the HA pipeline is configured for. Falls back to
-    `fallback` for text too short to classify reliably.
-    """
-    if len(text) < _LANGUAGE_DETECTION_MIN_CHARS:
-        _LOGGER.info(
-            "Auri TTS language=%s (fallback: text too short to classify, len=%d)",
-            fallback,
-            len(text),
-        )
-        return fallback
-
-    detected, confidence = _LANGUAGE_IDENTIFIER.classify(text)
-
-    if detected == "ja" and "zh" in SUPPORTED_LANGUAGES and not _contains_kana(text):
-        _LOGGER.info(
-            "Auri TTS language=zh (overriding ja: no kana characters present, "
-            "raw_confidence=%.2f, fallback_was=%s)",
-            confidence,
-            fallback,
-        )
-        return "zh"
-
-    _LOGGER.info(
-        "Auri TTS language=%s (detected, confidence=%.2f, fallback_was=%s)",
-        detected,
-        confidence,
-        fallback,
-    )
-    return detected
 
 
 def _format_voice_name(voice_id: str) -> str:
