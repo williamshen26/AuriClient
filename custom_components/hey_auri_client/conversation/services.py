@@ -5,15 +5,19 @@ import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from ..const import (
     ATTR_DURATION,
+    ATTR_ENTITY_ID,
+    ATTR_MAC,
     ATTR_SATELLITE_SPEAKER,
     ATTR_MARKDOWN,
     ATTR_NOTE_ID,
     ATTR_TITLE,
     DOMAIN,
+    SERVICE_ASSIGN_MAC,
     SERVICE_CREATE_AURI_STICKY_NOTE,
     SERVICE_DELETE_AURI_STICKY_NOTE,
     SERVICE_GET_AURI_STICKY_NOTES,
@@ -30,6 +34,7 @@ from .custom_services.sticky_note_services import (
     delete_auri_sticky_note_native,
     get_auri_sticky_notes_native,
 )
+from .custom_services.media_player_mac_services import assign_mac_native
 
 
 CREATE_STICKY_NOTE_SCHEMA = vol.Schema(
@@ -58,6 +63,13 @@ START_TIMER_SCHEMA = vol.Schema(
 
 GET_TIMERS_SCHEMA = vol.Schema({})
 GET_STICKY_NOTES_SCHEMA = vol.Schema({})
+
+ASSIGN_MAC_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_ENTITY_ID): cv.entity_id,
+        vol.Required(ATTR_MAC): vol.All(cv.ensure_list, [cv.string]),
+    }
+)
 
 
 async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
@@ -111,6 +123,16 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
         except (HomeAssistantError, ValueError) as err:
             raise HomeAssistantError(str(err)) from err
 
+    async def _handle_assign_mac(call: ServiceCall) -> dict[str, object]:
+        try:
+            return await assign_mac_native(
+                hass,
+                entity_id=call.data[ATTR_ENTITY_ID],
+                macs=call.data[ATTR_MAC],
+            )
+        except (HomeAssistantError, ValueError) as err:
+            raise HomeAssistantError(str(err)) from err
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_CREATE_AURI_STICKY_NOTE,
@@ -144,6 +166,13 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
         SERVICE_GET_AURI_STICKY_NOTES,
         _handle_get_sticky_notes,
         schema=GET_STICKY_NOTES_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ASSIGN_MAC,
+        _handle_assign_mac,
+        schema=ASSIGN_MAC_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
 

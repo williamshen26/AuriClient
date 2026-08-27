@@ -39,5 +39,6 @@ async def async_register_frontend_resources(hass: HomeAssistant) -> None:
             )
         ]
     )
-    versioned_url = f"{_SESSION_QR_CARD_URL}?v={_asset_version(_SESSION_QR_CARD_FILE)}"
+    version = await hass.async_add_executor_job(_asset_version, _SESSION_QR_CARD_FILE)
+    versioned_url = f"{_SESSION_QR_CARD_URL}?v={version}"
     add_extra_js_url(hass, versioned_url)

@@ -55,3 +55,25 @@ delete_auri_sticky_note:
 get_auri_sticky_notes:
   name: Get AURI sticky notes
   description: Return all currently active persistent AURI sticky notes.
+
+assign_mac:
+  name: Assign media player MAC
+  description: >-
+    Manually assign one or more MAC addresses to a media_player entity, merged
+    with (not replacing) any MACs already assigned. Useful when a device has
+    multiple network interfaces (e.g. Ethernet + Wi-Fi) and HA's device
+    registry only learned one -- often not the one it listens for
+    wake_on_lan magic packets on.
+  fields:
+    entity_id:
+      required: true
+      example: media_player.living_room_my_fire_tv
+      selector:
+        entity:
+          domain: media_player
+    mac:
+      required: true
+      example: "38:9b:73:1d:ea:24"
+      selector:
+        text:
+          multiple: true

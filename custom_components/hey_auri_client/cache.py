@@ -3,6 +3,7 @@ from __future__ import annotations
 
 processed_entities: dict[str, list[str]] = {}
 media_player_sources: dict[str, list[str]] = {}
+media_player_macs: dict[str, list[str]] = {}
 
 
 def reset_processed_entities(conversation_id: str) -> None:
@@ -50,4 +51,33 @@ def dump_media_player_sources() -> dict[str, list[str]]:
     return {
         entity_id: list(source_list)
         for entity_id, source_list in media_player_sources.items()
+    }
+
+
+def set_media_player_macs(macs: dict[str, list[str]]) -> None:
+    """Replace cached media player MACs with a preloaded snapshot."""
+    media_player_macs.clear()
+    for entity_id, mac_list in macs.items():
+        media_player_macs[entity_id] = list(mac_list)
+
+
+def upsert_media_player_macs(entity_id: str, mac_list: list[str]) -> bool:
+    """Store mac_list and return True when the cached value changes."""
+    normalized = list(mac_list)
+    if media_player_macs.get(entity_id) == normalized:
+        return False
+    media_player_macs[entity_id] = normalized
+    return True
+
+
+def get_media_player_macs(entity_id: str) -> list[str]:
+    """Return manually-assigned MAC addresses for a media_player entity."""
+    return list(media_player_macs.get(entity_id, []))
+
+
+def dump_media_player_macs() -> dict[str, list[str]]:
+    """Return a copy of all cached media player MAC lists."""
+    return {
+        entity_id: list(mac_list)
+        for entity_id, mac_list in media_player_macs.items()
     }

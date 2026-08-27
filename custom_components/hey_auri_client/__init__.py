@@ -14,10 +14,17 @@ from homeassistant.helpers.typing import ConfigType
 from .conversation.agent_class import ThinOpenAIAgent
 from .cache import (
     dump_media_player_sources,
+    set_media_player_macs,
     set_media_player_sources,
     upsert_media_player_sources,
 )
-from .const import DATA_AGENT, DOMAIN, ROOT_RUNTIME
+from .const import (
+    DATA_AGENT,
+    DOMAIN,
+    MEDIA_PLAYER_MACS_STORAGE_KEY,
+    MEDIA_PLAYER_MACS_STORAGE_VERSION,
+    ROOT_RUNTIME,
+)
 from .conversation.services import async_setup_services
 from .frontend import async_register_frontend_resources
 
@@ -56,6 +63,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 sanitized[entity_id] = [str(source) for source in source_list]
             set_media_player_sources(sanitized)
         runtime["media_player_sources_loaded"] = True
+
+    macs_store: Store[dict[str, list[str]]] = runtime.setdefault(
+        "media_player_macs_store",
+        Store(
+            hass,
+            MEDIA_PLAYER_MACS_STORAGE_VERSION,
+            MEDIA_PLAYER_MACS_STORAGE_KEY,
+        ),
+    )
+
+    if runtime.get("media_player_macs_loaded") is None:
+        persisted_macs = await macs_store.async_load()
+        if isinstance(persisted_macs, dict):
+            sanitized_macs: dict[str, list[str]] = {}
+            for entity_id, mac_list in persisted_macs.items():
+                if not isinstance(entity_id, str) or not isinstance(mac_list, list):
+                    continue
+                sanitized_macs[entity_id] = [str(mac) for mac in mac_list]
+            set_media_player_macs(sanitized_macs)
+        runtime["media_player_macs_loaded"] = True
 
     @callback
     def _persist_media_player_sources() -> dict[str, list[str]]:

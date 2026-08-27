@@ -42,7 +42,7 @@ _DEBUG_FAILED_AUDIO_DIR = "/config/auri_debug_audio"
 
 # Toggle to control when captured audio gets written to _DEBUG_FAILED_AUDIO_DIR.
 # Edit and restart Home Assistant to apply; not exposed as a UI option.
-DEBUG_WAV_ON_FAILURE = True  # save whenever a session ends without a transcript
+DEBUG_WAV_ON_FAILURE = False  # save whenever a session ends without a transcript
 DEBUG_WAV_ALWAYS = False  # save every session regardless of outcome
 
 

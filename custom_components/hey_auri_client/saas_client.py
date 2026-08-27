@@ -408,6 +408,9 @@ class SaaSClient:
                     stream_stats["chunk_count"] += 1
                     buffered_audio.extend(chunk)
                     await audio_queue.put(chunk)
+            except BaseException as exc:
+                stream_stats["ended_reason"] = f"exception:{type(exc).__name__}"
+                raise
             finally:
                 stream_stats["elapsed_ms"] = int((perf_counter() - read_started) * 1000)
                 stream_stats["time_to_first_chunk_ms"] = (
@@ -415,7 +418,7 @@ class SaaSClient:
                     if first_chunk_at is not None
                     else None
                 )
-                _LOGGER.info(
+                _LOGGER.debug(
                     "Auri realtime STT stream reader finished session_id=%s reason=%s "
                     "chunk_count=%d bytes=%d elapsed_ms=%d time_to_first_chunk_ms=%s",
                     session_id,

@@ -217,7 +217,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
                         continue
 
                     if not stream_has_data:
-                        _LOGGER.warning(
+                        _LOGGER.debug(
                             "Auri TTS first stream chunk after %d ms",
                             int((perf_counter() - stream_started) * 1000),
                         )
@@ -306,7 +306,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
                 "voice": voice,
             }
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Auri TTS payload language=%s text_preview=%r text_length=%d",
             response_language,
             clean_message[:80],

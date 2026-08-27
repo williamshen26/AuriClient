@@ -164,6 +164,7 @@ ATTR_SATELLITE_TIMER_RING = "satellite_timer_ring"
 ATTR_NOTE_ID = "note_id"
 ATTR_TITLE = "title"
 ATTR_MARKDOWN = "markdown"
+ATTR_MAC = "mac"
 STICKY_NOTE_UNIQUE_ID_PREFIX = "auri_sticky_note_"
 
 SERVICE_START_AURI_TIMER = "start_auri_timer"
@@ -171,6 +172,14 @@ SERVICE_GET_AURI_TIMERS = "get_auri_timers"
 SERVICE_CREATE_AURI_STICKY_NOTE = "create_auri_sticky_note"
 SERVICE_DELETE_AURI_STICKY_NOTE = "delete_auri_sticky_note"
 SERVICE_GET_AURI_STICKY_NOTES = "get_auri_sticky_notes"
+SERVICE_ASSIGN_MAC = "assign_mac"
+
+# Manually-assigned media_player MAC addresses (e.g. a device's Wi-Fi MAC,
+# when HA's device registry only ever learned its Ethernet MAC or vice
+# versa) persisted the same way as media_player_sources -- see cache.py's
+# media_player_macs and __init__.py's setup for the load/save wiring.
+MEDIA_PLAYER_MACS_STORAGE_VERSION = 1
+MEDIA_PLAYER_MACS_STORAGE_KEY = f"{DOMAIN}_media_player_macs"
 
 EVENT_AURI_TIMER_FINISHED = f"{DOMAIN}.auri_timer_finished"
 EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"

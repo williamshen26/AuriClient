@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -11,7 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from ...cache import get_media_player_sources
+from ...cache import get_media_player_macs, get_media_player_sources
 from ...exceptions import ToolExecutionError
 from ..helpers import (
     _clamp_percentage,
@@ -22,6 +23,9 @@ from ..helpers import (
     transform_ha_entity_id_to_auri_entity_id,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
+
 class MediaPlayerToolService:
     """Handle media player-oriented tool calls."""
 
@@ -29,25 +33,29 @@ class MediaPlayerToolService:
         self.hass = hass
 
     def _get_entity_macs(self, entity_id: str) -> list[str]:
-        """Resolve all device MAC addresses for an entity via HA registries."""
+        """Resolve all known MAC addresses for an entity.
+
+        Combines HA's device registry (auto-discovered, but can be wrong or
+        stale for multi-NIC devices -- e.g. it only learned the Ethernet MAC
+        while the device is actually on Wi-Fi) with any MACs manually
+        assigned via the assign_mac action, de-duplicated.
+        """
+        registry_macs: list[str] = []
+
         device_registry = dr.async_get(self.hass)
         entity_registry = er.async_get(self.hass)
 
         entity_entry = entity_registry.async_get(entity_id)
-        if not entity_entry or not entity_entry.device_id:
-            return []
+        if entity_entry and entity_entry.device_id:
+            device = device_registry.async_get(entity_entry.device_id)
+            if device:
+                registry_macs = [
+                    value
+                    for connection_type, value in device.connections
+                    if connection_type == dr.CONNECTION_NETWORK_MAC
+                ]
 
-        device = device_registry.async_get(entity_entry.device_id)
-        if not device:
-            return []
-
-        macs: list[str] = []
-
-        for connection_type, value in device.connections:
-            if connection_type == dr.CONNECTION_NETWORK_MAC:
-                macs.append(value)
-
-        return macs
+        return list(dict.fromkeys([*registry_macs, *get_media_player_macs(entity_id)]))
 
     def media_player_has_feature(
         self,
@@ -324,6 +332,11 @@ class MediaPlayerToolService:
         macs = self._get_entity_macs(entity_id)
         if macs and self.hass.services.has_service("wake_on_lan", "send_magic_packet"):
             for mac in macs:
+                _LOGGER.info(
+                    "turn_on_media_player: sending wake_on_lan magic packet entity_id=%s mac=%s",
+                    entity_id,
+                    mac,
+                )
                 try:
                     await self.hass.services.async_call(
                         domain="wake_on_lan",
@@ -334,9 +347,26 @@ class MediaPlayerToolService:
                         },
                         blocking=True,
                     )
+                    _LOGGER.info(
+                        "turn_on_media_player: wake_on_lan magic packet sent successfully entity_id=%s mac=%s",
+                        entity_id,
+                        mac,
+                    )
                 except Exception:
                     # Best-effort wake attempt; continue with standard turn_on flow.
-                    pass
+                    _LOGGER.warning(
+                        "turn_on_media_player: wake_on_lan magic packet failed entity_id=%s mac=%s",
+                        entity_id,
+                        mac,
+                        exc_info=True,
+                    )
+        else:
+            _LOGGER.info(
+                "turn_on_media_player: skipping wake_on_lan entity_id=%s macs=%s wake_on_lan_service_available=%s",
+                entity_id,
+                macs,
+                self.hass.services.has_service("wake_on_lan", "send_magic_packet"),
+            )
 
         retry = await self._call_media_service("turn_on", {"entity_id": entity_id})
         if retry:
