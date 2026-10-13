@@ -82,6 +82,7 @@ class LocalToolExecutor:
             "select_media_source": self.media_player.select_media_source,
             "search_and_play_music": self.media_player.search_and_play_music,
             "set_media_mute": self.media_player.set_media_mute,
+            "transfer_music": self.media_player.transfer_music,
             "get_forecasts": self.weather.get_forecasts,
             "update_user_preferences": self.user_preferences.update_user_preferences,
             "get_user_preferences": self.user_preferences.get_user_preferences,

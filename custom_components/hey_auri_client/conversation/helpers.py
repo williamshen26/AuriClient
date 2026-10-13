@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from homeassistant.components import conversation
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
 from homeassistant.const import ATTR_NAME
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
 from ..cache import add_processed_entity, get_media_player_sources, get_processed_entities
@@ -199,13 +199,25 @@ def device_has_entity_domain(
     return result
 
 
+def is_music_assistant_state(state: State | None) -> bool:
+    """Return whether a media_player state belongs to a Music Assistant player.
+
+    Music Assistant tags every media_player entity it manages with
+    app_id="music_assistant" — that's the one signal callers need, whether
+    they're deciding on the auri-facing music_source alias (see
+    transform_ha_entity_id_to_auri_entity_id below) or picking a source
+    player to transfer a queue from (see MediaPlayerToolService.transfer_music).
+    """
+    return state is not None and state.attributes.get("app_id") == "music_assistant"
+
+
 def transform_ha_entity_id_to_auri_entity_id(hass: HomeAssistant, entity_id: str) -> str:
     """Transform a Home Assistant entity_id into an AI processing format."""
 
     state = hass.states.get(entity_id)
     if state:
         if entity_id.startswith("media_player."):
-            if state.attributes.get("app_id") == "music_assistant":
+            if is_music_assistant_state(state):
                 return entity_id.replace("media_player.", "music_source.", 1)
             if device_has_entity_domain(hass, entity_id, "assist_satellite"):
                 return entity_id.replace("media_player.", "satellite_speaker.", 1)

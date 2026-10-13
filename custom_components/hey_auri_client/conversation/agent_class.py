@@ -72,6 +72,7 @@ _FAST_PATH_ACTION_TOOL_NAMES = frozenset(
         "select_media_source",
         "search_and_play_music",
         "set_media_mute",
+        "transfer_music",
     }
 )
 

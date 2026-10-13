@@ -18,6 +18,7 @@ from ..helpers import (
     _clamp_percentage,
     _clamp_step_percentage,
     get_retry_entities,
+    is_music_assistant_state,
     resolve_entity_id_no_fallback,
     transform_auri_entity_id_to_ha_entity_id,
     transform_ha_entity_id_to_auri_entity_id,
@@ -517,7 +518,27 @@ class MediaPlayerToolService:
         except vol.error.MultipleInvalid as err:
             return {"retry": str(err)}
         except HomeAssistantError as err:
-            raise ToolExecutionError(str(err)) from err
+            # A found search result can still fail to actually play (e.g.
+            # Music Assistant's MediaNotFoundError -> "No playable items
+            # found" when the matched item has no reachable stream/provider).
+            # That's an expected, recoverable outcome, not a bug -- return it
+            # as a retry payload instead of raising, so the model can react
+            # (try a different query, a different device, or tell the user)
+            # rather than the whole conversation turn failing hard.
+            _LOGGER.warning(
+                "search_and_play_music: play_media failed entity_id=%s uri=%s error=%s",
+                entity_id,
+                first_item_uri,
+                err,
+            )
+            return {
+                "retry": (
+                    f"Found '{selected_media_name}' but failed to play it on "
+                    f"{transform_ha_entity_id_to_auri_entity_id(self.hass, entity_id)}: {err}. "
+                    "Based on context, decide whether to retry with a different query, "
+                    "try a different device, or inform the user that playback failed."
+                )
+            }
         except Exception as err:
             raise ToolExecutionError(str(err)) from err
 
@@ -527,6 +548,69 @@ class MediaPlayerToolService:
             "selected_media_uri": first_item_uri,
             "selected_media_name": selected_media_name,
             "selected_media_type": media_type,
+        }
+
+    async def transfer_music(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        raw_target_entity_id = arguments.get("entity_id")
+        if not isinstance(raw_target_entity_id, str) or not raw_target_entity_id.startswith("music_source."):
+            return {
+                "retry": (
+                    f"{raw_target_entity_id} does not support transfer_music because it is not a "
+                    "music_source entity, only music_source entities can receive a transferred queue, "
+                    "based on context, decide whether to retry with a different entity, do nothing, "
+                    "or inform the user that this action is not supported for this device."
+                )
+            }
+
+        target_entity_id = resolve_entity_id_no_fallback(
+            self.hass,
+            "media_player",
+            transform_auri_entity_id_to_ha_entity_id(raw_target_entity_id),
+        )
+
+        # The source is never specified by the model -- automatically pick the
+        # first other music_source entity that's currently playing, rather
+        # than relying on Music Assistant's own default queue selection when
+        # source_player is omitted (ambiguous with more than one active queue).
+        source_entity_id = next(
+            (
+                state.entity_id
+                for state in self.hass.states.async_all("media_player")
+                if state.entity_id != target_entity_id
+                and is_music_assistant_state(state)
+                and state.state == "playing"
+            ),
+            None,
+        )
+        if source_entity_id is None:
+            return {
+                "retry": (
+                    "No other music_source is currently playing to transfer from onto "
+                    f"{transform_ha_entity_id_to_auri_entity_id(self.hass, target_entity_id)}. "
+                    "Based on context, decide whether to tell the user nothing is currently playing "
+                    "elsewhere to transfer, or ask what they want to play instead."
+                )
+            }
+
+        try:
+            await self.hass.services.async_call(
+                domain="music_assistant",
+                service="transfer_queue",
+                target={"entity_id": target_entity_id},
+                service_data={"source_player": source_entity_id},
+                blocking=True,
+            )
+        except vol.error.MultipleInvalid as err:
+            return {"retry": str(err)}
+        except HomeAssistantError as err:
+            raise ToolExecutionError(str(err)) from err
+        except Exception as err:
+            raise ToolExecutionError(str(err)) from err
+
+        return {
+            "success": True,
+            "entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, target_entity_id),
+            "source_entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, source_entity_id),
         }
 
     async def turn_off_media_player(self, arguments: dict[str, Any]) -> dict[str, Any]:
