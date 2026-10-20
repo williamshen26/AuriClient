@@ -17,7 +17,19 @@
   },
   "options": {
     "error": {
-      "invalid_guest_phone_number": "Enter a valid US/Canada phone number (for example, +16045551234 or 6045551234)."
+      "invalid_guest_phone_number": "Enter a valid US/Canada phone number (for example, +16045551234 or 6045551234).",
+      "memory_settings_missing": "Enter the database host, name and username to turn memory on.",
+      "cannot_connect": "Can't reach the PostgreSQL server with these settings, or the database doesn't exist.",
+      "invalid_auth": "The database rejected the username or password.",
+      "psycopg2_missing": "The PostgreSQL driver (psycopg2) isn't installed in this Home Assistant. Home Assistant OS and Container include it; on a Core install run pip install psycopg2-binary in its virtual environment.",
+      "pg_version_unsupported": "PostgreSQL 13 or newer is required.",
+      "pgvector_missing": "This PostgreSQL server doesn't have the pgvector extension. On Home Assistant OS use the TimescaleDB app (add-on), which includes it; with Docker use the pgvector/pgvector:pg17 image.",
+      "insufficient_privilege": "This database user can't enable pgvector or create the auri_memory schema. Have an administrator run CREATE EXTENSION vector; in this database and grant the user CREATE on it.",
+      "vault_public": "That folder is inside www, which Home Assistant serves without a login. Choose a folder outside it, such as /share/MyVault.",
+      "vault_not_found": "That folder doesn't exist.",
+      "vault_not_allowed": "Home Assistant isn't allowed to write there. Add the folder to allowlist_external_dirs in configuration.yaml.",
+      "vault_not_writable": "Home Assistant can't write to that folder.",
+      "unknown": "Unexpected error"
     },
     "step": {
       "init": {
@@ -26,6 +38,8 @@
         "menu_options": {
           "general": "General",
           "guest": "Guest",
+          "memory": "Memory",
+          "logins": "Who uses each login",
           "metrics": "Metrics"
         }
       },
@@ -63,6 +77,36 @@
           "property_knowledge": "Where non-IoT items are and how to use them. Example: Extra towels are in the hallway linen closet on the second shelf. Used towels should be placed in the laundry basket in the bathroom before checkout.",
           "local_recommendations": "What is around the house. Example: For coffee, the host recommends Corner Bean Cafe on West 4th Avenue. It is a cozy local coffee shop that is good for morning coffee, pastries, and a quick breakfast before heading out. It is usually quieter before 9 AM."
         }
+      },
+      "memory": {
+        "title": "Memory",
+        "description": "Let Auri remember facts, preferences and past conversations in owner mode, stored in your own PostgreSQL database (with the pgvector extension). Each night the day's conversation is sent to Auri's backend to be summarized; it isn't kept there. Saving tests the connection without changing anything.",
+        "data": {
+          "memory_enabled": "Enable long-term memory",
+          "memory_db_host": "PostgreSQL host",
+          "memory_db_port": "PostgreSQL port",
+          "memory_db_name": "Database name",
+          "memory_db_user": "Username",
+          "memory_db_password": "Password",
+          "memory_db_sslmode": "SSL mode",
+          "memory_vault_path": "Obsidian vault folder (optional)",
+          "memory_vault_include_private": "Include private memories in the vault copy",
+          "memory_day_boundary_hour": "A day ends at (hour)",
+          "memory_archive_retention_days": "Keep the conversation archive for (days)",
+          "memory_share_household": "Share memories within the household"
+        },
+        "data_description": {
+          "memory_db_host": "For the TimescaleDB app on Home Assistant OS: 77b2833f-timescaledb.",
+          "memory_db_password": "Leave empty to keep the saved password.",
+          "memory_vault_path": "Auri keeps a readable copy here (Auri/Daily notes and Auri/Memory.md), for example /share/MyVault. Edits made in the vault aren't read back.",
+          "memory_day_boundary_hour": "Conversation before this hour counts toward the previous day. Each day is processed about 15 minutes after it ends.",
+          "memory_archive_retention_days": "0 keeps it forever.",
+          "memory_share_household": "Auri uses everyone's memories, private ones too, whoever is speaking, including an unknown speaker on a voice satellite. Anyone near a satellite could hear them, visitors too."
+        }
+      },
+      "logins": {
+        "title": "Who uses each login",
+        "description": "When someone uses Assist signed in to Home Assistant, Auri uses the memories of the person their login is linked to. Choose someone else if another person uses a login (for example, you sign in as admin). Choose Shared for a login the household shares, like a wall tablet: Auri then treats the speaker as unknown, as on a voice satellite. Choose Not a person for a login a service uses, like Zigbee2MQTT's MQTT login: its person isn't counted as a household member. Nothing changes in Home Assistant."
       },
       "metrics": {
         "title": "Metrics settings",

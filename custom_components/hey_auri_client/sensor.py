@@ -4,9 +4,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DATA_MEMORY, DOMAIN
 from .conversation.custom_services.sticky_note_services import async_restore_sticky_notes
-from .entities import AuriSessionLinkSensor
+from .entities import AuriMemorySensor, AuriSessionLinkSensor
 
 
 async def async_setup_entry(
@@ -21,4 +21,8 @@ async def async_setup_entry(
 
     session_link_sensor = AuriSessionLinkSensor(entry)
     runtime["session_link_sensor"] = session_link_sensor
-    async_add_entities([session_link_sensor])
+    entities = [session_link_sensor]
+    memory = hass.data[DOMAIN].get(entry.entry_id, {}).get(DATA_MEMORY)
+    if memory is not None:
+        entities.append(AuriMemorySensor(entry, memory))
+    async_add_entities(entities)

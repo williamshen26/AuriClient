@@ -126,6 +126,7 @@ LATENCY_MEASUREMENT_KEY_AUDIO = "audio"
 LATENCY_MEASUREMENT_KEY_AUDIO_STREAM = "audio_stream"
 LATENCY_MEASUREMENT_KEY_TTS = "tts"
 LATENCY_MEASUREMENT_KEY_TTS_STREAM = "tts_stream"
+LATENCY_MEASUREMENT_KEY_MEMORY = "memory"
 
 ERROR_NO_NO_AUDIO_CHUNKS = "RT001"
 ERROR_NO_AUDIO_TOO_SHORT = "RT002"
@@ -186,6 +187,44 @@ EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"
 
 DATA_AGENT = "agent"
 DATA_FRONTEND_CLIENT = "frontend_client"
+DATA_MEMORY = "memory"
+
+# Long-term memory (owner mode). Option keys live next to MemoryConfig so the
+# memory package doesn't depend on this module.
+from .memory.config import (  # noqa: E402
+    CONF_MEMORY_ARCHIVE_RETENTION_DAYS,
+    CONF_MEMORY_DAY_BOUNDARY_HOUR,
+    CONF_MEMORY_DB_HOST,
+    CONF_MEMORY_DB_NAME,
+    CONF_MEMORY_DB_PASSWORD,
+    CONF_MEMORY_DB_PORT,
+    CONF_MEMORY_DB_SSLMODE,
+    CONF_MEMORY_DB_USER,
+    CONF_MEMORY_ENABLED,
+    CONF_MEMORY_LOGIN_PEOPLE,
+    CONF_MEMORY_SHARE_HOUSEHOLD,
+    CONF_MEMORY_VAULT_INCLUDE_PRIVATE,
+    CONF_MEMORY_VAULT_PATH,
+    DEFAULT_MEMORY_ARCHIVE_RETENTION_DAYS,
+    DEFAULT_MEMORY_DAY_BOUNDARY_HOUR,
+    DEFAULT_MEMORY_DB_PORT,
+    DEFAULT_MEMORY_DB_SSLMODE,
+    MEMORY_OPTION_KEYS,
+    SSL_MODES,
+)
+
+SERVICE_RUN_MEMORY_JOB = "run_memory_job"
+SERVICE_RUN_MEMORY_EXAM = "run_memory_exam"
+ATTR_DATE = "date"
+ATTR_FORCE = "force"
+ATTR_DAYS_BACK = "days_back"
+EVENT_MEMORY_RUN_FINISHED = f"{DOMAIN}.memory_run_finished"
+# Exam questions live here in the config folder; their conversations are never archived.
+MEMORY_EXAM_FILE = "hey_auri_memory_exam.yaml"
+MEMORY_EXAM_CONVERSATION_PREFIX = "auri-exam-"
+# Moved here from /config/www/user_data (which Home Assistant serves without
+# login) on startup; imported into memory once it is set up.
+LEGACY_USER_DATA_DIR = "hey_auri_client_legacy_user_data"
 
 ROOT_RUNTIME = {
     "timers": {},

@@ -13,7 +13,6 @@ from homeassistant.helpers import area_registry as ar, device_registry as dr, en
 
 from ..cache import add_processed_entity, get_media_player_sources, get_processed_entities
 from ..const import CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, DOMAIN
-from .custom_services.user_preferences_services import get_preference_keys
 from ..exceptions import ToolExecutionError
 from ..helpers import to_json_safe
 
@@ -121,13 +120,9 @@ async def build_context_snapshot(
     user_input: conversation.ConversationInput,
 ) -> dict[str, Any]:
     """Build the structured context payload sent to the SaaS backend."""
-    user_id = user_input.context.user_id
-    context_user_id = None if user_id is None else str(user_id)[:8]
-    user_preferences = sorted(await get_preference_keys(context_user_id))
-    user_name = await get_user_name(hass, user_id)
+    user_name = await get_user_name(hass, user_input.context.user_id)
     now = datetime.now().astimezone()
     return {
-        "user_id": context_user_id,
         "agent_id": user_input.agent_id,
         "device_id": user_input.device_id,
         "language": user_input.language,
@@ -137,7 +132,6 @@ async def build_context_snapshot(
         "satellite_speaker": get_device_media_player(hass, user_input.device_id),
         "request_area": get_request_area(hass, user_input.device_id),
         "exposed_entities": get_exposed_entities(hass),
-        "user_preference_keys": user_preferences,
         "home_location": {
             "latitude": float(hass.config.latitude),
             "longitude": float(hass.config.longitude),
@@ -151,7 +145,7 @@ async def build_context_snapshot(
 
 
 async def get_user_name(
-    hass: HomeAssistant, user_id: str
+    hass: HomeAssistant, user_id: str | None
 ) -> str | None:
     """Resolve the current Home Assistant user's display name."""
     if user_id is None:

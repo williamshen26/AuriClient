@@ -9,21 +9,29 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from ..const import (
+    ATTR_DATE,
+    ATTR_DAYS_BACK,
     ATTR_DURATION,
     ATTR_ENTITY_ID,
+    ATTR_FORCE,
     ATTR_MAC,
     ATTR_SATELLITE_SPEAKER,
     ATTR_MARKDOWN,
     ATTR_NOTE_ID,
     ATTR_TITLE,
+    DATA_MEMORY,
     DOMAIN,
     SERVICE_ASSIGN_MAC,
     SERVICE_CREATE_AURI_STICKY_NOTE,
     SERVICE_DELETE_AURI_STICKY_NOTE,
     SERVICE_GET_AURI_STICKY_NOTES,
     SERVICE_GET_AURI_TIMERS,
+    SERVICE_RUN_MEMORY_EXAM,
+    SERVICE_RUN_MEMORY_JOB,
     SERVICE_START_AURI_TIMER,
 )
+from ..memory.api import MemoryApiError
+from ..memory.runtime import MemoryRuntime
 from .custom_services.timer_services import (
     get_auri_timers_native,
     start_auri_timer_native,
@@ -70,6 +78,23 @@ ASSIGN_MAC_SCHEMA = vol.Schema(
         vol.Required(ATTR_MAC): vol.All(cv.ensure_list, [cv.string]),
     }
 )
+
+RUN_MEMORY_JOB_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_DATE): cv.date,
+        vol.Optional(ATTR_FORCE, default=False): cv.boolean,
+        vol.Optional(ATTR_DAYS_BACK, default=7): vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
+    }
+)
+RUN_MEMORY_EXAM_SCHEMA = vol.Schema({})
+
+
+def _memory_runtime(hass: HomeAssistant) -> MemoryRuntime:
+    """The memory runtime of the (single) loaded config entry."""
+    for data in hass.data.get(DOMAIN, {}).values():
+        if isinstance(data, dict) and isinstance(data.get(DATA_MEMORY), MemoryRuntime):
+            return data[DATA_MEMORY]
+    raise HomeAssistantError("Hey Auri Client isn't set up")
 
 
 async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
@@ -133,6 +158,42 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
         except (HomeAssistantError, ValueError) as err:
             raise HomeAssistantError(str(err)) from err
 
+    async def _handle_run_memory_job(call: ServiceCall) -> dict[str, object]:
+        memory = _memory_runtime(hass)
+        if not memory.enabled:
+            raise HomeAssistantError("Memory isn't set up, or its database can't be reached")
+        result = await memory.async_run_nightly(
+            day=call.data.get(ATTR_DATE),
+            force=call.data[ATTR_FORCE],
+            days_back=call.data[ATTR_DAYS_BACK],
+        )
+        if result.get("reason") == "day_not_finished":
+            raise HomeAssistantError(
+                "That day isn't over yet; it's processed after the day boundary set in the Memory options"
+            )
+        return result
+
+    async def _handle_run_memory_exam(call: ServiceCall) -> dict[str, object]:
+        del call
+        try:
+            return await _memory_runtime(hass).async_run_exam()
+        except MemoryApiError as err:
+            raise HomeAssistantError(f"Grading failed: {err}") from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RUN_MEMORY_JOB,
+        _handle_run_memory_job,
+        schema=RUN_MEMORY_JOB_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RUN_MEMORY_EXAM,
+        _handle_run_memory_exam,
+        schema=RUN_MEMORY_EXAM_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_CREATE_AURI_STICKY_NOTE,

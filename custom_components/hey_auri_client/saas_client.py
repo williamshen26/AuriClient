@@ -56,6 +56,11 @@ class SaaSTurnResponse:
     content: str | None = None
     turn_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # The account's owner/guest mode for this turn and whether long-term
+    # memory is allowed, as decided by the backend (None/False from older
+    # backends, which disables memory on this side).
+    mode: str | None = None
+    memory_allowed: bool = False
 
 
 @dataclass(slots=True)
@@ -138,13 +143,21 @@ class SaaSClient:
             "X-Signature": signature,
         }
 
-    async def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout_seconds: int | None = None,
+        measurement_key: str = LATENCY_MEASUREMENT_KEY_CONVERSATION,
+    ) -> dict[str, Any]:
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         return await self.post_raw(
             path,
             body=body,
             content_type="application/json",
-            measurement_key=LATENCY_MEASUREMENT_KEY_CONVERSATION,
+            measurement_key=measurement_key,
+            timeout_seconds=timeout_seconds,
         )
 
     async def post_raw(
@@ -154,12 +167,13 @@ class SaaSClient:
         body: str | bytes,
         content_type: str,
         measurement_key: str = LATENCY_MEASUREMENT_KEY_CONVERSATION,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         started = perf_counter()
         success = False
         status_code: int | None = None
         error_type: str | None = None
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds or self.timeout)
         headers = self._build_signed_headers(path, body, content_type=content_type)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -793,12 +807,15 @@ def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
     if response_type not in {"final", "tool_calls"}:
         raise SaaSRequestError(f"Unknown response type: {response}")
 
+    mode = response.get("mode")
     return SaaSTurnResponse(
         response_type=response_type,
         conversation_id=response["conversation_id"],
         content=response.get("content"),
         turn_id=response.get("turn_id"),
         tool_calls=response.get("tool_calls"),
+        mode=mode if mode in {"owner", "guest"} else None,
+        memory_allowed=response.get("memory_allowed") is True,
     )
 
 

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from homeassistant.core import HomeAssistant
 
 from ..helpers import to_json_safe
+from ..memory.identity import TurnMeta
+from ..memory.tools import MemoryToolService
 from .custom_services.automation_services import AutomationToolService
 from .custom_services.calendar_services import CalendarToolService
 from .custom_services.climate_services import ClimateToolService
@@ -15,19 +17,22 @@ from .custom_services.entity_services import EntityToolService
 from .custom_services.guest_services import GuestToolService
 from .custom_services.light_services import LightToolService
 from .custom_services.media_player_services import MediaPlayerToolService
-from .custom_services.person_services import PersonToolService
 from .custom_services.shopping_list_services import ShoppingListToolService
 from .custom_services.sticky_note_services import StickyNoteToolService
 from .custom_services.timer_services import TimerToolService
-from .custom_services.user_preferences_services import UserPreferencesToolService
 from .custom_services.weather_services import WeatherToolService
 from ..exceptions import ToolExecutionError
+
+if TYPE_CHECKING:
+    from ..memory.runtime import MemoryRuntime
+
+MEMORY_TOOL_NAMES = frozenset({"recall_memory", "remember_memory", "forget_memory"})
 
 
 class LocalToolExecutor:
     """Executes supported tool calls locally in Home Assistant."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, *, memory: MemoryRuntime | None = None) -> None:
         self.hass = hass
         self.entity = EntityToolService(hass)
         self.light = LightToolService(hass)
@@ -35,8 +40,6 @@ class LocalToolExecutor:
         self.climate = ClimateToolService(hass)
         self.media_player = MediaPlayerToolService(hass)
         self.weather = WeatherToolService(hass)
-        self.person = PersonToolService(hass)
-        self.user_preferences = UserPreferencesToolService(hass)
         self.guest = GuestToolService(hass)
         self.shopping_list = ShoppingListToolService(hass)
         self.sticky_note = StickyNoteToolService(hass)
@@ -51,7 +54,6 @@ class LocalToolExecutor:
             "turn_off": self.entity.turn_off,
             "call_service": self.entity.call_service,
             "set_language": self.entity.set_language,
-            "get_all_persons": self.person.get_all_persons,
             "get_automation_metadata_service": self.automation.get_automation_metadata,
             "list_timers": self.timer.list_timers,
             "turn_on_light": self.light.turn_on_light,
@@ -84,10 +86,6 @@ class LocalToolExecutor:
             "set_media_mute": self.media_player.set_media_mute,
             "transfer_music": self.media_player.transfer_music,
             "get_forecasts": self.weather.get_forecasts,
-            "update_user_preferences": self.user_preferences.update_user_preferences,
-            "get_user_preferences": self.user_preferences.get_user_preferences,
-            "get_preference_keys": self.user_preferences.get_preference_keys,
-            "get_preference_by_key": self.user_preferences.get_preference_by_key,
             "get_guest_data": self.guest.get_guest_data,
             "house_layout": self.guest.house_layout,
             "check_in_instruction": self.guest.check_in_instruction,
@@ -112,12 +110,22 @@ class LocalToolExecutor:
             "get_calendar_events": self.calendar.get_calendar_events,
             "add_calendar_event": self.calendar.add_calendar_event,
         }
+        if memory is not None:
+            self.memory = MemoryToolService(memory)
+            self._handlers.update(
+                {
+                    "recall_memory": self.memory.recall_memory,
+                    "remember_memory": self.memory.remember_memory,
+                    "forget_memory": self.memory.forget_memory,
+                }
+            )
 
     async def execute_tool_call(
         self,
         tool_call: dict[str, Any],
-        exposed_entities: list[dict[str, Any]],
+        *,
         conversation_id: str | None = None,
+        turn: TurnMeta | None = None,
     ) -> dict[str, Any]:
         function_payload = tool_call.get("function") or {}
         function_name = function_payload.get("name")
@@ -136,12 +144,16 @@ class LocalToolExecutor:
                 f"Tool arguments for {function_name} must be a JSON object"
             )
 
+        # Underscore keys carry what this client knows (conversation, speaker,
+        # mode); the model must never be able to supply them.
+        arguments = {key: value for key, value in arguments.items() if not str(key).startswith("_")}
         if conversation_id:
             arguments["_conversation_id"] = conversation_id
+        if function_name in MEMORY_TOOL_NAMES:
+            arguments["_turn"] = turn
+            arguments["_memory_embedding"] = function_payload.get("memory_embedding")
 
-        if function_name == "execute_service":
-            result = await self.entity.execute_service(arguments, exposed_entities)
-        elif function_name in self._handlers:
+        if function_name in self._handlers:
             result = await self._handlers[function_name](arguments)
         else:
             result = {

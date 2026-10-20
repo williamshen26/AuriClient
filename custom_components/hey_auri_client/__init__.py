@@ -1,8 +1,10 @@
 """Thin frontend Home Assistant integration prototype."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from homeassistant.components import persistent_notification
 import homeassistant.components.conversation as ha_conversation
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.config_entries import ConfigEntry
@@ -10,6 +12,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
 
 from .conversation.agent_class import ThinOpenAIAgent
 from .cache import (
@@ -20,13 +23,19 @@ from .cache import (
 )
 from .const import (
     DATA_AGENT,
+    DATA_MEMORY,
     DOMAIN,
+    LEGACY_USER_DATA_DIR,
     MEDIA_PLAYER_MACS_STORAGE_KEY,
     MEDIA_PLAYER_MACS_STORAGE_VERSION,
     ROOT_RUNTIME,
 )
 from .conversation.services import async_setup_services
 from .frontend import async_register_frontend_resources
+from .memory.legacy import relocate_legacy_user_data
+from .memory.runtime import MemoryRuntime
+
+_LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS = ["stt", "sensor", "tts", "button"]
@@ -118,14 +127,51 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the thin frontend integration from a config entry."""
+    await _async_relocate_legacy_user_data(hass)
+
     agent = ThinOpenAIAgent(hass, entry)
+    integration = await async_get_integration(hass, DOMAIN)
+    memory = MemoryRuntime(hass, entry, agent.client, app_version=str(integration.version or "unknown"))
+    agent.attach_memory(memory)
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     data[DATA_AGENT] = agent
+    data[DATA_MEMORY] = memory
+
+    # Connects in the background; conversations work (without memory) meanwhile.
+    await memory.async_start()
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     ha_conversation.async_set_agent(hass, entry, agent)
     return True
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply memory and booking changes. Options also change at runtime (set_language)."""
+    memory: MemoryRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(DATA_MEMORY)
+    if memory is not None:
+        await memory.async_options_updated(dict(entry.options))
+
+
+async def _async_relocate_legacy_user_data(hass: HomeAssistant) -> None:
+    """Move files the old preference tool wrote to www/, which Home Assistant serves without login."""
+    try:
+        moved = await hass.async_add_executor_job(
+            relocate_legacy_user_data, hass.config.config_dir, LEGACY_USER_DATA_DIR
+        )
+    except OSError as err:
+        _LOGGER.warning("Couldn't move old Auri preference files out of www/user_data: %s", err)
+        return
+    if moved:
+        persistent_notification.async_create(
+            hass,
+            f"Moved {len(moved)} file(s) saved by Auri's old preference tool out of `www/user_data`, "
+            f"which Home Assistant serves without a login, to `.storage/{LEGACY_USER_DATA_DIR}`. "
+            "Set up Memory in the Hey Auri Client options and they'll be imported into Auri's memory.",
+            title="Hey Auri",
+            notification_id=f"{DOMAIN}_legacy_user_data",
+        )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -133,6 +179,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
 
-    hass.data[DOMAIN].pop(entry.entry_id, None)
+    data = hass.data[DOMAIN].pop(entry.entry_id, None) or {}
     ha_conversation.async_unset_agent(hass, entry)
+    memory: MemoryRuntime | None = data.get(DATA_MEMORY)
+    if memory is not None:
+        await memory.async_shutdown()
     return True

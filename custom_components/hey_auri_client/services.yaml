@@ -56,6 +56,39 @@ get_auri_sticky_notes:
   name: Get AURI sticky notes
   description: Return all currently active persistent AURI sticky notes.
 
+run_memory_job:
+  name: Run memory processing
+  description: >-
+    Turn finished days of owner-mode conversation into Auri's long-term memory
+    (normally done every night). Without a date, processes the days that were
+    missed; with a date, processes that day.
+  fields:
+    date:
+      required: false
+      example: "2026-10-12"
+      selector:
+        date:
+    force:
+      required: false
+      default: false
+      selector:
+        boolean:
+    days_back:
+      required: false
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 30
+          mode: box
+
+run_memory_exam:
+  name: Run memory exam
+  description: >-
+    Ask Auri the questions in hey_auri_memory_exam.yaml (config folder) and
+    grade the answers against the expected ones. Write questions, not
+    commands: they run like real requests.
+
 assign_mac:
   name: Assign media player MAC
   description: >-

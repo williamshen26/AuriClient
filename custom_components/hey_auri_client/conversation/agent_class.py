@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import logging
 import uuid
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
@@ -16,20 +16,26 @@ from homeassistant.helpers import intent
 from ..const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
+    CONF_MEMORY_LOGIN_PEOPLE,
     CONF_SHARED_SECRET,
     DATA_FRONTEND_CLIENT,
     DOMAIN,
     EVENT_CONVERSATION_FINISHED,
     FAST_PATH_ACK_PHRASES,
+    MEMORY_EXAM_CONVERSATION_PREFIX,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
 )
 from ..cache import reset_processed_entities
 from ..exceptions import SaaSRequestError, ToolExecutionError
 from .helpers import build_context_snapshot, get_response_language
 from ..helpers import get_timeout_seconds
-from .local_tool_executor import LocalToolExecutor
+from .local_tool_executor import MEMORY_TOOL_NAMES, LocalToolExecutor
+from ..memory.identity import Speaker, TurnMeta, async_resolve_speaker
 from ..metric_service import RequestLatencyMetricService
-from ..saas_client import SaaSClient
+from ..saas_client import SaaSClient, SaaSTurnResponse
+
+if TYPE_CHECKING:
+    from ..memory.runtime import MemoryRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +81,19 @@ _FAST_PATH_ACTION_TOOL_NAMES = frozenset(
         "transfer_music",
     }
 )
+_DEVICE_TOOL_NAMES = _FAST_PATH_ACTION_TOOL_NAMES | {"turn_on", "turn_off", "call_service"}
+
+
+def _turn_kind(user_input: conversation.ConversationInput, tool_names: list[str]) -> str:
+    """How the memory archive classifies a turn (the nightly job skips some kinds)."""
+    if user_input.context.user_id is None and user_input.device_id is None:
+        # No person and no satellite: an automation or script talking to Auri.
+        return "automatic"
+    if any(name in MEMORY_TOOL_NAMES for name in tool_names):
+        return "memory_command"
+    if tool_names and all(name in _DEVICE_TOOL_NAMES for name in tool_names):
+        return "device_control"
+    return "chat"
 
 
 def _is_fast_path_eligible(
@@ -121,12 +140,54 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             shared_secret=str(entry.data[CONF_SHARED_SECRET]),
             metrics_service=self.request_latency_metrics,
         )
+        self.memory: MemoryRuntime | None = None
         self.tool_executor = LocalToolExecutor(hass)
+
+    def attach_memory(self, memory: MemoryRuntime) -> None:
+        """Use the entry's memory runtime (created after this agent's client, which it calls)."""
+        self.memory = memory
+        self.tool_executor = LocalToolExecutor(self.hass, memory=memory)
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
         """Return supported languages."""
         return MATCH_ALL
+
+    def _note_response(self, response: SaaSTurnResponse, turn: TurnMeta) -> None:
+        """Track what the backend decided about mode and memory for this account."""
+        turn.mode = response.mode
+        turn.memory_allowed = bool(response.memory_allowed)
+        if self.memory is not None:
+            self.memory.note_mode(response.mode, bool(response.memory_allowed))
+
+    def _log_turn(
+        self,
+        user_input: conversation.ConversationInput,
+        turn: TurnMeta,
+        *,
+        reply: str | None,
+        tool_names: list[str],
+        kind: str | None = None,
+    ) -> None:
+        """Archive the exchange for the nightly memory job: owner mode with memory allowed only."""
+        memory = self.memory
+        if (
+            memory is None
+            or turn.mode != "owner"
+            or not turn.memory_allowed
+            or not turn.conversation_id
+            or turn.conversation_id.startswith(MEMORY_EXAM_CONVERSATION_PREFIX)
+        ):
+            return
+        memory.log_turn(
+            conversation_id=turn.conversation_id,
+            speaker=turn.speaker or Speaker(),
+            user_text=user_input.text,
+            reply=reply,
+            kind=kind or _turn_kind(user_input, tool_names),
+            tool_names=tool_names,
+            language=user_input.language,
+        )
 
     async def _send_tool_results_fire_and_forget(self, payload: dict) -> None:
         """Best-effort background dispatch of tool results after a fast-path reply.
@@ -163,6 +224,18 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         conversation_id = user_input.conversation_id or str(uuid.uuid4())
         reset_processed_entities(conversation_id)
         context = await build_context_snapshot(self.hass, user_input)
+        speaker = await async_resolve_speaker(
+            self.hass,
+            user_id=user_input.context.user_id,
+            device_id=user_input.device_id,
+            area=context.get("request_area"),
+            login_people=self.entry.options.get(CONF_MEMORY_LOGIN_PEOPLE),
+        )
+        # Filled in from each backend response: it alone decides mode and memory.
+        turn = TurnMeta(mode=None, memory_allowed=False, conversation_id=conversation_id, speaker=speaker)
+        if self.memory is not None:
+            context["memory"] = await self.memory.async_turn_context(user_input.text, speaker, conversation_id)
+        tool_names: list[str] = []
         payload = {
             "type": "user_turn",
             "conversation_id": conversation_id,
@@ -176,14 +249,16 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
 
         try:
             response = await self.client.send_user_turn(payload)
+            self._note_response(response, turn)
             while response.response_type == "tool_calls":
                 tool_results = []
                 for tool_call in response.tool_calls or []:
+                    tool_names.append(str((tool_call.get("function") or {}).get("name") or ""))
                     tool_results.append(
                         await self.tool_executor.execute_tool_call(
                             tool_call,
-                            context["exposed_entities"],
                             conversation_id=conversation_id,
+                            turn=turn,
                         )
                     )
 
@@ -208,6 +283,9 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                     )
                     intent_response = intent.IntentResponse(language=response_language)
                     intent_response.async_set_speech(ack_phrase)
+                    self._log_turn(
+                        user_input, turn, reply=ack_phrase, tool_names=tool_names, kind="device_control"
+                    )
                     self.hass.bus.async_fire(
                         EVENT_CONVERSATION_FINISHED,
                         {
@@ -223,6 +301,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                     )
 
                 response = await self.client.send_tool_results(tool_results_payload)
+                self._note_response(response, turn)
         except (SaaSRequestError, ToolExecutionError, HomeAssistantError) as err:
             _LOGGER.error("Thin frontend request failed: %s", err, exc_info=err)
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -247,6 +326,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
 
         intent_response = intent.IntentResponse(language=get_response_language(self.hass))
         intent_response.async_set_speech(response.content or "")
+        self._log_turn(user_input, turn, reply=response.content, tool_names=tool_names)
 
         self.hass.bus.async_fire(
             EVENT_CONVERSATION_FINISHED,

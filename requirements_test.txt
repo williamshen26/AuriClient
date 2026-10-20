@@ -1,0 +1,12 @@
+# Test dependencies. pytest-homeassistant-custom-component pins Home Assistant
+# (0.13.372 = 2026.10.1); the rest are what the integration and the Home
+# Assistant components it imports need. Bump them together.
+pytest-homeassistant-custom-component==0.13.372
+psycopg2-binary==2.9.13
+gazetteer-matcher==1.1.0
+hassil==3.12.1
+home-assistant-intents==2026.10.6
+mutagen==1.48.1
+ha-ffmpeg==3.2.2
+influxdb==5.3.2
+aiofiles==25.1.0

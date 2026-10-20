@@ -1,6 +1,7 @@
 """Config flow for the thin frontend integration prototype."""
 from __future__ import annotations
 
+from functools import partial
 import logging
 import re
 from typing import Any
@@ -27,6 +28,19 @@ from .const import (
     CONF_HOST_CONTACT_INSTRUCTION,
     CONF_HOUSE_RULES,
     CONF_LOCAL_RECOMMENDATIONS,
+    CONF_MEMORY_ARCHIVE_RETENTION_DAYS,
+    CONF_MEMORY_DAY_BOUNDARY_HOUR,
+    CONF_MEMORY_DB_HOST,
+    CONF_MEMORY_DB_NAME,
+    CONF_MEMORY_DB_PASSWORD,
+    CONF_MEMORY_DB_PORT,
+    CONF_MEMORY_DB_SSLMODE,
+    CONF_MEMORY_DB_USER,
+    CONF_MEMORY_ENABLED,
+    CONF_MEMORY_LOGIN_PEOPLE,
+    CONF_MEMORY_SHARE_HOUSEHOLD,
+    CONF_MEMORY_VAULT_INCLUDE_PRIVATE,
+    CONF_MEMORY_VAULT_PATH,
     CONF_METRICS_DATABASE,
     CONF_METRICS_ENABLED,
     CONF_METRICS_HOST,
@@ -44,6 +58,10 @@ from .const import (
     SUPPORTED_LANGUAGES,
     CONF_TRASH_DISPOSAL_INSTRUCTION,
     CONF_WIFI_INSTRUCTION,
+    DEFAULT_MEMORY_ARCHIVE_RETENTION_DAYS,
+    DEFAULT_MEMORY_DAY_BOUNDARY_HOUR,
+    DEFAULT_MEMORY_DB_PORT,
+    DEFAULT_MEMORY_DB_SSLMODE,
     DEFAULT_METRICS_MEASUREMENT,
     DEFAULT_METRICS_PORT,
     DEFAULT_NAME,
@@ -52,9 +70,18 @@ from .const import (
     DEFAULT_TTS_STREAM_ENDPOINT,
     DOMAIN,
     CONF_TTS_STREAM_ENDPOINT,
+    SSL_MODES,
 )
+from .memory.config import MemoryConfig
+from .memory.db import MemoryDbError, test_connection
+from .memory.identity import LOGIN_NOT_A_PERSON, LOGIN_SHARED, household_persons
+from .memory.obsidian import validate_vault
 
 _LOGGER = logging.getLogger(__name__)
+# Memory text fields an empty input clears (rather than keeping the old value).
+_MEMORY_TEXT_FIELDS = (CONF_MEMORY_DB_HOST, CONF_MEMORY_DB_NAME, CONF_MEMORY_DB_USER, CONF_MEMORY_VAULT_PATH)
+# "Who uses each login" default: the person Home Assistant links the login to (not saved).
+_LOGIN_LINKED = "linked"
 _PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
 
 # Display names for the STT language dropdown only — SUPPORTED_LANGUAGES
@@ -232,7 +259,7 @@ class OptionsFlow(config_entries.OptionsFlow):
         """Show options group menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["general", "guest", "metrics"],
+            menu_options=["general", "guest", "memory", "logins", "metrics"],
         )
 
     async def async_step_general(
@@ -415,6 +442,169 @@ class OptionsFlow(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="guest", data_schema=schema, errors=errors)
+
+    async def async_step_memory(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manage long-term memory (PostgreSQL + optional Obsidian vault copy)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            data = dict(self.config_entry.options)
+            # The password is never shown in the form; leaving it empty keeps the saved one.
+            password = str(user_input.pop(CONF_MEMORY_DB_PASSWORD, "") or "")
+            data.update(user_input)
+            for key in _MEMORY_TEXT_FIELDS:
+                data[key] = str(user_input.get(key) or "").strip()
+            for key in (CONF_MEMORY_DAY_BOUNDARY_HOUR, CONF_MEMORY_ARCHIVE_RETENTION_DAYS):
+                if key in user_input:
+                    data[key] = int(user_input[key])  # number selectors return floats
+            if password:
+                data[CONF_MEMORY_DB_PASSWORD] = password
+
+            errors = await self._async_validate_memory(MemoryConfig.from_options(data))
+            if not errors:
+                return self.async_create_entry(title="", data=data)
+
+        values = {**self.config_entry.options, **(user_input or {})}
+
+        def _suggested(key: str) -> dict[str, Any]:
+            return {"suggested_value": str(values.get(key) or "")}
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_MEMORY_ENABLED,
+                    default=bool(values.get(CONF_MEMORY_ENABLED, False)),
+                ): bool,
+                vol.Optional(CONF_MEMORY_DB_HOST, description=_suggested(CONF_MEMORY_DB_HOST)): str,
+                vol.Optional(
+                    CONF_MEMORY_DB_PORT,
+                    default=int(values.get(CONF_MEMORY_DB_PORT, DEFAULT_MEMORY_DB_PORT)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                vol.Optional(CONF_MEMORY_DB_NAME, description=_suggested(CONF_MEMORY_DB_NAME)): str,
+                vol.Optional(CONF_MEMORY_DB_USER, description=_suggested(CONF_MEMORY_DB_USER)): str,
+                vol.Optional(CONF_MEMORY_DB_PASSWORD): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_MEMORY_DB_SSLMODE,
+                    default=str(values.get(CONF_MEMORY_DB_SSLMODE, DEFAULT_MEMORY_DB_SSLMODE)),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(SSL_MODES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(CONF_MEMORY_VAULT_PATH, description=_suggested(CONF_MEMORY_VAULT_PATH)): str,
+                vol.Optional(
+                    CONF_MEMORY_VAULT_INCLUDE_PRIVATE,
+                    default=bool(values.get(CONF_MEMORY_VAULT_INCLUDE_PRIVATE, False)),
+                ): bool,
+                vol.Optional(
+                    CONF_MEMORY_DAY_BOUNDARY_HOUR,
+                    default=int(values.get(CONF_MEMORY_DAY_BOUNDARY_HOUR, DEFAULT_MEMORY_DAY_BOUNDARY_HOUR)),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=23, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_MEMORY_ARCHIVE_RETENTION_DAYS,
+                    default=int(
+                        values.get(CONF_MEMORY_ARCHIVE_RETENTION_DAYS, DEFAULT_MEMORY_ARCHIVE_RETENTION_DAYS)
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=3650, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_MEMORY_SHARE_HOUSEHOLD,
+                    default=bool(values.get(CONF_MEMORY_SHARE_HOUSEHOLD, False)),
+                ): bool,
+            }
+        )
+
+        return self.async_show_form(step_id="memory", data_schema=schema, errors=errors)
+
+    async def _async_validate_memory(self, cfg: MemoryConfig) -> dict[str, str]:
+        """Dry-run the database setup and check the vault folder; changes nothing."""
+        if not cfg.enabled:
+            return {}
+        if not cfg.configured:
+            return {"base": "memory_settings_missing"}
+        try:
+            await self.hass.async_add_executor_job(test_connection, cfg)
+        except MemoryDbError as err:
+            return {"base": err.code}
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Unexpected error testing the memory database")
+            return {"base": "unknown"}
+        if cfg.vault_path:
+            problem = await self.hass.async_add_executor_job(
+                partial(
+                    validate_vault,
+                    cfg.vault_path,
+                    config_dir=self.hass.config.config_dir,
+                    is_allowed_path=self.hass.config.is_allowed_path,
+                )
+            )
+            if problem:
+                return {CONF_MEMORY_VAULT_PATH: problem}
+        return {}
+
+    async def async_step_logins(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Say who uses each Home Assistant login, so memory knows who is speaking."""
+        logins = await self._async_logins()
+        if user_input is not None:
+            used_by = {
+                user_id: str(user_input[label])
+                for label, user_id in logins
+                if user_input.get(label) not in (None, "", _LOGIN_LINKED)
+            }
+            data = dict(self.config_entry.options)
+            data[CONF_MEMORY_LOGIN_PEOPLE] = used_by
+            return self.async_create_entry(title="", data=data)
+
+        saved = self.config_entry.options.get(CONF_MEMORY_LOGIN_PEOPLE) or {}
+        persons = household_persons(self.hass)
+        people = household_persons(self.hass, saved)  # without logins marked "not a person"
+        fields: dict[Any, Any] = {}
+        for label, user_id in logins:
+            linked = next((p["name"] for p in persons if p.get("user_id") == user_id), None)
+            options = [
+                selector.SelectOptionDict(
+                    value=_LOGIN_LINKED,
+                    label=f"{linked} (its person in Home Assistant)" if linked else "Nobody (no person in Home Assistant)",
+                ),
+                *(
+                    selector.SelectOptionDict(value=p["entity_id"], label=p["name"])
+                    for p in people
+                    if p.get("user_id") != user_id
+                ),
+                selector.SelectOptionDict(value=LOGIN_SHARED, label="Shared: nobody in particular, as on a voice satellite"),
+                selector.SelectOptionDict(
+                    value=LOGIN_NOT_A_PERSON, label="Not a person: a service uses it (like MQTT), not a household member"
+                ),
+            ]
+            current = saved.get(user_id, _LOGIN_LINKED)
+            if current not in {option["value"] for option in options}:
+                current = _LOGIN_LINKED  # the person was removed from Home Assistant
+            fields[vol.Optional(label, default=current)] = selector.SelectSelector(
+                selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.DROPDOWN)
+            )
+        return self.async_show_form(step_id="logins", data_schema=vol.Schema(fields))
+
+    async def _async_logins(self) -> list[tuple[str, str]]:
+        """(field label, user id) for each login people use, labelled with its name."""
+        users = sorted(
+            (user for user in await self.hass.auth.async_get_users() if user.is_active and not user.system_generated),
+            key=lambda user: (user.name or "").lower(),
+        )
+        names = [user.name or "Unnamed login" for user in users]
+        return [
+            (name if names.count(name) == 1 else f"{name} ({user.id[:6]})", user.id)
+            for name, user in zip(names, users)
+        ]
 
     async def async_step_metrics(
         self, user_input: dict[str, Any] | None = None
