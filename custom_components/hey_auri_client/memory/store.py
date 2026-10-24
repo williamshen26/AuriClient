@@ -1,8 +1,11 @@
 """Synchronous data access for the memory store. Every method blocks: call it in an executor.
 
-Rows in owner scope are never deleted, only given a new status (superseded,
-expired, retracted), so the history of what Auri believed stays visible. The
-exceptions are archive retention for chat_messages and the guest-scope purge.
+A store reads and writes one schema: the owner's (auri_memory) or the
+current guest stay's (auri_guest_memory). Rows are never deleted, only given
+a new status (superseded, expired, retracted), so the history of what Auri
+believed stays visible. The exceptions are archive retention for
+chat_messages, and guest memory, which is erased by dropping its whole
+schema (migrations.reset_schema).
 """
 from __future__ import annotations
 
@@ -13,13 +16,15 @@ import logging
 from typing import Any, Iterable, Sequence
 import uuid
 
-from .db import MEMORY_SCHEMA
+from .db import MEMORY_SCHEMA, SCHEMA_TOKEN
 from .recall import RecallRow, SubjectEntity, content_hash
 
 _LOGGER = logging.getLogger(__name__)
-_S = MEMORY_SCHEMA
+# SQL below names the schema with SCHEMA_TOKEN; MemoryStore._sql fills in its own.
+_S = SCHEMA_TOKEN
 
 OWNER_SCOPE = "owner"
+GUEST_SCOPE = "guest"
 FACT_KINDS: tuple[str, ...] = ("fact", "preference", "decision", "commitment", "about_assistant")
 ALL_KINDS: tuple[str, ...] = (*FACT_KINDS, "digest", "exchange")
 HOUSEHOLD_NAME = "household"
@@ -72,10 +77,13 @@ class NewMemory:
 
 
 class MemoryStore:
-    """Data access for one scope ("owner" now; "guest:<booking_id>" later)."""
+    """Data access for one schema: the owner's (scope "owner") or the guests' (scope "guest")."""
 
-    def __init__(self, engine, *, scope: str = OWNER_SCOPE, iterative_scan: bool = False) -> None:
+    def __init__(
+        self, engine, *, schema: str = MEMORY_SCHEMA, scope: str = OWNER_SCOPE, iterative_scan: bool = False
+    ) -> None:
         self._engine = engine
+        self.schema = schema
         self.scope = scope
         # pgvector >= 0.8 can keep scanning the HNSW index when filters drop
         # rows, so a filtered nearest-neighbour search still returns enough.
@@ -85,28 +93,35 @@ class MemoryStore:
     def engine(self):
         return self._engine
 
+    def _sql(self, statement: str):
+        """A SQL statement for this store's schema."""
+        return _text()(statement.replace(SCHEMA_TOKEN, self.schema))
+
     def ping(self) -> None:
         with self._engine.connect() as conn:
-            conn.execute(_text()("SELECT 1"))
+            conn.execute(self._sql("SELECT 1"))
 
     # ── meta ────────────────────────────────────────────────────────────────
 
     def get_meta(self, key: str) -> Any:
         with self._engine.connect() as conn:
             value = conn.execute(
-                _text()(f"SELECT value FROM {_S}.meta WHERE key = :key"), {"key": key}
+                self._sql(f"SELECT value FROM {_S}.meta WHERE key = :key"), {"key": key}
             ).scalar()
         return value
 
-    def set_meta(self, key: str, value: Any) -> None:
-        with self._engine.begin() as conn:
-            conn.execute(
-                _text()(
-                    f"""INSERT INTO {_S}.meta (key, value) VALUES (:key, CAST(:value AS jsonb))
-                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"""
-                ),
-                {"key": key, "value": json.dumps(value)},
-            )
+    def set_meta(self, key: str, value: Any, conn=None) -> None:
+        if conn is None:
+            with self._engine.begin() as own:
+                return self.set_meta(key, value, own)
+        conn.execute(
+            self._sql(
+                f"""INSERT INTO {_S}.meta (key, value) VALUES (:key, CAST(:value AS jsonb))
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"""
+            ),
+            {"key": key, "value": json.dumps(value)},
+        )
+        return None
 
     # ── entities ────────────────────────────────────────────────────────────
 
@@ -117,7 +132,7 @@ class MemoryStore:
                 return self.ensure_household(own)
         return int(
             conn.execute(
-                _text()(
+                self._sql(
                     f"""INSERT INTO {_S}.mem_entities (scope, kind, name) VALUES (:scope, 'household', :name)
                         ON CONFLICT (scope, kind, (lower(name))) DO UPDATE SET updated_at = now()
                         RETURNING id"""
@@ -133,7 +148,7 @@ class MemoryStore:
         linked rather than duplicated, and so is a topic of that name: someone
         mentioned before they were added to Home Assistant.
         """
-        text = _text()
+        text = self._sql
         result: dict[str, int] = {}
         with self._engine.begin() as conn:
             for person in persons:
@@ -197,7 +212,7 @@ class MemoryStore:
     def list_entities(self) -> list[SubjectEntity]:
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT id, kind, name, aliases FROM {_S}.mem_entities
                         WHERE scope = :scope ORDER BY kind, name"""
                 ),
@@ -229,7 +244,7 @@ class MemoryStore:
                 self._learn_kind(conn, *found, kind)
             else:
                 entity_pk = conn.execute(
-                    _text()(
+                    self._sql(
                         f"""INSERT INTO {_S}.mem_entities (scope, kind, name) VALUES (:scope, :kind, :name)
                             ON CONFLICT (scope, kind, (lower(name))) DO UPDATE SET updated_at = now()
                             RETURNING id"""
@@ -250,7 +265,7 @@ class MemoryStore:
     def _find_entity(self, conn, name: str) -> tuple[int, str] | None:
         """(id, kind) of the entity a name or alias refers to, a person first."""
         row = conn.execute(
-            _text()(
+            self._sql(
                 f"""SELECT id, kind FROM {_S}.mem_entities
                     WHERE scope = :scope AND kind <> 'household'
                       AND (lower(name) = lower(:name)
@@ -266,7 +281,7 @@ class MemoryStore:
             return
         # Unless one of that kind already has the name (this topic was found by alias).
         conn.execute(
-            _text()(
+            self._sql(
                 f"""UPDATE {_S}.mem_entities e SET kind = :kind, updated_at = now()
                     WHERE e.id = :id AND NOT EXISTS (
                         SELECT 1 FROM {_S}.mem_entities p WHERE p.scope = e.scope
@@ -304,7 +319,7 @@ class MemoryStore:
         ]
         with self._engine.begin() as conn:
             conn.execute(
-                _text()(
+                self._sql(
                     f"""INSERT INTO {_S}.chat_messages
                         (scope, conversation_id, exchange_id, role, content, kind, speaker_source, ha_user_id,
                          person_entity_id, speaker_name, device_id, area, language, tool_names, meta, created_at)
@@ -320,7 +335,7 @@ class MemoryStore:
         """Archive rows in [start, end), oldest first."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT id, conversation_id, exchange_id::text, role, content, kind, speaker_source,
                                speaker_name, area, tool_names, created_at
                         FROM {_S}.chat_messages
@@ -335,7 +350,7 @@ class MemoryStore:
         """Local days (shifted by the day boundary) that have archived turns since ``since``."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT DISTINCT ((created_at AT TIME ZONE :tz) - make_interval(hours => :boundary))::date AS day
                         FROM {_S}.chat_messages
                         WHERE scope = :scope AND created_at >= :since AND kind <> 'automatic'
@@ -349,7 +364,7 @@ class MemoryStore:
         """Recent turns not yet processed by the nightly job, as exchange notes (newest first)."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT MIN(id) AS id, exchange_id,
                                string_agg(CASE WHEN role = 'user' THEN COALESCE(speaker_name, 'Someone') || ': '
                                                ELSE 'Assistant: ' END || content, ' / ' ORDER BY id) AS content,
@@ -374,7 +389,7 @@ class MemoryStore:
             with self._engine.begin() as own:
                 return self.insert_memory(memory, own)
 
-        text = _text()
+        text = self._sql
         digest = content_hash(memory.content)
         params = {
             "scope": self.scope,
@@ -428,7 +443,7 @@ class MemoryStore:
     def add_about_edges(self, conn, memory_id: int, entity_ids: Iterable[int]) -> None:
         for entity_pk in dict.fromkeys(entity_ids):
             conn.execute(
-                _text()(
+                self._sql(
                     f"""INSERT INTO {_S}.mem_edges (from_memory, relation, to_entity)
                         VALUES (:memory_id, 'about', :entity_id) ON CONFLICT DO NOTHING"""
                 ),
@@ -441,7 +456,7 @@ class MemoryStore:
         """Mark current memories of the given kinds superseded by new_id, link them, and carry over their subjects."""
         if not old_ids:
             return []
-        text = _text()
+        text = self._sql
         params = {"scope": self.scope, "old": [int(i) for i in old_ids], "new_id": new_id, "kinds": list(kinds)}
         replaced = [
             int(row[0])
@@ -485,7 +500,7 @@ class MemoryStore:
         records which replaced which.
         """
         rows = conn.execute(
-            _text()(
+            self._sql(
                 f"""UPDATE {_S}.mem_memories SET status = 'superseded', status_changed_at = now(),
                         status_reason = 'rerun'
                     WHERE scope = :scope AND kind = 'digest' AND status = 'current' AND source_ref = :day
@@ -497,7 +512,7 @@ class MemoryStore:
 
     def current_digest_id(self, conn, day: date) -> int | None:
         return conn.execute(
-            _text()(
+            self._sql(
                 f"""SELECT id FROM {_S}.mem_memories
                     WHERE scope = :scope AND kind = 'digest' AND status = 'current' AND source_ref = :day"""
             ),
@@ -509,7 +524,7 @@ class MemoryStore:
         if not old_ids:
             return
         params = {"old": list(old_ids), "new_id": new_id}
-        text = _text()
+        text = self._sql
         conn.execute(
             text(f"UPDATE {_S}.mem_memories SET superseded_by = :new_id WHERE id = ANY (CAST(:old AS bigint[]))"),
             params,
@@ -529,23 +544,12 @@ class MemoryStore:
             return {}
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"SELECT id, content FROM {_S}.mem_memories WHERE scope = :scope AND id = ANY (CAST(:ids AS bigint[]))"
                 ),
                 {"scope": self.scope, "ids": [int(i) for i in ids]},
             ).all()
         return {int(row[0]): row[1] for row in rows}
-
-    def list_scopes(self) -> list[str]:
-        """Every scope with stored data (owner plus any guest bookings)."""
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                _text()(
-                    f"""SELECT scope FROM {_S}.mem_memories UNION SELECT scope FROM {_S}.chat_messages
-                        UNION SELECT scope FROM {_S}.mem_entities"""
-                )
-            ).all()
-        return sorted({row[0] for row in rows})
 
     def retract(self, ids: Sequence[int], *, reason: str) -> list[tuple[int, str, str]]:
         """Retract current memories (never deleted); returns (id, kind, content) of each one changed."""
@@ -553,7 +557,7 @@ class MemoryStore:
             return []
         with self._engine.begin() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""UPDATE {_S}.mem_memories SET status = 'retracted', status_changed_at = now(),
                             status_reason = :reason
                         WHERE scope = :scope AND status = 'current' AND id = ANY (CAST(:ids AS bigint[]))
@@ -575,7 +579,7 @@ class MemoryStore:
         """Retract current memories of the given kinds that are close in meaning to vector."""
         with self._engine.begin() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""UPDATE {_S}.mem_memories SET status = 'retracted', status_changed_at = now(),
                             status_reason = :reason
                         WHERE scope = :scope AND status = 'current' AND kind = ANY (CAST(:kinds AS text[]))
@@ -598,7 +602,7 @@ class MemoryStore:
         """Note that a nightly run saw these memories stated again."""
         if ids:
             conn.execute(
-                _text()(
+                self._sql(
                     f"""UPDATE {_S}.mem_memories SET confirmed_count = confirmed_count + 1, last_confirmed_at = now()
                         WHERE scope = :scope AND id = ANY (CAST(:ids AS bigint[]))"""
                 ),
@@ -610,7 +614,7 @@ class MemoryStore:
             return []
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT {_ROW_COLUMNS}, m.status FROM {_S}.mem_memories m
                         WHERE m.scope = :scope AND m.id = ANY (CAST(:ids AS bigint[]))"""
                 ),
@@ -638,7 +642,7 @@ class MemoryStore:
         profile_ids = [i for i in (speaker_entity_id, household_entity_id, *(member_ids if shared else ())) if i is not None]
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT {_ROW_COLUMNS} FROM {_S}.mem_memories m
                         WHERE m.scope = :scope AND m.status = 'current' AND m.sensitivity <> 'secret'
                           AND (m.expires_at IS NULL OR m.expires_at > now())
@@ -688,7 +692,7 @@ class MemoryStore:
         """
         if not terms and not subject_ids and not hint_days:
             return []
-        text = _text()
+        text = self._sql
         with self._engine.begin() as conn:
             conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
             rows = conn.execute(
@@ -779,7 +783,7 @@ class MemoryStore:
                 kinds=kinds,
                 limit=limit,
             )
-        text = _text()
+        text = self._sql
         with self._engine.begin() as conn:
             conn.execute(text("SET LOCAL statement_timeout = 2000"))
             if self._iterative_scan:
@@ -872,7 +876,7 @@ class MemoryStore:
         limit: int,
     ) -> list[RecallRow]:
         """The recall tool's fallback when no embedding came with the call."""
-        text = _text()
+        text = self._sql
         with self._engine.begin() as conn:
             conn.execute(text("SET LOCAL statement_timeout = 2000"))
             rows = conn.execute(
@@ -934,7 +938,7 @@ class MemoryStore:
             return rows
         with self._engine.connect() as conn:
             history = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT e.from_memory, old.content, COALESCE(old.occurred_at, old.recorded_at) AS at
                         FROM {_S}.mem_edges e JOIN {_S}.mem_memories old ON old.id = e.to_memory
                         WHERE e.relation = 'supersedes' AND e.from_memory = ANY (CAST(:ids AS bigint[]))
@@ -953,7 +957,7 @@ class MemoryStore:
             return
         with self._engine.begin() as conn:
             conn.execute(
-                _text()(
+                self._sql(
                     f"""UPDATE {_S}.mem_memories SET access_count = access_count + 1, last_accessed = now()
                         WHERE scope = :scope AND id = ANY (CAST(:ids AS bigint[]))"""
                 ),
@@ -962,7 +966,7 @@ class MemoryStore:
 
     def neighbors(self, vector: Sequence[float], embedding_model: str, *, limit: int = 5) -> list[dict[str, Any]]:
         """Nearest current facts to a candidate statement (nightly reconcile)."""
-        text = _text()
+        text = self._sql
         with self._engine.begin() as conn:
             if self._iterative_scan:
                 conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
@@ -984,7 +988,7 @@ class MemoryStore:
         """Retracted facts close to a candidate: the household asked to forget them."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT m.id, m.status_changed_at, 1 - (m.embedding <=> CAST(:v AS vector)) AS sim
                         FROM {_S}.mem_memories m
                         WHERE m.scope = :scope AND m.status = 'retracted' AND m.embedding IS NOT NULL
@@ -1000,7 +1004,7 @@ class MemoryStore:
         """Digests retracted by a forget that still need a cleaned replacement written."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT id, source_ref, content, status_reason FROM {_S}.mem_memories
                         WHERE scope = :scope AND kind = 'digest' AND status = 'retracted'
                           AND status_reason LIKE 'scrub_pending:%' ORDER BY source_ref"""
@@ -1011,7 +1015,7 @@ class MemoryStore:
 
     def mark_digest_scrubbed(self, conn, digest_id: int) -> None:
         conn.execute(
-            _text()(f"UPDATE {_S}.mem_memories SET status_reason = 'scrubbed' WHERE id = :id"),
+            self._sql(f"UPDATE {_S}.mem_memories SET status_reason = 'scrubbed' WHERE id = :id"),
             {"id": digest_id},
         )
 
@@ -1021,7 +1025,7 @@ class MemoryStore:
         """Current memories without an embedding from embedding_model (newest first)."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT id, content FROM {_S}.mem_memories
                         WHERE scope = :scope AND status = 'current'
                           AND (embedding IS NULL OR embedding_model IS DISTINCT FROM :model)
@@ -1036,7 +1040,7 @@ class MemoryStore:
             return
         with self._engine.begin() as conn:
             conn.execute(
-                _text()(
+                self._sql(
                     f"""UPDATE {_S}.mem_memories SET embedding = CAST(:v AS vector), embedding_model = :model
                         WHERE id = :id AND scope = :scope"""
                 ),
@@ -1056,7 +1060,7 @@ class MemoryStore:
             with self._engine.begin() as conn:
                 return int(
                     conn.execute(
-                        _text()(
+                        self._sql(
                             f"""INSERT INTO {_S}.mem_runs (scope, job, run_date, attempt)
                                 VALUES (:scope, :job, :run_date, :attempt) RETURNING id"""
                         ),
@@ -1067,7 +1071,7 @@ class MemoryStore:
             return None
 
     def finish_run(self, run_id: int, *, status: str, stats: dict[str, Any] | None = None, error: str | None = None, conn=None) -> None:
-        statement = _text()(
+        statement = self._sql(
             f"""UPDATE {_S}.mem_runs SET status = :status, finished_at = now(), stage = NULL,
                     stats = CAST(:stats AS jsonb), error = :error WHERE id = :id"""
         )
@@ -1080,13 +1084,13 @@ class MemoryStore:
 
     def set_run_stage(self, run_id: int, stage: str) -> None:
         with self._engine.begin() as conn:
-            conn.execute(_text()(f"UPDATE {_S}.mem_runs SET stage = :stage WHERE id = :id"), {"stage": stage, "id": run_id})
+            conn.execute(self._sql(f"UPDATE {_S}.mem_runs SET stage = :stage WHERE id = :id"), {"stage": stage, "id": run_id})
 
     def fail_stale_runs(self, *, older_than: timedelta = timedelta(hours=1)) -> int:
         """Runs left 'running' by a crash or restart can't still be going: mark them failed."""
         with self._engine.begin() as conn:
             return conn.execute(
-                _text()(
+                self._sql(
                     f"""UPDATE {_S}.mem_runs SET status = 'failed', finished_at = now(), error = 'interrupted'
                         WHERE scope = :scope AND status = 'running' AND started_at < :cutoff"""
                 ),
@@ -1097,7 +1101,7 @@ class MemoryStore:
         """How many times a job has succeeded and failed for a day."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT status, count(*) FROM {_S}.mem_runs
                         WHERE scope = :scope AND job = :job AND run_date = :run_date GROUP BY status"""
                 ),
@@ -1108,7 +1112,7 @@ class MemoryStore:
     def last_run(self, job: str) -> dict[str, Any] | None:
         with self._engine.connect() as conn:
             row = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT id, run_date, status, started_at, finished_at, stats, error FROM {_S}.mem_runs
                         WHERE scope = :scope AND job = :job ORDER BY started_at DESC LIMIT 1"""
                 ),
@@ -1120,7 +1124,7 @@ class MemoryStore:
 
     def housekeeping(self, *, archive_retention_days: int) -> dict[str, int]:
         """Expire exchanges and commitments past their date; prune the archive past retention."""
-        text = _text()
+        text = self._sql
         with self._engine.begin() as conn:
             expired = conn.execute(
                 text(
@@ -1141,25 +1145,12 @@ class MemoryStore:
                 ).rowcount
         return {"expired": int(expired or 0), "archive_pruned": int(pruned or 0)}
 
-    def purge_scope(self) -> dict[str, int]:
-        """Hard-delete everything in this scope (guest data after check-out). Never for owner scope."""
-        if self.scope == OWNER_SCOPE:
-            raise ValueError("The owner scope is never purged")
-        text = _text()
-        with self._engine.begin() as conn:
-            counts = {}
-            for table in ("mem_memories", "chat_messages", "mem_entities", "mem_runs"):
-                counts[table] = conn.execute(
-                    text(f"DELETE FROM {_S}.{table} WHERE scope = :scope"), {"scope": self.scope}
-                ).rowcount
-        return counts
-
     # ── stats ───────────────────────────────────────────────────────────────
 
     def counts(self) -> dict[str, int]:
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT kind, count(*) FROM {_S}.mem_memories
                         WHERE scope = :scope AND status = 'current' GROUP BY kind"""
                 ),
@@ -1171,7 +1162,7 @@ class MemoryStore:
         """Current long-lived memories for the readable Obsidian copy."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                _text()(
+                self._sql(
                     f"""SELECT {_ROW_COLUMNS} FROM {_S}.mem_memories m
                         WHERE m.scope = :scope AND m.status = 'current'
                           AND m.kind IN ('fact', 'preference', 'decision', 'commitment', 'about_assistant')

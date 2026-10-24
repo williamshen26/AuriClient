@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("pytest_homeassistant_custom_component.common")
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: E402
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed  # noqa: E402
 
 from homeassistant.components import conversation  # noqa: E402
 from homeassistant.core import Context, HomeAssistant  # noqa: E402
@@ -202,16 +202,19 @@ def tool_call(name: str, arguments: dict[str, Any], *, embed: str | None = None)
     return {"id": f"call-{name}", "type": "function", "function": function}
 
 
-def tool_calls(conversation_id: str, calls: list[dict[str, Any]], *, mode: str = "owner") -> SaaSTurnResponse:
+def tool_calls(
+    conversation_id: str, calls: list[dict[str, Any]], *, mode: str = "owner", allowed: bool | None = None
+) -> SaaSTurnResponse:
     return SaaSTurnResponse(
         response_type="tool_calls", conversation_id=conversation_id, turn_id="turn-1", tool_calls=calls,
-        mode=mode, memory_allowed=mode == "owner",
+        mode=mode, memory_allowed=mode == "owner" if allowed is None else allowed,
     )
 
 
-def final(conversation_id: str, text: str, *, mode: str = "owner") -> SaaSTurnResponse:
+def final(conversation_id: str, text: str, *, mode: str = "owner", allowed: bool | None = None) -> SaaSTurnResponse:
     return SaaSTurnResponse(
-        response_type="final", conversation_id=conversation_id, content=text, mode=mode, memory_allowed=mode == "owner",
+        response_type="final", conversation_id=conversation_id, content=text, mode=mode,
+        memory_allowed=mode == "owner" if allowed is None else allowed,
     )
 
 
@@ -531,6 +534,221 @@ async def test_a_login_that_isnt_a_person(hass: HomeAssistant, memory_setup) -> 
     # Nobody talks through it, but if something does, it's nobody in particular.
     await agent.async_process(_input("Good morning", "n3", user_id=mqtt.id))
     assert client.payloads[-1]["context"]["memory"]["speaker"] == {"name": None, "source": "unknown"}
+
+
+_GUEST = {
+    "guest_memory_enabled": True,
+    "booking_id": "B-1",
+    "guest_name": "Sarah Lee",
+    "guest_count": 1,
+    "check_in": "2026-01-01 15:00:00",
+    "check_out": "2099-01-01 11:00:00",
+}
+
+
+async def _set_guest_options(hass: HomeAssistant, agent, runtime: MemoryRuntime, **changes: Any) -> None:
+    """Save Guest options as the options flow would; the integration's update listener then tells the runtime."""
+    hass.config_entries.async_update_entry(agent.entry, options={**agent.entry.options, **changes})
+    await runtime.async_options_updated(dict(agent.entry.options))
+
+
+def _guest_facts(runtime: MemoryRuntime) -> set[str]:
+    return {
+        row["content"]
+        for row in _db(runtime, "SELECT content FROM auri_guest_memory.mem_memories WHERE status = 'current' AND kind = 'fact'")
+    }
+
+
+async def test_guests_and_owners_never_share_memories(hass: HomeAssistant, memory_setup) -> None:
+    agent, runtime, client, will = memory_setup
+    [mia] = await hass.async_add_executor_job(runtime.store.resolve_entities, [("Mia", "person")])
+    await hass.async_add_executor_job(
+        runtime.store.insert_memory,
+        NewMemory(kind="fact", content="Mia is lactose intolerant.", source="chat", importance=5, about_entity_ids=[mia]),
+    )
+    await _set_guest_options(hass, agent, runtime, **_GUEST)
+    assert "Sarah Lee booked this stay." in _guest_facts(runtime) and len(_guest_facts(runtime)) == 3
+
+    # The first reply says the account is in guest mode; from then on each turn gets the guests' memory only.
+    client.responses = [final("t1", "Hi.", mode="guest", allowed=True), final("t2", "Welcome.", mode="guest", allowed=True)]
+    await agent.async_process(_input("Hello there", "t1", device_id="satellite-1"))
+    await agent.async_process(_input("Good morning", "t2", device_id="satellite-1"))
+    memory = client.payloads[-1]["context"]["memory"]
+    assert memory["scope"] == "guest" and memory["party_size"] == 1
+    assert memory["household"] == [{"name": "Sarah Lee", "kind": "person"}]
+    assert "Sarah Lee booked this stay." in memory["profile"] and "lactose" not in memory["profile"]
+
+    # A guest's "remember": the only guest is who's speaking, and it goes to the guests' memory.
+    client.responses = [
+        tool_calls("t3", [tool_call("remember_memory", {"content": "The speaker parked in spot 12", "kind": "fact"})],
+                   mode="guest", allowed=True),
+        final("t3", "Got it.", mode="guest", allowed=True),
+    ]
+    await agent.async_process(_input("Remember I parked in spot 12", "t3", device_id="satellite-1"))
+    saved = client.payloads[-1]["tool_results"][0]["result"]
+    assert saved["saved"] == "Sarah Lee parked in spot 12" and saved["about"] == ["Sarah Lee"]
+
+    # And a guest's search never reaches the owner's memory.
+    client.responses = [
+        tool_calls("t4", [tool_call("recall_memory", {"query": "lactose intolerant milk"})], mode="guest", allowed=True),
+        final("t4", "I have no record of that.", mode="guest", allowed=True),
+    ]
+    await agent.async_process(_input("Is anyone lactose intolerant?", "t4", device_id="satellite-1"))
+    assert client.payloads[-1]["tool_results"][0]["result"]["count"] == 0
+    assert "lactose" not in client.payloads[-2]["context"]["memory"]["notes"]
+
+    await _settle(hass)
+    assert _db(runtime, "SELECT count(*) AS n FROM auri_memory.mem_memories WHERE content LIKE '%spot 12%'")[0]["n"] == 0
+    assert _db(runtime, "SELECT count(*) AS n FROM auri_memory.chat_messages")[0]["n"] == 0
+    assert _db(runtime, "SELECT count(*) AS n FROM auri_guest_memory.chat_messages WHERE role = 'user'")[0]["n"] == 4
+
+    # Back in owner mode: the household's memory again, and nothing of the guests'.
+    client.responses = [final("t5", "Hi."), final("t6", "Morning.")]
+    await agent.async_process(_input("Hello", "t5", user_id=will.id))
+    await agent.async_process(_input("Good morning", "t6", user_id=will.id))
+    memory = client.payloads[-1]["context"]["memory"]
+    assert memory["scope"] == "owner" and "Sarah" not in memory["profile"]
+    assert all(member["name"] != "Sarah Lee" for member in memory["household"])
+
+
+async def test_guest_memory_starts_again_and_is_erased(hass: HomeAssistant, memory_setup) -> None:
+    agent, runtime, _, _ = memory_setup
+    await _set_guest_options(hass, agent, runtime, **_GUEST)
+    await hass.async_add_executor_job(
+        runtime.guest.store.insert_memory, NewMemory(kind="fact", content="The guests parked in spot 12.", source="chat")
+    )
+    assert "The guests parked in spot 12." in _guest_facts(runtime)
+
+    # Saving Guest options for the same stay keeps what the guests said.
+    await _set_guest_options(hass, agent, runtime, notes="Celebrating an anniversary")
+    assert "The guests parked in spot 12." in _guest_facts(runtime)
+
+    # The host's reset, ticked in the Guest options form.
+    with patch("homeassistant.config_entries.async_process_deps_reqs", AsyncMock()):
+        result = await hass.config_entries.options.async_init(agent.entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "guest"})
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"reset_guest_memory": True})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert "guest_memory_reset_at" in agent.entry.options and "reset_guest_memory" not in agent.entry.options
+    await runtime.async_options_updated(dict(agent.entry.options))
+    assert _guest_facts(runtime) == {
+        "Sarah Lee booked this stay.",
+        "1 guest is staying.",
+        next(fact for fact in _guest_facts(runtime) if fact.startswith("The stay runs from")),
+        "The host's note about this stay: Celebrating an anniversary",
+    }
+
+    # A new booking starts again with its own guest.
+    await _set_guest_options(hass, agent, runtime, booking_id="B-2", guest_name="Tom", notes="")
+    assert "Tom booked this stay." in _guest_facts(runtime) and "Sarah Lee booked this stay." not in _guest_facts(runtime)
+
+    # After check-out it's erased, and stays empty and closed.
+    await _set_guest_options(hass, agent, runtime, check_out="2020-01-01 11:00:00")
+    assert _guest_facts(runtime) == set() and runtime.status_attributes()["guest_memory_erased"]
+    await _set_guest_options(hass, agent, runtime, notes="")
+    assert _guest_facts(runtime) == set()
+    assert runtime.status_attributes()["guest_memory"] == "closed" and not runtime.guest.enabled
+    # Ticking reset after the stay has ended doesn't open it again.
+    await _set_guest_options(hass, agent, runtime, guest_memory_reset_at="2026-10-23T12:00:00+00:00")
+    assert _guest_facts(runtime) == set() and not runtime.guest.enabled
+
+    # Switching guest memory off removes it altogether; the owner's memory stays.
+    await _set_guest_options(hass, agent, runtime, guest_memory_enabled=False)
+    assert _db(runtime, "SELECT count(*) AS n FROM pg_namespace WHERE nspname = 'auri_guest_memory'")[0]["n"] == 0
+    assert runtime.status_attributes()["guest_memory"] == "off" and runtime.store is not None
+
+
+def _local(moment) -> str:
+    """A Guest Settings date and time (local, as the form stores it)."""
+    return dt_util.as_local(moment).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _guest_turns(hass: HomeAssistant, agent, client, *texts: str) -> None:
+    client.responses = [final(f"g{index}", "OK.", mode="guest", allowed=True) for index, _ in enumerate(texts)]
+    for index, text in enumerate(texts):
+        await agent.async_process(_input(text, f"g{index}", device_id="satellite-1"))
+    await _settle(hass)
+
+
+async def test_guest_memory_is_erased_an_hour_after_check_out(hass: HomeAssistant, memory_setup, freezer) -> None:
+    agent, runtime, client, _ = memory_setup
+    check_out = dt_util.now().replace(microsecond=0) + timedelta(minutes=10)
+    await _set_guest_options(hass, agent, runtime, **{**_GUEST, "check_out": _local(check_out)})
+    await hass.async_add_executor_job(
+        runtime.guest.store.insert_memory, NewMemory(kind="fact", content="The guests parked in spot 12.", source="chat")
+    )
+
+    # Guests leaving a little late still have their memory, and what they say is kept.
+    freezer.move_to(check_out + timedelta(minutes=30))
+    async_fire_time_changed(hass)
+    await _guest_turns(hass, agent, client, "Hello", "Where did we park?")
+    assert "The guests parked in spot 12." in _guest_facts(runtime) and runtime.guest.enabled
+    assert client.payloads[-1]["context"]["memory"]["status"] == "enabled"
+
+    # An hour after check-out the timer erases it.
+    assert runtime._erase_unsub is not None  # noqa: SLF001
+    freezer.move_to(check_out + timedelta(hours=1, seconds=1))
+    async_fire_time_changed(hass)
+    await _settle(hass)
+    assert runtime._erase_unsub is None  # noqa: SLF001  (the timer fired)
+    assert _guest_facts(runtime) == set()
+    assert _db(runtime, "SELECT count(*) AS n FROM auri_guest_memory.chat_messages")[0]["n"] == 0
+    assert runtime.status_attributes()["guest_memory"] == "closed"
+
+    # Closed until the next stay: no memory for guests, and nothing they say is kept.
+    await _guest_turns(hass, agent, client, "Hello again", "Remember we parked in spot 9")
+    assert client.payloads[-1]["context"]["memory"]["status"] == "not_configured"
+    assert _db(runtime, "SELECT count(*) AS n FROM auri_guest_memory.chat_messages")[0]["n"] == 0
+
+    # The next booking opens it again, starting from its own guest details.
+    next_check_out = check_out + timedelta(days=3)
+    await _set_guest_options(hass, agent, runtime, booking_id="B-2", guest_name="Tom", check_out=_local(next_check_out))
+    assert "Tom booked this stay." in _guest_facts(runtime) and runtime.guest.enabled
+
+
+async def test_a_missed_guest_erase_happens_at_the_next_check(hass: HomeAssistant, memory_setup, freezer) -> None:
+    agent, runtime, _, _ = memory_setup
+    check_out = dt_util.now().replace(microsecond=0) + timedelta(minutes=10)
+    await _set_guest_options(hass, agent, runtime, **{**_GUEST, "check_out": _local(check_out)})
+    # As if the database was down when the erase time came.
+    runtime._erase_unsub()  # noqa: SLF001
+    runtime._erase_unsub = None  # noqa: SLF001
+
+    freezer.move_to(check_out + timedelta(hours=1, minutes=1))
+    # Closed from the erase time on, even before it's erased: nothing more is recalled or kept.
+    assert not runtime.guest.enabled and "Sarah Lee booked this stay." in _guest_facts(runtime)
+
+    # With no erase timer left, the 15-minute check erases it.
+    async_fire_time_changed(hass)
+    await _settle(hass)
+    assert _guest_facts(runtime) == set() and runtime.status_attributes()["guest_memory"] == "closed"
+
+
+async def test_the_guests_nightly_run_and_an_erase_take_turns(hass: HomeAssistant, memory_setup) -> None:
+    agent, runtime, _, _ = memory_setup
+    await _set_guest_options(hass, agent, runtime, **_GUEST)
+    seen: list[tuple[str, bool]] = []
+
+    async def fake_run(space, **_kwargs):
+        seen.append((space.mode, runtime._guest_lock.locked()))  # noqa: SLF001
+        return {"status": "skipped"}
+
+    with patch.object(runtime, "_async_run_space_nightly", side_effect=fake_run):
+        await runtime.async_run_nightly()
+    assert seen == [("owner", False), ("guest", True)]
+
+
+async def test_guest_memory_needs_memory_set_up(hass: HomeAssistant) -> None:
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with patch("homeassistant.config_entries.async_process_deps_reqs", AsyncMock()):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "guest"})
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {"guest_memory_enabled": True, "check_in": "2026-01-01 15:00:00", "check_out": "2099-01-01 11:00:00"},
+    )
+    assert result["errors"] == {"guest_memory_enabled": "guest_memory_needs_memory"}
 
 
 async def test_a_household_that_shares_its_memories(hass: HomeAssistant, memory_setup) -> None:

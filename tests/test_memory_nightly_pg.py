@@ -18,9 +18,12 @@ from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.hey_auri_client.const import EVENT_MEMORY_RUN_FINISHED  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApiError, embedding_tag  # noqa: E402
+from custom_components.hey_auri_client.memory.identity import household_persons  # noqa: E402
 from custom_components.hey_auri_client.memory.nightly import NightlyJob, parse_speaker  # noqa: E402
 from custom_components.hey_auri_client.memory.recall import normalize_statement  # noqa: E402
-from custom_components.hey_auri_client.memory.store import MemoryStore, NewMemory, new_exchange_id  # noqa: E402
+from custom_components.hey_auri_client.memory.db import GUEST_MEMORY_SCHEMA  # noqa: E402
+from custom_components.hey_auri_client.memory.migrations import apply_migrations  # noqa: E402
+from custom_components.hey_auri_client.memory.store import GUEST_SCOPE, MemoryStore, NewMemory, new_exchange_id  # noqa: E402
 from custom_components.hey_auri_client.memory.transcript import current_day, day_window  # noqa: E402
 
 TZ = zoneinfo.ZoneInfo("America/Vancouver")
@@ -60,19 +63,26 @@ class FakeApi:
         self.calls: list[tuple[str, Any]] = []
         self.fail: dict[str, Exception] = {}
         self.extract_limit: int | None = None
+        # What every request said it was for, and the transcripts the digest saw.
+        self.scopes: set[str] = set()
+        self.transcripts: list[str] = []
 
     def _maybe_fail(self, stage: str) -> None:
         if stage in self.fail:
             raise self.fail[stage]
 
-    async def embed(self, texts, *, task_type):
+    async def embed(self, texts, *, task_type, scope="owner"):
         self.calls.append(("embed", len(texts)))
+        self.scopes.add(scope)
         self._maybe_fail("embed")
         return [fake_vector(text) for text in texts], TAG
 
     async def digest(self, **fields):
         stage = fields["stage"]
         self.calls.append(("digest", stage))
+        self.scopes.add(fields.get("scope"))
+        if fields.get("transcript"):
+            self.transcripts.append(fields["transcript"])
         self._maybe_fail(f"digest_{stage}")
         usage = {"prompt_tokens": 100, "completion_tokens": 20}
         if stage == "scrub":
@@ -83,6 +93,7 @@ class FakeApi:
 
     async def extract(self, **fields):
         self.calls.append(("extract", len(fields["transcript"])))
+        self.scopes.add(fields.get("scope"))
         self._maybe_fail("extract")
         if self.extract_limit is not None and len(fields["transcript"]) > self.extract_limit:
             raise MemoryApiError("too slow", status_code=504)
@@ -124,17 +135,24 @@ class FakeHass:
 
 
 class FakeRuntime:
-    def __init__(self, hass: FakeHass, store: MemoryStore, config, api: FakeApi) -> None:
+    """Stands in for a memory space (the owner's unless mode says otherwise)."""
+
+    def __init__(self, hass: FakeHass, store: MemoryStore, config, api: FakeApi, *, mode: str = "owner") -> None:
         self.hass = hass
         self.store = store
         self.config = config
         self.api = api
+        self.mode = mode
+        self.is_guest = mode == "guest"
         self.embedding_tag = TAG
         self.entities = store.list_entities()
         self.backfills = 0
 
     def household_roster(self):
         return [{"name": "Mia", "kind": "person"}, {"name": "Will", "kind": "person"}]
+
+    def people(self):
+        return [] if self.is_guest else household_persons(self.hass)
 
     def note_embedding_tag(self, tag: str) -> None:
         self.embedding_tag = tag
@@ -397,6 +415,37 @@ def test_someone_first_saved_as_a_topic_becomes_a_person(store, make_job):
     assert rows(store, "SELECT id, kind FROM auri_memory.mem_entities WHERE name = 'Lillian'") == [
         {"id": lillian, "kind": "person"}
     ]
+
+
+def test_a_guest_stay_is_learned_in_the_guest_schema_only(store, pg_engine, pg_config, tmp_path):
+    apply_migrations(pg_engine, app_version="test", schema=GUEST_MEMORY_SCHEMA)
+    guests = MemoryStore(pg_engine, schema=GUEST_MEMORY_SCHEMA, scope=GUEST_SCOPE)
+    guests.ensure_household()
+    day = yesterday()
+    said = dt_util.as_utc(day_window(day, TZ, 4)[0] + timedelta(hours=10))
+    exchange = new_exchange_id()
+    guests.insert_messages([
+        {"conversation_id": "g", "exchange_id": exchange, "role": "user", "content": "We parked in spot 12, remember that",
+         "speaker_source": "unknown", "area": "Kitchen", "created_at": said},
+        {"conversation_id": "g", "exchange_id": exchange, "role": "assistant", "content": "Got it.",
+         "speaker_source": "assistant", "created_at": said + timedelta(seconds=2)},
+    ])
+    hass = FakeHass(str(tmp_path / "config"))
+    os.makedirs(hass.config.config_dir, exist_ok=True)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    api = FakeApi([{"statement": "The guests parked in spot 12.", "type": "fact", "subjects": [], "speaker": "Guest", "importance": 4}])
+    space = FakeRuntime(hass, guests, pg_config(vault_path=str(vault)), api, mode="guest")
+
+    result = asyncio.run(NightlyJob(space).async_run_day(day))
+
+    assert result["status"] == "succeeded"
+    assert api.scopes == {"guest"}
+    assert any("] Guest: We parked in spot 12" in transcript for transcript in api.transcripts)
+    assert {row.content for row in guests.current_facts_for_export(include_private=True)} == {"The guests parked in spot 12."}
+    assert store.counts() == {}  # the owner's memory is untouched
+    assert not list(vault.rglob("*.md"))  # guest memory is never copied to Obsidian
+    assert hass.events[-1][1]["scope"] == "guest"
 
 
 def test_a_fact_already_known_still_tells_what_its_subject_is(store, make_job):

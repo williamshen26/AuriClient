@@ -59,7 +59,7 @@ Choose the mode on your dashboard at hey-auri.com:
 
 - **Owner**: everything described above, including automations and [memory](#memory).
 - **Guest**: for rental guests.
-  - Automation editing and memory are turned off. Guests' conversations are never saved to memory, and Auri doesn't use what it remembers about your household.
+  - Automation editing is turned off, and Auri never uses what it remembers about your household. Guests get memory of their own only if you turn on [guest memory](#guest-memory); otherwise nothing they say is saved.
   - Auri answers questions using the [Guest options](#options) and can send you a notification.
   - If you've filled in **Local recommendations**, Auri suggests those places before searching.
 
@@ -84,6 +84,8 @@ Go to **Settings → Devices & services → Hey Auri Client → Configure**.
 | Check-in, Check-out, Wi-Fi, Parking, Trash disposal and Host contact instructions; House rules | What Auri tells guests when they ask. |
 | Property knowledge | Where things are and how to use them, for example where the spare towels are. |
 | Local recommendations | Your favorite places nearby. Auri suggests these before searching. |
+| Let guests use memory | Off by default. Gives guests a memory of their own for the stay. See [Guest memory](#guest-memory). |
+| Reset guest memory | Tick and save to erase guest memory and start it again from the guest details. |
 
 **Memory** (optional)
 
@@ -172,6 +174,20 @@ On a voice satellite, Auri doesn't know who is talking, so it doesn't use memori
 
 Say "forget that…" and Auri stops using the memory right away, along with saved conversations about it. Daily summaries that mention it are rewritten the next night, in the Obsidian copy too. Forgotten memories stay in the database, marked as forgotten, but they're never used again, and Auri doesn't learn them again unless someone says them again on a later day.
 
+### Guest memory
+
+When you rent your home out, guests can have a memory of their own. Turn on **Let guests use memory** in the Guest options (Memory has to be set up). In guest mode, Auri then remembers what guests ask it to, learns from their conversations each night, and uses what it knows during the stay, as it does for you. It's kept in its own schema, `auri_guest_memory`, in the same database:
+
+- Guests never get your memories, and you never get theirs: each mode only uses its own.
+- It starts with the guest details from the Guest options: the guest's name, the number of guests, check-in and check-out, and your notes (a line that looks like a password or code is left out). Property information such as Wi-Fi or house rules isn't copied; Auri reads it from the Guest options when asked.
+- It's erased completely an hour after check-out, so guests who leave a little late can still use it. From then until you save the next booking, it's closed: Auri remembers nothing for guests and keeps nothing they say. If the database can't be reached at that moment, the erase happens at the next check, within 15 minutes of it coming back.
+- It starts again from the guest details when you save a new booking ID (or a new check-in, if you don't use booking IDs), so enter each booking after the previous guests have left. To start again yourself, tick **Reset guest memory** and save; after a stay has ended this erases it but doesn't reopen it. Turning guest memory off erases it too.
+- Guests don't sign in. When the Guest options name a single guest, what they say about themselves is saved for them; with more, Auri asks who it's for, once per conversation.
+- Plans guests ask Auri to remember ("we have a dinner reservation Friday at 7") stay in guest memory and aren't added to your calendar, unless a guest asks for a calendar event.
+- It's never copied to Obsidian.
+
+Guest memory is stored in your database until it's erased, so you could read it. Let guests know the home has an assistant that can remember things during their stay. Home Assistant backups made during a stay include it.
+
 ### Obsidian copy
 
 Set **Obsidian vault folder** to your vault's folder, for example `/share/MyVault`, and every night Auri writes into it:
@@ -252,7 +268,7 @@ actions:
 | `hey_auri_client.delete_auri_sticky_note` | Deletes the note with the given `note_id`. |
 | `hey_auri_client.get_auri_sticky_notes` | Returns all notes. |
 | `hey_auri_client.assign_mac` | Adds MAC addresses to a media player for Wake-on-LAN. Use it when a device has more than one network interface and Home Assistant only knows one of them. |
-| `hey_auri_client.run_memory_job` | Runs the nightly memory processing now. Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. |
+| `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. |
 | `hey_auri_client.run_memory_exam` | Asks the questions in `hey_auri_memory_exam.yaml` and returns the score (see [Testing what Auri remembers](#testing-what-auri-remembers)). |
 
 ## Events
@@ -261,9 +277,9 @@ actions:
 |---|---|
 | `hey_auri_client.conversation_finished` | `conversation_id`, `client_id` (the config entry ID), `user_input`, `response` |
 | `hey_auri_client.auri_timer_finished` | `timer_id`, `entity_id`, `duration`, `satellite_speaker`, `satellite_timer_ring` |
-| `hey_auri_client.memory_run_finished` | `day`, `status` (`succeeded`, `failed` or `skipped`), `reason`, and when it succeeded `digest`, `exchanges`, `facts_added`, `facts_updated` and `facts_confirmed` |
+| `hey_auri_client.memory_run_finished` | `day`, `scope` (`owner` or `guest`), `status` (`succeeded`, `failed` or `skipped`), `reason`, and when it succeeded `digest`, `exchanges`, `facts_added`, `facts_updated` and `facts_confirmed` |
 
-The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `disabled` (not set up), `starting`, `enabled`, `unavailable` (the database can't be reached; Auri keeps working without memory and catches up later) or `error` (a setup problem; see its `error` attribute). Its attributes also show the last nightly run.
+The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `disabled` (not set up), `starting`, `enabled`, `unavailable` (the database can't be reached; Auri keeps working without memory and catches up later) or `error` (a setup problem; see its `error` attribute). Its attributes also show the last nightly run, guest memory's state (`guest_memory`: `on`, `off`, or `closed` after a stay has ended), and when it was last reset or erased.
 
 ## What is sent to the Auri cloud
 
@@ -274,7 +290,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - the current time, the Home Assistant user's name, the language, and which device and area you're speaking from.
 - **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.
-- **With memory set up**, in owner mode:
+- **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):
   - with each request: the speaker's name, the names of the household's people and pets, and the memory notes and profile Home Assistant picked for that message;
   - the text of memories that need a search key (an embedding), such as preferences imported from an earlier version, so the cloud can compute it;
   - every night: the day's conversations (with passwords, card numbers and similar removed), the names of the people, pets and subjects Auri knows, and, for each new fact, the few stored memories most like it, so the cloud can summarize the day and tell what's new. The cloud returns the summary and the facts and keeps none of it.
@@ -292,7 +308,7 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | Auri asks you to set up Music Assistant | Music playback needs [Music Assistant](https://music-assistant.io). |
 | Auri listens or replies in the wrong language | Ask it to switch (for example, "speak English"), or change **STT default language** in the General options. |
 | The QR code opens the Auri home page | Press **Refresh Session**. |
-| Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode memory is always off. |
+| Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
 | `sensor.auri_memory` is `unavailable` | Home Assistant can't reach the database. Auri keeps working without memory, holds on to the latest conversation (up to 1,000 messages), and saves it when the database is back. |
 | `sensor.auri_memory` is `error` | Its `error` attribute names the problem, for example `pgvector_missing`, `insufficient_privilege` or `schema_too_new` (the database was set up by a newer version of this integration: update it). |

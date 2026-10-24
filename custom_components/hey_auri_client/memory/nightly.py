@@ -25,14 +25,13 @@ from homeassistant.util import dt as dt_util
 
 from ..const import EVENT_MEMORY_RUN_FINISHED
 from .api import MemoryApiError, embedding_tag
-from .identity import household_persons
 from .obsidian import remove_daily_note, validate_vault, write_daily_note, write_memory_note
 from .recall import normalize_statement, repeats
 from .store import COMMITMENT_GRACE, EXCHANGE_TTL, NewMemory
 from .transcript import build_transcript, chunk_lines, current_day, day_window, exchanges_for_memory, split_chunk
 
 if TYPE_CHECKING:
-    from .runtime import MemoryRuntime
+    from .space import MemorySpace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,16 +114,16 @@ class _Run:
 
 
 class NightlyJob:
-    """The nightly pipeline for one MemoryRuntime (which serializes calls)."""
+    """The nightly pipeline for one memory space (the runtime serializes calls)."""
 
-    def __init__(self, runtime: "MemoryRuntime") -> None:
-        self._runtime = runtime
-        self._hass = runtime.hass
+    def __init__(self, space: "MemorySpace") -> None:
+        self._space = space
+        self._hass = space.hass
         self._vault_problem: str | None = None
 
     @property
     def _store(self):
-        return self._runtime.store
+        return self._space.store
 
     async def _run(self, func, *args):
         return await self._hass.async_add_executor_job(func, *args)
@@ -134,7 +133,7 @@ class NightlyJob:
     async def async_catch_up(self, *, days_back: int = 7) -> dict[str, Any]:
         """Process finished days that have turns but no successful run (oldest first), then tidy up."""
         store = self._store
-        config = self._runtime.config
+        config = self._space.config
         tz = dt_util.get_default_time_zone()
         today = current_day(dt_util.now(), config.day_boundary_hour)
         first = today - timedelta(days=max(days_back, 1))
@@ -170,7 +169,7 @@ class NightlyJob:
             lambda: store.housekeeping(archive_retention_days=config.archive_retention_days)
         )
         if not stopped:
-            results["embedded"] = await self._runtime.async_backfill_embeddings()
+            results["embedded"] = await self._space.async_backfill_embeddings()
         await self._async_write_memory_note()
         return results
 
@@ -178,7 +177,7 @@ class NightlyJob:
         """Process one day (the run_memory_job service with a date)."""
         result = await self._async_run_day(day, force=force)
         if result["status"] == "succeeded":
-            await self._runtime.async_backfill_embeddings()
+            await self._space.async_backfill_embeddings()
             await self._async_write_memory_note()
         return result
 
@@ -204,7 +203,7 @@ class NightlyJob:
             result = {"status": "failed", "reason": "error"}
             await self._async_record_failure(run, f"{type(err).__name__}: {err}")
 
-        self._hass.bus.async_fire(EVENT_MEMORY_RUN_FINISHED, {"day": day.isoformat(), **result})
+        self._hass.bus.async_fire(EVENT_MEMORY_RUN_FINISHED, {"day": day.isoformat(), "scope": self._space.mode, **result})
         return result
 
     async def _async_record_failure(self, run: _Run, error: str) -> None:
@@ -217,10 +216,11 @@ class NightlyJob:
     def _envelope(self, day: date) -> dict[str, Any]:
         """Fields every stage of a day's run sends (kept identical so prompt caching works)."""
         return {
+            "scope": self._space.mode,
             "day": day.isoformat(),
             "weekday": _WEEKDAYS[day.weekday()],
             "timezone": str(self._hass.config.time_zone),
-            "household": self._runtime.household_roster(),
+            "household": self._space.household_roster(),
         }
 
     # ── one day ─────────────────────────────────────────────────────────────
@@ -228,9 +228,9 @@ class NightlyJob:
     async def _async_process_day(self, run: _Run) -> dict[str, Any]:
         store = self._store
         tz = dt_util.get_default_time_zone()
-        day_start, day_end = day_window(run.day, tz, self._runtime.config.day_boundary_hour)
+        day_start, day_end = day_window(run.day, tz, self._space.config.day_boundary_hour)
         rows = await self._run(store.messages_between, dt_util.as_utc(day_start), dt_util.as_utc(day_end))
-        lines = build_transcript(rows, tz)
+        lines = build_transcript(rows, tz, guest=self._space.is_guest)
         if not lines:
             await self._run(lambda: store.finish_run(run.run_id, status="skipped", stats={"reason": "nothing_to_process"}))
             return {"status": "skipped", "reason": "nothing_to_process"}
@@ -243,7 +243,9 @@ class NightlyJob:
         await self._run(store.set_run_stage, run.run_id, "embed")
         now = dt_util.utcnow()
         # A day processed late doesn't add exchanges that would already be expired.
-        exchanges = [item for item in exchanges_for_memory(rows) if item["occurred_at"] + EXCHANGE_TTL > now]
+        exchanges = [
+            item for item in exchanges_for_memory(rows, guest=self._space.is_guest) if item["occurred_at"] + EXCHANGE_TTL > now
+        ]
         texts = ([digest] if digest else []) + [item["content"] for item in exchanges]
         digest_vector: list[float] | None = None
         if texts:
@@ -261,17 +263,17 @@ class NightlyJob:
         decisions = await self._async_reconcile(run, candidates)
 
         await self._run(store.set_run_stage, run.run_id, "apply")
-        persons = {person["name"].lower(): person for person in household_persons(self._hass)}
+        persons = {person["name"].lower(): person for person in self._space.people()}
         counts = await self._run(self._apply_blocking, run, day_start, digest, digest_vector, exchanges, decisions, persons)
         if run.tag:
-            self._runtime.note_embedding_tag(run.tag)
+            self._space.note_embedding_tag(run.tag)
 
         if digest:
             await self._async_vault(lambda vault: write_daily_note(vault, run.day, digest))
         return {"status": "succeeded", **counts}
 
     async def _async_embed(self, run: _Run, texts: list[str]) -> list[list[float]]:
-        vectors, tag = await self._runtime.api.embed(texts, task_type="RETRIEVAL_DOCUMENT")
+        vectors, tag = await self._space.api.embed(texts, task_type="RETRIEVAL_DOCUMENT", scope=self._space.mode)
         if not run.accept_tag(tag):
             raise MemoryApiError("The embedding model changed during the run")
         return vectors
@@ -295,7 +297,7 @@ class NightlyJob:
     ) -> str | None:
         part = {"index": index, "count": count}
         try:
-            draft = await self._runtime.api.digest(stage="draft", transcript=transcript, part=part, **run.envelope)
+            draft = await self._space.api.digest(stage="draft", transcript=transcript, part=part, **run.envelope)
         except MemoryApiError as err:
             if not err.retry_smaller or depth >= MAX_SPLIT_DEPTH:
                 raise
@@ -312,7 +314,7 @@ class NightlyJob:
         if not review:
             return draft["digest"]
         try:
-            reviewed = await self._runtime.api.digest(
+            reviewed = await self._space.api.digest(
                 stage="review", transcript=transcript, part=part, draft=draft["digest"][:MAX_DRAFT_CHARS], **run.envelope
             )
         except MemoryApiError as err:
@@ -333,7 +335,7 @@ class NightlyJob:
                 if len(group) == 1:
                     merged.append(group[0])
                     continue
-                response = await self._runtime.api.digest(
+                response = await self._space.api.digest(
                     stage="merge", partials=[text[:MAX_PARTIAL_CHARS] for text in group], **run.envelope
                 )
                 run.add_usage(response)
@@ -347,7 +349,7 @@ class NightlyJob:
     async def _async_extract(self, run: _Run, lines: list[str]) -> list[dict[str, Any]]:
         known_subjects = [
             {"name": entity.name, "kind": entity.kind, "aliases": list(entity.aliases)}
-            for entity in self._runtime.entities
+            for entity in self._space.entities
             if entity.kind != "household"
         ][:MAX_KNOWN_SUBJECTS]
         chunks = chunk_lines(lines, EXTRACT_CHUNK_CHARS)
@@ -367,7 +369,7 @@ class NightlyJob:
         depth: int = 0,
     ) -> list[dict[str, Any]]:
         try:
-            response = await self._runtime.api.extract(
+            response = await self._space.api.extract(
                 transcript=chunk,
                 part={"index": index, "count": count},
                 known_subjects=known_subjects,
@@ -475,7 +477,7 @@ class NightlyJob:
             for position, (candidate, neighbors) in enumerate(batch)
         ]
         try:
-            response = await self._runtime.api.reconcile(
+            response = await self._space.api.reconcile(
                 day=run.envelope["day"], household=run.envelope["household"], items=items, embed_updates=True
             )
         except MemoryApiError as err:
@@ -653,12 +655,12 @@ class NightlyJob:
             tag: str | None = None
             if day is not None and forgotten:
                 try:
-                    response = await self._runtime.api.digest(
+                    response = await self._space.api.digest(
                         stage="scrub", draft=digest["content"][:MAX_DRAFT_CHARS], forgotten=forgotten, **self._envelope(day)
                     )
                     cleaned = None if response.get("empty") else (response.get("digest") or None)
                     if cleaned:
-                        vectors, tag = await self._runtime.api.embed([cleaned], task_type="RETRIEVAL_DOCUMENT")
+                        vectors, tag = await self._space.api.embed([cleaned], task_type="RETRIEVAL_DOCUMENT", scope=self._space.mode)
                         vector = vectors[0]
                 except MemoryApiError as err:
                     _LOGGER.debug("Digest clean-up postponed: %s", err)
@@ -679,7 +681,7 @@ class NightlyJob:
         with store.engine.begin() as conn:
             # Not linked to the old digest: its text holds what was forgotten.
             if cleaned and day is not None and store.current_digest_id(conn, day) is None:
-                day_start = day_window(day, dt_util.get_default_time_zone(), self._runtime.config.day_boundary_hour)[0]
+                day_start = day_window(day, dt_util.get_default_time_zone(), self._space.config.day_boundary_hour)[0]
                 store.insert_memory(
                     NewMemory(
                         kind="digest",
@@ -699,7 +701,7 @@ class NightlyJob:
 
     async def _async_write_memory_note(self) -> None:
         store = self._store
-        include_private = self._runtime.config.vault_include_private
+        include_private = self._space.config.vault_include_private
         tz = dt_util.get_default_time_zone()
         today = dt_util.now().date()
 
@@ -710,9 +712,12 @@ class NightlyJob:
         await self._async_vault(_write)
 
     async def _async_vault(self, write: Callable[[str], Any]) -> None:
-        """Run a vault write in the executor when a usable vault is set; never fails the job."""
-        vault = self._runtime.config.vault_path
-        if not vault:
+        """Run a vault write in the executor when a usable vault is set; never fails the job.
+
+        Guest memory is never copied to the vault.
+        """
+        vault = self._space.config.vault_path
+        if not vault or self._space.is_guest:
             return
         hass = self._hass
 

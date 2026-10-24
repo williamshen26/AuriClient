@@ -13,6 +13,7 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
+from homeassistant.util import dt as dt_util
 
 from .const import (
     API_ENDPOINT,
@@ -23,6 +24,8 @@ from .const import (
     CONF_CHECK_OUT_INSTRUCTION,
     CONF_CLIENT_ID,
     CONF_GUEST_COUNT,
+    CONF_GUEST_MEMORY_ENABLED,
+    CONF_GUEST_MEMORY_RESET_AT,
     CONF_GUEST_NAME,
     CONF_GUEST_PHONE_NUMBER,
     CONF_HOST_CONTACT_INSTRUCTION,
@@ -82,6 +85,8 @@ _LOGGER = logging.getLogger(__name__)
 _MEMORY_TEXT_FIELDS = (CONF_MEMORY_DB_HOST, CONF_MEMORY_DB_NAME, CONF_MEMORY_DB_USER, CONF_MEMORY_VAULT_PATH)
 # "Who uses each login" default: the person Home Assistant links the login to (not saved).
 _LOGIN_LINKED = "linked"
+# Guest Settings checkbox: erase guest memory and start it again from the guest details.
+_RESET_GUEST_MEMORY = "reset_guest_memory"
 _PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
 
 # Display names for the STT language dropdown only — SUPPORTED_LANGUAGES
@@ -313,9 +318,15 @@ class OptionsFlow(config_entries.OptionsFlow):
                 user_input = dict(user_input)
                 user_input[CONF_GUEST_PHONE_NUMBER] = normalized_phone_number
 
+            if user_input.get(CONF_GUEST_MEMORY_ENABLED) and not MemoryConfig.from_options(self.config_entry.options).configured:
+                errors[CONF_GUEST_MEMORY_ENABLED] = "guest_memory_needs_memory"
+
             if not errors:
                 data = dict(self.config_entry.options)
+                reset = bool(user_input.pop(_RESET_GUEST_MEMORY, False))
                 data.update(user_input)
+                if reset:
+                    data[CONF_GUEST_MEMORY_RESET_AT] = dt_util.utcnow().isoformat()
                 return self.async_create_entry(title="", data=data)
 
         options = user_input or self.config_entry.options
@@ -438,6 +449,12 @@ class OptionsFlow(config_entries.OptionsFlow):
                         )
                     ),
                 ): selector.TemplateSelector(),
+                vol.Optional(
+                    CONF_GUEST_MEMORY_ENABLED,
+                    default=bool(options.get(CONF_GUEST_MEMORY_ENABLED, False)),
+                ): bool,
+                # Not stored: saving with it ticked records when the host asked.
+                vol.Optional(_RESET_GUEST_MEMORY, default=False): bool,
             }
         )
 

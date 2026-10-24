@@ -1,4 +1,4 @@
-"""Buffered, non-blocking writes of owner-mode turns to the conversation archive.
+"""Buffered, non-blocking writes of turns to a memory space's conversation archive.
 
 Turns are queued in memory and written in batches off the event loop, so a
 slow or unreachable database never slows a conversation. While the database
@@ -36,14 +36,18 @@ class TurnLogger:
         self,
         hass: HomeAssistant,
         write: Callable[[list[dict[str, Any]]], Awaitable[None]],
+        *,
+        spool_key: str = _SPOOL_STORAGE_KEY,
     ) -> None:
         self._hass = hass
         self._write = write
         self._buffer: deque[dict[str, Any]] = deque(maxlen=MAX_BUFFERED_ROWS)
         self._task: asyncio.Task | None = None
+        # The batch being written, if any (it isn't cancelled with the loop).
+        self._inflight: asyncio.Task | None = None
         self._backoff = 0.0
         self._closed = False
-        self._spool: Store[list[dict[str, Any]]] = Store(hass, _SPOOL_STORAGE_VERSION, _SPOOL_STORAGE_KEY)
+        self._spool: Store[list[dict[str, Any]]] = Store(hass, _SPOOL_STORAGE_VERSION, spool_key)
 
     @property
     def pending(self) -> int:
@@ -81,7 +85,8 @@ class TurnLogger:
         while self._buffer and not self._closed:
             batch = [self._buffer.popleft() for _ in range(min(_BATCH_SIZE, len(self._buffer)))]
             try:
-                await self._write(batch)
+                self._inflight = self._hass.async_create_task(self._write(batch))
+                await asyncio.shield(self._inflight)
             except Exception as err:  # noqa: BLE001
                 # Put the batch back (in order) and wait before retrying.
                 self._buffer.extendleft(reversed(batch))
@@ -90,6 +95,20 @@ class TurnLogger:
                 await asyncio.sleep(self._backoff)
             else:
                 self._backoff = 0.0
+
+    async def async_clear(self) -> None:
+        """Drop every queued and saved row, once a write in progress has finished.
+
+        For erasing guest memory: nothing queued before the erase may be
+        written into the fresh schema afterwards.
+        """
+        self._buffer.clear()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        if self._inflight is not None and not self._inflight.done():
+            await asyncio.wait([self._inflight])
+        self._backoff = 0.0
+        await self._spool.async_remove()
 
     async def async_shutdown(self) -> None:
         """Try a last write, then save whatever is left for the next start."""

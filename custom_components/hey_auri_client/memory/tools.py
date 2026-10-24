@@ -1,8 +1,10 @@
 """recall_memory, remember_memory and forget_memory, run against the local memory store.
 
-Identity comes from the injected _turn (TurnMeta), never from tool
-arguments, and the query/statement embedding arrives with the tool call
-(_memory_embedding) because this client has no embedding key.
+Identity and mode come from the injected _turn (TurnMeta), never from tool
+arguments: each call runs against the memory space of the turn's mode only
+(the owner's, or the guests' in guest mode). The query/statement embedding
+arrives with the tool call (_memory_embedding) because this client has no
+embedding key.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from .store import ALL_KINDS, COMMITMENT_GRACE, FACT_KINDS, NewMemory
 
 if TYPE_CHECKING:
     from .runtime import MemoryRuntime
+    from .space import MemorySpace
 
 _MAX_CONTENT_CHARS = 500
 _MAX_FORGET_IDS = 20
@@ -91,26 +94,33 @@ def _local_midnight(day: date) -> datetime:
 
 
 class MemoryToolService:
-    """Tool handlers backed by a MemoryRuntime."""
+    """Tool handlers backed by a MemoryRuntime, each call in the space of its turn's mode."""
 
     def __init__(self, runtime: "MemoryRuntime") -> None:
         self._runtime = runtime
 
-    def _check(self, arguments: dict[str, Any]) -> tuple[TurnMeta | None, dict[str, Any] | None]:
+    def _check(self, arguments: dict[str, Any]) -> tuple[TurnMeta | None, "MemorySpace | None", dict[str, Any] | None]:
         turn = arguments.get("_turn")
-        if not isinstance(turn, TurnMeta) or turn.mode != "owner" or not turn.memory_allowed:
-            return None, {
+        if not isinstance(turn, TurnMeta) or turn.mode not in ("owner", "guest") or not turn.memory_allowed:
+            return None, None, {
                 "success": False,
                 "error": "memory_unavailable",
                 "say": "Long-term memory isn't available right now.",
             }
-        if not self._runtime.enabled:
-            return None, {
+        space = self._runtime.space_for(turn.mode)
+        if space.closed:
+            return None, None, {
+                "success": False,
+                "error": "stay_ended",
+                "say": "This stay has ended, so I can't remember or look up anything from it.",
+            }
+        if not space.enabled:
+            return None, None, {
                 "success": False,
                 "error": "memory_unavailable",
                 "say": "Memory can't be reached right now. Try again later.",
             }
-        return turn, None
+        return turn, space, None
 
     def _embedding(self, arguments: dict[str, Any]) -> tuple[list[float] | None, str | None]:
         """The vector the backend attached to this tool call, if it's usable."""
@@ -129,7 +139,7 @@ class MemoryToolService:
         return [float(value) for value in vector], tag
 
     async def recall_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        turn, problem = self._check(arguments)
+        turn, space, problem = self._check(arguments)
         if problem:
             return problem
         query = " ".join(str(arguments.get("query") or "").split())
@@ -142,7 +152,7 @@ class MemoryToolService:
         kinds = [kind for kind in (arguments.get("kinds") or []) if kind in ALL_KINDS] or list(ALL_KINDS)
         vector, tag = self._embedding(arguments)
 
-        result = await self._runtime.async_tool_recall(
+        result = await space.async_tool_recall(
             query=query,
             about=_names(arguments.get("about")),
             kinds=kinds,
@@ -163,15 +173,14 @@ class MemoryToolService:
                 ),
             }
         guidance = "Newer notes win; 'replaced' is history. Never read out the # numbers."
-        if not self._runtime.config.share_household:
+        if not space.shared:
             guidance += " Private notes only help the person they are about."
         return {"success": True, "count": len(result.rows), "results": result.text, "guidance": guidance}
 
     async def remember_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        turn, problem = self._check(arguments)
+        turn, space, problem = self._check(arguments)
         if problem:
             return problem
-        runtime = self._runtime
 
         content = " ".join(str(arguments.get("content") or "").split())[:_MAX_CONTENT_CHARS]
         if not content:
@@ -206,27 +215,28 @@ class MemoryToolService:
             importance = 4
 
         conversation_id = turn.conversation_id
-        speaker = turn.speaker
+        # Guests are never Home Assistant users, whatever login the turn came from.
+        speaker = space.speaker_for(turn.speaker)
         names = _names(arguments.get("about"))
         # The first call after "Who should I remember this for?" carries the answer.
-        answering = not (speaker and speaker.known) and runtime.asked_once.take_answer(conversation_id)
+        answering = not (speaker and speaker.known) and space.asked_once.take_answer(conversation_id)
         if names:
             # The one name in the answer is who was speaking, for the rest of
             # this conversation: a person, even one Home Assistant doesn't know.
             answered = answering and len(names) == 1
-            subjects = await runtime.async_resolve_subjects(names, default_kind="person" if answered else "topic")
+            subjects = await space.async_resolve_subjects(names, default_kind="person" if answered else "topic")
             if answered and len(subjects) == 1 and subjects[0].kind == "person":
-                runtime.stated_speakers.set(conversation_id, subjects[0].name, subjects[0].person_entity_id)
+                space.stated_speakers.set(conversation_id, subjects[0].name, subjects[0].person_entity_id)
         else:
-            who = await runtime.async_speaker_subject(speaker, conversation_id)
+            who = await space.async_speaker_subject(speaker, conversation_id)
             if who is None:
-                if not runtime.asked_once.asked(conversation_id):
-                    runtime.asked_once.mark(conversation_id)
+                if not space.asked_once.asked(conversation_id):
+                    space.asked_once.mark(conversation_id)
                     return {
                         "success": False,
                         "needs_person": True,
                         "ask_user": "Who should I remember this for?",
-                        "household_members": runtime.household_names(),
+                        "household_members": space.household_names(),
                     }
                 return {
                     "success": False,
@@ -246,7 +256,7 @@ class MemoryToolService:
             expires_at = (due_at or dt_util.now()) + COMMITMENT_GRACE
 
         vector, tag = self._embedding(arguments)
-        stated = runtime.stated_speakers.get(conversation_id)
+        stated = space.stated_speakers.get(conversation_id)
         if speaker is not None and speaker.known:
             speaker_source, speaker_name, speaker_person = speaker.source, speaker.name, speaker.person_entity_id
         elif stated:
@@ -274,8 +284,8 @@ class MemoryToolService:
         requested = _memory_ids(arguments.get("replaces"), _MAX_REPLACED_IDS)
         # Only notes Auri was shown in this conversation: a number the model
         # made up can't retire anything.
-        replaces = [memory_id for memory_id in requested if runtime.shown_notes.shown(conversation_id, memory_id)]
-        memory_id, duplicate, replaced = await runtime.async_remember(memory, replaces=replaces)
+        replaces = [memory_id for memory_id in requested if space.shown_notes.shown(conversation_id, memory_id)]
+        memory_id, duplicate, replaced = await space.async_remember(memory, replaces=replaces)
         if duplicate:
             result: dict[str, Any] = {"success": True, "duplicate": True, "saved": content, "id": memory_id}
         else:
@@ -287,15 +297,14 @@ class MemoryToolService:
         return result
 
     async def forget_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        turn, problem = self._check(arguments)
+        turn, space, problem = self._check(arguments)
         if problem:
             return problem
-        runtime = self._runtime
         vector, tag = self._embedding(arguments)
 
         ids = _memory_ids(arguments.get("memory_ids"), _MAX_FORGET_IDS)
         if ids:
-            forgotten = await runtime.async_forget(ids, query_vector=vector, embedding_tag=tag)
+            forgotten = await space.async_forget(ids, query_vector=vector, embedding_tag=tag)
             if not forgotten:
                 return {
                     "success": False,
@@ -307,7 +316,7 @@ class MemoryToolService:
         query = " ".join(str(arguments.get("query") or "").split())
         if not query:
             return {"retry": "query is required for forget_memory"}
-        result = await runtime.async_tool_recall(
+        result = await space.async_tool_recall(
             query=query,
             about=[],
             kinds=list(FACT_KINDS),
@@ -330,7 +339,7 @@ class MemoryToolService:
         gap = rows[0].score - rows[1].score if len(rows) > 1 else 1.0
         clear_match = len(rows) == 1 or (gap >= 0.1 and (vector is None or rows[0].score >= 0.75))
         if clear_match:
-            forgotten = await runtime.async_forget([rows[0].id], query_vector=vector, embedding_tag=tag)
+            forgotten = await space.async_forget([rows[0].id], query_vector=vector, embedding_tag=tag)
             return {"success": True, "count": len(forgotten), "forgotten": forgotten}
         return {
             "success": False,

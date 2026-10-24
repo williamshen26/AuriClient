@@ -73,7 +73,7 @@ def pg_config():
 
 @pytest.fixture
 def pg_engine():
-    """An engine on a freshly migrated, empty auri_memory schema."""
+    """An engine on a freshly migrated, empty auri_memory schema (and no guest schema)."""
     sqlalchemy = pytest.importorskip("sqlalchemy")
     pytest.importorskip("psycopg2")
     from custom_components.hey_auri_client.memory.db import build_engine
@@ -83,6 +83,7 @@ def pg_engine():
     try:
         with engine.begin() as conn:
             conn.execute(sqlalchemy.text("DROP SCHEMA IF EXISTS auri_memory CASCADE"))
+            conn.execute(sqlalchemy.text("DROP SCHEMA IF EXISTS auri_guest_memory CASCADE"))
     except sqlalchemy.exc.OperationalError:
         engine.dispose()
         pytest.skip("No test PostgreSQL server reachable")

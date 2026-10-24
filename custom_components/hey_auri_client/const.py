@@ -192,6 +192,8 @@ DATA_MEMORY = "memory"
 # Long-term memory (owner mode). Option keys live next to MemoryConfig so the
 # memory package doesn't depend on this module.
 from .memory.config import (  # noqa: E402
+    CONF_GUEST_MEMORY_ENABLED,
+    CONF_GUEST_MEMORY_RESET_AT,
     CONF_MEMORY_ARCHIVE_RETENTION_DAYS,
     CONF_MEMORY_DAY_BOUNDARY_HOUR,
     CONF_MEMORY_DB_HOST,

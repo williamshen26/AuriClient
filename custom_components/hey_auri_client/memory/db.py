@@ -13,6 +13,10 @@ from typing import Any
 from .config import MemoryConfig
 
 MEMORY_SCHEMA = "auri_memory"
+# Guest memory: the current home-share stay only, dropped as a whole when it's reset.
+GUEST_MEMORY_SCHEMA = "auri_guest_memory"
+# Stands for the schema in SQL text; each store and migration run fills in its own.
+SCHEMA_TOKEN = "__memory_schema__"
 MIN_SERVER_VERSION_NUM = 130000  # PostgreSQL 13
 APPLICATION_NAME = "hey_auri_client"
 
@@ -126,9 +130,10 @@ def detect_vector_extension(conn) -> tuple[str, str] | None:
 def test_connection(cfg: MemoryConfig) -> dict[str, Any]:
     """Dry-run the setup: connect, check versions and privileges, change nothing.
 
-    CREATE EXTENSION and CREATE SCHEMA run inside a transaction that is
-    always rolled back (DDL is transactional in PostgreSQL), which proves
-    the account can do them without leaving anything behind.
+    CREATE EXTENSION and CREATE SCHEMA (the owner's and the guests') run
+    inside a transaction that is always rolled back (DDL is transactional in
+    PostgreSQL), which proves the account can do them without leaving
+    anything behind.
     """
     _require_drivers()
     from sqlalchemy import text  # pylint: disable=import-outside-toplevel
@@ -155,15 +160,16 @@ def test_connection(cfg: MemoryConfig) -> dict[str, Any]:
                 except DBAPIError as err:
                     raise classify_setup_error(err) from err
                 vector = detect_vector_extension(conn)
-                try:
-                    conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {MEMORY_SCHEMA}"))
-                except DBAPIError as err:
-                    if _sqlstate(err) == _SQLSTATE_INSUFFICIENT_PRIVILEGE:
-                        raise MemoryDbError(
-                            "insufficient_privilege",
-                            f"This user can't create the {MEMORY_SCHEMA} schema in this database.",
-                        ) from err
-                    raise
+                for schema in (MEMORY_SCHEMA, GUEST_MEMORY_SCHEMA):
+                    try:
+                        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+                    except DBAPIError as err:
+                        if _sqlstate(err) == _SQLSTATE_INSUFFICIENT_PRIVILEGE:
+                            raise MemoryDbError(
+                                "insufficient_privilege",
+                                f"This user can't create the {schema} schema in this database.",
+                            ) from err
+                        raise
             finally:
                 transaction.rollback()
 

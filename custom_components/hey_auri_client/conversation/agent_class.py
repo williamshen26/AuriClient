@@ -169,17 +169,22 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         tool_names: list[str],
         kind: str | None = None,
     ) -> None:
-        """Archive the exchange for the nightly memory job: owner mode with memory allowed only."""
+        """Archive the exchange for the nightly memory job, in the memory of the turn's mode.
+
+        Owner turns go to the household's memory; guest turns to the guests'
+        (only when guest memory is on). Needs memory allowed for the account.
+        """
         memory = self.memory
         if (
             memory is None
-            or turn.mode != "owner"
+            or turn.mode not in ("owner", "guest")
             or not turn.memory_allowed
             or not turn.conversation_id
             or turn.conversation_id.startswith(MEMORY_EXAM_CONVERSATION_PREFIX)
         ):
             return
         memory.log_turn(
+            mode=turn.mode,
             conversation_id=turn.conversation_id,
             speaker=turn.speaker or Speaker(),
             user_text=user_input.text,

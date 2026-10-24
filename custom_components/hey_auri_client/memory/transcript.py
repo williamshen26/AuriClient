@@ -26,7 +26,8 @@ def current_day(now: datetime, boundary_hour: int) -> date:
     return (now - timedelta(hours=boundary_hour)).date()
 
 
-def speaker_label(row: dict[str, Any]) -> str:
+def speaker_label(row: dict[str, Any], *, guest: bool = False) -> str:
+    """Who said a line. In guest memory, someone who didn't say their name is "Guest"."""
     if row.get("role") == "assistant":
         return "Assistant"
     name = (row.get("speaker_name") or "").strip()
@@ -35,6 +36,8 @@ def speaker_label(row: dict[str, Any]) -> str:
         return name
     if source == "stated" and name:
         return f"{name} (stated)"
+    if guest:
+        return "Guest"
     area = (row.get("area") or "").strip()
     return f"Unknown speaker ({area})" if area else "Unknown speaker"
 
@@ -59,7 +62,7 @@ def _excluded_exchanges(rows: Iterable[dict[str, Any]]) -> set[str]:
     return excluded
 
 
-def build_transcript(rows: Sequence[dict[str, Any]], tz: tzinfo) -> list[str]:
+def build_transcript(rows: Sequence[dict[str, Any]], tz: tzinfo, *, guest: bool = False) -> list[str]:
     """"[HH:MM] Label: text" lines in order, without automatic turns and short device commands."""
     excluded = _excluded_exchanges(rows)
     lines: list[str] = []
@@ -70,7 +73,7 @@ def build_transcript(rows: Sequence[dict[str, Any]], tz: tzinfo) -> list[str]:
         if not text:
             continue
         local = row["created_at"].astimezone(tz)
-        lines.append(f"[{local:%H:%M}] {speaker_label(row)}: {text}")
+        lines.append(f"[{local:%H:%M}] {speaker_label(row, guest=guest)}: {text}")
     return lines
 
 
@@ -101,7 +104,7 @@ def split_chunk(chunk: str) -> list[str]:
     return ["\n".join(lines[:middle]), "\n".join(lines[middle:])]
 
 
-def exchanges_for_memory(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+def exchanges_for_memory(rows: Sequence[dict[str, Any]], *, guest: bool = False) -> list[dict[str, Any]]:
     """One "earlier conversation" memory per exchange (user message plus reply)."""
     excluded = _excluded_exchanges(rows)
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -114,7 +117,9 @@ def exchanges_for_memory(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]
     for exchange_id, parts in grouped.items():
         parts.sort(key=lambda row: (row["created_at"], row.get("id") or 0))
         text = " / ".join(
-            f"{speaker_label(row)}: {' '.join((row.get('content') or '').split())}" for row in parts if row.get("content")
+            f"{speaker_label(row, guest=guest)}: {' '.join((row.get('content') or '').split())}"
+            for row in parts
+            if row.get("content")
         )
         if not text:
             continue

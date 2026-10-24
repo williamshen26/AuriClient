@@ -56,6 +56,7 @@ class MemoryApi:
         self._client = client
 
     async def _post(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # scope: "owner", or "guest" for a home-share stay (the payload says which).
         body = {"v": 1, "request_id": str(uuid.uuid4()), "scope": "owner", **payload}
         try:
             return await self._client.post_json(
@@ -77,7 +78,9 @@ class MemoryApi:
                 max_chars=details.get("max_chars"),
             ) from err
 
-    async def embed(self, texts: Sequence[str], *, task_type: str) -> tuple[list[list[float]], str]:
+    async def embed(
+        self, texts: Sequence[str], *, task_type: str, scope: str = "owner"
+    ) -> tuple[list[list[float]], str]:
         """Embed texts in batches of 100; returns (vectors in order, embedding tag)."""
         vectors: list[list[float]] = []
         tag = embedding_tag("unknown", EMBEDDING_DIMENSIONS)
@@ -85,6 +88,7 @@ class MemoryApi:
             response = await self._post(
                 "embed",
                 {
+                    "scope": scope,
                     "task_type": task_type,
                     "dimensions": EMBEDDING_DIMENSIONS,
                     "texts": list(texts[start:start + EMBED_BATCH_SIZE]),

@@ -1,17 +1,19 @@
 """Runtime for the local memory store.
 
-Owns the database connection and its health, builds the memory block sent
-with each owner-mode turn, backs the memory tools, logs turns, imports
-legacy preferences, and schedules the nightly job. Nothing here may slow a
-conversation: database work runs in executor threads with tight timeouts,
-and failures degrade to "no memory this turn".
+Owns the database connection and its health, and two memory spaces: the
+household's (owner mode, schema auri_memory) and the current guests' (guest
+mode, schema auri_guest_memory, only when Guest Settings switch it on). Each
+turn uses the space for its mode and no other. Also imports legacy
+preferences, keeps guest memory in step with Guest Settings, and schedules
+the nightly job. Nothing here may slow a conversation: database work runs in
+executor threads with tight timeouts, and failures degrade to "no memory
+this turn".
 """
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 import logging
 import random
@@ -32,54 +34,37 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from ..const import CONF_BOOKING_ID, CONF_CHECK_OUT, DOMAIN, LEGACY_USER_DATA_DIR
+from ..const import DOMAIN, LEGACY_USER_DATA_DIR
 from ..saas_client import SaaSClient
-from .api import EMBEDDING_DIMENSIONS, MemoryApi, MemoryApiError, embedding_tag
-from .config import CONF_MEMORY_LOGIN_PEOPLE, MemoryConfig
-from .db import MEMORY_SCHEMA, MemoryDbError, build_engine, detect_vector_extension
-from .identity import AskedOnceCache, Speaker, StatedSpeakerCache, household_persons
+from .api import EMBEDDING_DIMENSIONS, MemoryApi, embedding_tag
+from .config import MemoryConfig
+from .db import GUEST_MEMORY_SCHEMA, MEMORY_SCHEMA, MemoryDbError, build_engine, detect_vector_extension
+from .guest import STAY_META_KEY, guest_erase_time, guest_memory_enabled, seed_memories, stay_marker, stay_over
+from .identity import Speaker, household_persons
 from .legacy import LegacyImportPlan, load_legacy_files, plan_legacy_import
-from .migrations import apply_migrations
-from .scope import parse_check_out, scopes_to_purge
-from .recall import (
-    AUTO_NOTES_TOTAL_CHARS,
-    PROFILE_TOTAL_CHARS,
-    TOOL_NOTES_TOTAL_CHARS,
-    RecallRow,
-    ShownNotesCache,
-    SubjectEntity,
-    adjacent_days,
-    extract_terms,
-    format_notes_with_rows,
-    match_subjects,
-    mentions_self,
-    parse_date_hints,
-    should_auto_recall,
-    websearch_query,
-)
-from .redaction import redact
-from .store import ALL_KINDS, MemoryStore, NewMemory, new_exchange_id
+from .migrations import apply_migrations, drop_schema, reset_schema
+from .recall import SubjectEntity
+from .space import MemorySpace
+from .store import GUEST_SCOPE, MemoryStore
 from .transcript import current_day
-from .turn_log import TurnLogger
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_TAG = embedding_tag("gemini-embedding-001", EMBEDDING_DIMENSIONS)
-TURN_CONTEXT_BUDGET_SECONDS = 0.3
 _HEALTH_CHECK_INTERVAL = timedelta(seconds=60)
+# How often guest memory is checked against Guest Settings, which catches an
+# erase or a setup that didn't happen on time (the database was down).
+_GUEST_CHECK_INTERVAL = timedelta(minutes=15)
 _PERSON_SYNC_INTERVAL_SECONDS = 30 * 60
-_PROFILE_CACHE_SECONDS = 300
 _CATCH_UP_DELAY_SECONDS = 300
 _STATE_STORAGE_KEY = f"{DOMAIN}_memory_state"
 _STATE_STORAGE_VERSION = 1
+_OWNER_SPOOL_KEY = f"{DOMAIN}_memory_turn_spool"
+_GUEST_SPOOL_KEY = f"{DOMAIN}_guest_memory_turn_spool"
 # Setup problems that retrying won't fix; the user has to change something.
 _FATAL_ERROR_CODES = frozenset(
     {"psycopg2_missing", "pg_version_unsupported", "pgvector_missing", "insufficient_privilege", "schema_too_new", "invalid_auth"}
 )
-# How close in meaning a digest or exchange must be to something forgotten
-# before it is retracted along with it.
-_FORGET_DIGEST_MIN_SIM = 0.6
-_FORGET_EXCHANGE_MIN_SIM = 0.7
 
 
 class MemoryState(StrEnum):
@@ -88,24 +73,6 @@ class MemoryState(StrEnum):
     ENABLED = "enabled"
     UNAVAILABLE = "unavailable"
     ERROR = "error"
-
-
-@dataclass(slots=True)
-class Subject:
-    """A resolved subject a memory is about."""
-
-    id: int
-    kind: str
-    name: str
-    person_entity_id: str | None = None
-
-
-@dataclass(slots=True)
-class ToolRecallResult:
-    rows: list[RecallRow]
-    text: str
-    # The rows that fit in text, i.e. the ones the model sees with their # number.
-    shown: list[RecallRow]
 
 
 class MemoryRuntime:
@@ -122,39 +89,35 @@ class MemoryRuntime:
         self.embedding_tag = DEFAULT_EMBEDDING_TAG
         self.last_known_mode: str | None = None
         self.memory_allowed: bool | None = None
-        self.stated_speakers = StatedSpeakerCache()
-        self.asked_once = AskedOnceCache()
-        self.shown_notes = ShownNotesCache()
         self.schema_version: int | None = None
         self.pgvector_version: str | None = None
+        self.owner = MemorySpace(self, mode="owner", schema=MEMORY_SCHEMA, spool_key=_OWNER_SPOOL_KEY)
+        self.guest = MemorySpace(self, mode="guest", schema=GUEST_MEMORY_SCHEMA, spool_key=_GUEST_SPOOL_KEY)
 
         self._engine = None
-        self._store: MemoryStore | None = None
-        self._entities: list[SubjectEntity] = []
-        self._person_ids: dict[str, int] = {}
-        self._household_id: int | None = None
-        self._persons_synced_at = 0.0
-        # Keyed by (speaker entity, household sharing).
-        self._profile_cache: dict[tuple[int | None, bool], tuple[float, list[RecallRow]]] = {}
-        self._turn_logger = TurnLogger(hass, self._async_write_rows)
+        self._iterative_scan = False
         self._unsubs: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
         self._state_store: Store[dict[str, Any]] = Store(hass, _STATE_STORAGE_VERSION, _STATE_STORAGE_KEY)
-        self._nightly = None
+        self._nightly_jobs: dict[str, Any] = {}
         self._nightly_lock = asyncio.Lock()
         self.last_nightly: dict[str, Any] | None = None
-        self._check_out_unsub: Callable[[], None] | None = None
-        self._guest_options = self._guest_fingerprint(entry.options)
+        self._erase_unsub: Callable[[], None] | None = None
+        self._guest_lock = asyncio.Lock()
+        # Whether guest memory was found switched off since connecting (nothing to remove).
+        self._guest_known_off = False
+        self.guest_status: dict[str, Any] = {"state": "off"}
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
     @property
     def enabled(self) -> bool:
-        return self.state == MemoryState.ENABLED and self._store is not None
+        return self.state == MemoryState.ENABLED and self.owner.store is not None
 
     @property
     def store(self) -> MemoryStore | None:
-        return self._store
+        """The owner's store."""
+        return self.owner.store
 
     @property
     def context_status(self) -> str:
@@ -170,11 +133,21 @@ class MemoryRuntime:
         self._listeners.append(listener)
         return lambda: self._listeners.remove(listener) if listener in self._listeners else None
 
+    def _notify(self) -> None:
+        for listener in list(self._listeners):
+            listener()
+
     def _set_state(self, state: MemoryState, error: str | None = None) -> None:
         self.state = state
         self.error = error
-        for listener in list(self._listeners):
-            listener()
+        self._notify()
+
+    def _spaces(self) -> tuple[MemorySpace, MemorySpace]:
+        return self.owner, self.guest
+
+    def space_for(self, mode: str | None) -> MemorySpace:
+        """The space a turn in this mode uses (owner unless the account is in guest mode)."""
+        return self.guest if mode == "guest" else self.owner
 
     async def async_start(self) -> None:
         """Load saved state, then connect in the background if memory is set up."""
@@ -189,26 +162,32 @@ class MemoryRuntime:
         self._set_state(MemoryState.STARTING)
         self.entry.async_create_background_task(self.hass, self._async_connect(), "hey_auri_client memory connect")
         self._unsubs.append(async_track_time_interval(self.hass, self._async_health_check, _HEALTH_CHECK_INTERVAL))
+        self._unsubs.append(async_track_time_interval(self.hass, self._async_guest_check, _GUEST_CHECK_INTERVAL))
         # Config entries aren't unloaded when Home Assistant stops: save
         # unwritten turns here so they're written on the next start.
         self._unsubs.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, self._async_on_stop))
         self._schedule_nightly()
-        self._schedule_check_out()
+        self._schedule_guest_erase()
 
     async def _async_on_stop(self, _event: Event) -> None:
-        await self._turn_logger.async_shutdown()
+        for space in self._spaces():
+            await space.turn_logger.async_shutdown()
         await self._async_save_state()
 
     async def async_shutdown(self) -> None:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
-        if self._check_out_unsub is not None:
-            self._check_out_unsub()
-            self._check_out_unsub = None
-        await self._turn_logger.async_shutdown()
+        if self._erase_unsub is not None:
+            self._erase_unsub()
+            self._erase_unsub = None
+        for space in self._spaces():
+            await space.turn_logger.async_shutdown()
         await self._async_save_state()
-        engine, self._engine, self._store = self._engine, None, None
+        engine, self._engine = self._engine, None
+        for space in self._spaces():
+            space.detach()
+        self._guest_known_off = False
         if engine is not None:
             await self.hass.async_add_executor_job(engine.dispose)
 
@@ -225,18 +204,19 @@ class MemoryRuntime:
             self._set_state(MemoryState.UNAVAILABLE, "cannot_connect")
             return
 
-        self._engine, self._store = engine, store
+        self._engine = engine
         self.schema_version, self.pgvector_version = schema_version, pgvector_version
-        await self._async_refresh_entities(sync_persons=True)
+        await self.hass.async_add_executor_job(self.owner.attach_blocking, store)
+        await self.owner.async_refresh_entities(sync_persons=True)
         self._set_state(MemoryState.ENABLED)
         _LOGGER.info("Memory store connected (schema v%s, pgvector %s)", schema_version, pgvector_version)
 
-        await self._turn_logger.async_load_spool()
-        self._turn_logger.async_schedule_flush()
+        await self.owner.turn_logger.async_load_spool()
+        self.owner.turn_logger.async_schedule_flush()
         self.entry.async_create_background_task(self.hass, self._async_after_connect(), "hey_auri_client memory upkeep")
 
     def _connect_blocking(self):
-        """Connect, migrate and return (engine, store, schema version, pgvector version)."""
+        """Connect, migrate and return (engine, owner store, schema version, pgvector version)."""
         from sqlalchemy.exc import DBAPIError, OperationalError  # pylint: disable=import-outside-toplevel
 
         from .db import classify_connection_error, classify_setup_error  # pylint: disable=import-outside-toplevel
@@ -265,55 +245,56 @@ class MemoryRuntime:
             raise
 
         pgvector_version = vector[1] if vector else None
-        store = MemoryStore(engine, iterative_scan=_version_at_least(pgvector_version, (0, 8)))
+        self._iterative_scan = _version_at_least(pgvector_version, (0, 8))
+        store = MemoryStore(engine, iterative_scan=self._iterative_scan)
         store.fail_stale_runs()
-        self._household_id = store.ensure_household()
         return engine, store, schema_version, pgvector_version
 
     async def _async_after_connect(self) -> None:
-        await self.async_purge_guest_memory()
+        await self.async_sync_guest_memory()
+        if self.guest.enabled:
+            await self.guest.turn_logger.async_load_spool()
+            self.guest.turn_logger.async_schedule_flush()
         await self.async_import_legacy()
         await self.async_backfill_embeddings()
 
     async def _async_health_check(self, _now: datetime | None = None) -> None:
-        if self.state == MemoryState.ENABLED and self._store is not None:
+        store = self.owner.store
+        if self.state == MemoryState.ENABLED and store is not None:
             try:
-                await self.hass.async_add_executor_job(self._store.ping)
+                await self.hass.async_add_executor_job(store.ping)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Memory store stopped responding: %s", err)
                 self._set_state(MemoryState.UNAVAILABLE, "cannot_connect")
                 return
-            if monotonic() - self._persons_synced_at > _PERSON_SYNC_INTERVAL_SECONDS:
-                await self._async_refresh_entities(sync_persons=True)
+            if monotonic() - self.owner.persons_synced_at > _PERSON_SYNC_INTERVAL_SECONDS:
+                await self.owner.async_refresh_entities(sync_persons=True)
         elif self.state == MemoryState.UNAVAILABLE:
-            if self._store is not None:
+            if store is not None:
                 try:
-                    await self.hass.async_add_executor_job(self._store.ping)
+                    await self.hass.async_add_executor_job(store.ping)
                 except Exception:  # noqa: BLE001
                     return
                 self._set_state(MemoryState.ENABLED)
-                self._turn_logger.async_schedule_flush()
+                for space in self._spaces():
+                    space.turn_logger.async_schedule_flush()
             else:
                 await self._async_connect()
 
     async def async_options_updated(self, options: dict[str, Any]) -> None:
-        """Restart when memory settings changed; re-check guest memory when the booking did."""
+        """Restart when database settings changed; otherwise apply the rest and re-check guest memory."""
         new_config = MemoryConfig.from_options(options)
         if new_config.fingerprint() != self.config.fingerprint():
             await self.async_shutdown()
             self.config = new_config
-            self._turn_logger = TurnLogger(self.hass, self._async_write_rows)
-            self._profile_cache.clear()
-            self._guest_options = self._guest_fingerprint(options)
+            for space in self._spaces():
+                space.new_turn_logger()
             await self.async_start()
             return
         # Settings read on every turn (household sharing) apply without a restart.
         self.config = new_config
-        guest_options = self._guest_fingerprint(options)
-        if guest_options != self._guest_options:
-            self._guest_options = guest_options
-            self._schedule_check_out()
-            await self.async_purge_guest_memory()
+        self._schedule_guest_erase()
+        await self.async_sync_guest_memory()
 
     # ── mode ────────────────────────────────────────────────────────────────
 
@@ -325,10 +306,9 @@ class MemoryRuntime:
         if self.last_known_mode is not None and mode != self.last_known_mode:
             # A mode switch must not carry speakers or cached notes across.
             # (Learning the mode for the first time isn't a switch.)
-            self.stated_speakers.clear()
-            self.asked_once.clear()
-            self.shown_notes.clear()
-            self._profile_cache.clear()
+            for space in self._spaces():
+                space.clear_conversations()
+                space.invalidate()
         changed = mode != self.last_known_mode or memory_allowed != self.memory_allowed
         self.last_known_mode = mode
         self.memory_allowed = memory_allowed
@@ -352,331 +332,23 @@ class MemoryRuntime:
     async def _async_save_state(self) -> None:
         await self._state_store.async_save(self._state_snapshot())
 
-    # ── entities and people ─────────────────────────────────────────────────
-
-    async def _async_refresh_entities(self, *, sync_persons: bool = False) -> None:
-        store = self._store
-        if store is None:
-            return
-        persons = self.household_people()
-        try:
-            if sync_persons:
-                self._person_ids = await self.hass.async_add_executor_job(store.sync_persons, persons)
-                self._persons_synced_at = monotonic()
-            self._entities = await self.hass.async_add_executor_job(store.list_entities)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Couldn't refresh memory entities: %s", err)
-
-    @property
-    def entities(self) -> list[SubjectEntity]:
-        """Known subjects (people, pets, places, topics...), refreshed after writes."""
-        return self._entities
-
-    def household_people(self) -> list[dict[str, Any]]:
-        """Home Assistant persons in the household: not those of logins marked "not a person"."""
-        return household_persons(self.hass, self.entry.options.get(CONF_MEMORY_LOGIN_PEOPLE))
-
-    def _member_ids(self) -> list[int]:
-        """Entity ids of the household's people and pets."""
-        people = {person["entity_id"] for person in self.household_people()}
-        return [
-            *(entity_pk for entity_id, entity_pk in self._person_ids.items() if entity_id in people),
-            *(entity.id for entity in self._entities if entity.kind == "pet"),
-        ]
-
-    def household_names(self) -> list[str]:
-        names = [person["name"] for person in self.household_people()]
-        names.extend(f"{entity.name} (pet)" for entity in self._entities if entity.kind == "pet")
-        return names
-
-    def household_roster(self) -> list[dict[str, str]]:
-        roster = [{"name": person["name"], "kind": "person"} for person in self.household_people()]
-        roster.extend({"name": entity.name, "kind": "pet"} for entity in self._entities if entity.kind == "pet")
-        return roster[:25]
-
-    def _person_subject(self, name: str | None, person_entity_id: str | None) -> Subject | None:
-        if person_entity_id and person_entity_id in self._person_ids:
-            return Subject(self._person_ids[person_entity_id], "person", name or person_entity_id, person_entity_id)
-        if name:
-            lowered = name.lower()
-            for entity in self._entities:
-                if entity.kind == "person" and (entity.name.lower() == lowered or lowered in (a.lower() for a in entity.aliases)):
-                    return Subject(entity.id, "person", entity.name, person_entity_id)
-        return None
-
-    async def async_resolve_subjects(self, names: list[str], *, default_kind: str = "topic") -> list[Subject]:
-        """Resolve names to subjects: household persons first, then known entities, else a new entity.
-
-        With default_kind "person", a name only known as a topic becomes a person.
-        """
-        store = self._store
-        if store is None:
-            return []
-        persons = self.household_people()
-        subjects: list[Subject] = []
-        unresolved: list[tuple[str, str]] = []
-        for name in names:
-            lowered = name.lower()
-            if lowered in {"household", "the household", "everyone", "family", "the family", "home", "the home"}:
-                if self._household_id is not None:
-                    subjects.append(Subject(self._household_id, "household", "household"))
-                continue
-            person = next((p for p in persons if p["name"].lower() == lowered or p["name"].split()[0].lower() == lowered), None)
-            if person is not None and person["entity_id"] not in self._person_ids:
-                # A person added to Home Assistant since the last sync.
-                await self._async_refresh_entities(sync_persons=True)
-            subject = self._person_subject(person["name"], person["entity_id"]) if person else self._person_subject(name, None)
-            if subject is None:
-                entity = next(
-                    (e for e in self._entities if e.name.lower() == lowered or lowered in (a.lower() for a in e.aliases)),
-                    None,
-                )
-                if entity is not None and not (entity.kind == "topic" and default_kind == "person"):
-                    subject = Subject(entity.id, entity.kind, entity.name)
-            if subject is None:
-                unresolved.append((person["name"] if person else name, "person" if person else default_kind))
-            elif subject.id not in {s.id for s in subjects}:
-                subjects.append(subject)
-
-        if unresolved:
-            ids = await self.hass.async_add_executor_job(store.resolve_entities, unresolved)
-            await self._async_refresh_entities()
-            for (name, kind), entity_pk in zip(unresolved, ids):
-                entity = next((e for e in self._entities if e.id == entity_pk), None)
-                subjects.append(Subject(entity_pk, entity.kind if entity else kind, entity.name if entity else name))
-        return subjects
-
-    async def async_speaker_subject(self, speaker: Speaker | None, conversation_id: str | None) -> Subject | None:
-        """The subject for "about me": the signed-in person, or who they said they were."""
-        if speaker is not None and speaker.known:
-            subject = self._person_subject(speaker.name, speaker.person_entity_id)
-            if subject is not None:
-                return subject
-            if speaker.name:
-                resolved = await self.async_resolve_subjects([speaker.name], default_kind="person")
-                return resolved[0] if resolved else None
-        stated = self.stated_speakers.get(conversation_id)
-        if stated:
-            subject = self._person_subject(stated[0], stated[1])
-            if subject is None:
-                resolved = await self.async_resolve_subjects([stated[0]], default_kind="person")
-                subject = resolved[0] if resolved else None
-            return subject
-        return None
-
-    # ── per-turn memory block ───────────────────────────────────────────────
+    # ── turns ───────────────────────────────────────────────────────────────
 
     async def async_turn_context(self, text: str, speaker: Speaker, conversation_id: str | None) -> dict[str, Any]:
-        """The context.memory block for a turn. Never raises; at most ~300 ms of recall."""
-        block: dict[str, Any] = {"v": 1, "status": self.context_status, "scope": "owner"}
-        # Notes are only attached when this account was last seen in owner
-        # mode with memory allowed; the backend re-checks either way.
-        if not self.enabled or self.last_known_mode == "guest" or self.memory_allowed is False:
-            return block
+        """The context.memory block for a turn, from the space of the account's last known mode.
 
-        stated = self.stated_speakers.get(conversation_id)
-        block["speaker"] = {"name": speaker.name, "source": speaker.source} if speaker.known else {"name": None, "source": "unknown"}
-        block["stated_speaker"] = stated[0] if stated and not speaker.known else None
-        block["household"] = self.household_roster()
-
-        who = speaker if speaker.known else (Speaker(source="stated", name=stated[0], person_entity_id=stated[1]) if stated else None)
-        speaker_subject = self._person_subject(who.name, who.person_entity_id) if who else None
-        try:
-            async with asyncio.timeout(TURN_CONTEXT_BUDGET_SECONDS):
-                profile_rows, note_rows = await self.hass.async_add_executor_job(
-                    self._turn_recall_blocking, text, speaker_subject.id if speaker_subject else None, self._member_ids()
-                )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Memory recall skipped this turn: %s", err)
-            profile_rows, note_rows = [], []
-
-        tz = dt_util.get_default_time_zone()
-        private_label = not self.config.share_household
-        block["profile"], shown_profile = format_notes_with_rows(
-            profile_rows, total_chars=PROFILE_TOTAL_CHARS, tz=tz, private_label=private_label
-        )
-        block["notes"], shown_notes = format_notes_with_rows(
-            note_rows, total_chars=AUTO_NOTES_TOTAL_CHARS, tz=tz, private_label=private_label
-        )
-        self.shown_notes.add(conversation_id, [*shown_profile, *shown_notes])
-        self._touch_later([row for row in note_rows if not row.from_archive])
-        return block
-
-    def _touch_later(self, rows: list[RecallRow]) -> None:
-        """Count recalls in the background; losing a count is harmless."""
-        store = self._store
-        if not rows or store is None:
-            return
-
-        async def _touch() -> None:
-            try:
-                await self.hass.async_add_executor_job(store.touch, [row.id for row in rows])
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Couldn't record memory access: %s", err)
-
-        self.entry.async_create_background_task(self.hass, _touch(), "hey_auri_client memory touch")
-
-    def _turn_recall_blocking(
-        self, text: str, speaker_entity_id: int | None, member_ids: list[int]
-    ) -> tuple[list[RecallRow], list[RecallRow]]:
-        store = self._store
-        if store is None:
-            return [], []
-
-        shared = self.config.share_household
-        cached = self._profile_cache.get((speaker_entity_id, shared))
-        if cached and cached[0] > monotonic():
-            profile_rows = cached[1]
-        else:
-            profile_rows = store.profile(
-                speaker_entity_id=speaker_entity_id,
-                household_entity_id=self._household_id,
-                member_ids=member_ids,
-                shared=shared,
-            )
-            self._profile_cache[(speaker_entity_id, shared)] = (monotonic() + _PROFILE_CACHE_SECONDS, profile_rows)
-
-        if not should_auto_recall(text):
-            return profile_rows, []
-
-        today = dt_util.now().date()
-        terms = extract_terms(text)
-        subject_ids = match_subjects(text, self._entities)
-        if speaker_entity_id is not None and mentions_self(text) and speaker_entity_id not in subject_ids:
-            subject_ids.append(speaker_entity_id)
-        hints = parse_date_hints(text, today)
-        note_rows = store.auto_recall(
-            terms=websearch_query(terms),
-            subject_ids=subject_ids,
-            hint_days=hints,
-            adjacent_days=adjacent_days(hints),
-            speaker_entity_id=speaker_entity_id,
-            shared=shared,
-        )
-        if today in hints:
-            # Turns since the current memory day began aren't processed until
-            # tonight; include the latest (after midnight that day began yesterday).
-            boundary = self.config.day_boundary_hour
-            note_rows += store.todays_exchanges(since=_local_day_start(current_day(dt_util.now(), boundary), boundary))
-        profile_ids = {row.id for row in profile_rows}
-        return profile_rows, [row for row in note_rows if row.id not in profile_ids]
-
-    # ── tools ───────────────────────────────────────────────────────────────
-
-    async def async_tool_recall(
-        self,
-        *,
-        query: str,
-        about: list[str],
-        kinds: list[str],
-        date_from: date | None,
-        date_to: date | None,
-        vector: list[float] | None,
-        embedding_tag: str | None,
-        conversation_id: str | None,
-        limit: int = 8,
-    ) -> ToolRecallResult:
-        store = self._store
-        if store is None:
-            return ToolRecallResult([], "", [])
-        subject_ids = [subject.id for subject in await self.async_resolve_subjects(about)] if about else []
-        subject_ids += [entity_id for entity_id in match_subjects(query, self._entities) if entity_id not in subject_ids]
-        today = dt_util.now().date()
-        hints = parse_date_hints(query, today)
-        boundary = self.config.day_boundary_hour
-        range_start = _local_day_start(date_from, boundary) if date_from else None
-        range_end = _local_day_start((date_to or date_from) + timedelta(days=1), boundary) if date_from else None
-        # Due dates are calendar days (stored as local midnight), not memory days.
-        due_start = _local_day_start(date_from, 0) if date_from else None
-        due_end = _local_day_start((date_to or date_from) + timedelta(days=1), 0) if date_from else None
-        rows = await self.hass.async_add_executor_job(
-            lambda: store.semantic_recall(
-                query_vector=vector,
-                embedding_model=embedding_tag,
-                terms=websearch_query(extract_terms(query)),
-                subject_ids=subject_ids,
-                hint_days=hints,
-                adjacent_days=adjacent_days(hints),
-                range_start=range_start,
-                range_end=range_end,
-                due_start=due_start,
-                due_end=due_end,
-                kinds=[kind for kind in kinds if kind in ALL_KINDS] or list(ALL_KINDS),
-                limit=limit,
-            )
-        )
-        self._touch_later(rows)
-        text, shown = format_notes_with_rows(
-            rows,
-            total_chars=TOOL_NOTES_TOTAL_CHARS,
-            tz=dt_util.get_default_time_zone(),
-            private_label=not self.config.share_household,
-        )
-        self.shown_notes.add(conversation_id, shown)
-        return ToolRecallResult(rows, text, shown)
-
-    async def async_remember(
-        self, memory: NewMemory, *, replaces: list[int] | None = None
-    ) -> tuple[int, bool, dict[int, str]]:
-        """Save a memory, retiring the memories it corrects (kept as history).
-
-        Returns (id, duplicate, {replaced id: its statement}). Callers pass
-        only # numbers Auri was shown; anything that isn't a current fact,
-        preference, decision or plan is left alone.
+        The backend decides the mode again; a block for the wrong space is dropped there.
         """
-        store = self._store
-        if store is None:
-            raise MemoryDbError("cannot_connect", "Memory store is not connected")
-        memory_id, duplicate, replaced = await self.hass.async_add_executor_job(
-            self._remember_blocking, memory, list(replaces or [])
-        )
-        self._profile_cache.clear()
-        if memory.embedding is None:
-            self.entry.async_create_background_task(self.hass, self.async_backfill_embeddings(), "hey_auri_client memory backfill")
-        return memory_id, duplicate, replaced
-
-    def _remember_blocking(self, memory: NewMemory, replaces: list[int]) -> tuple[int, bool, dict[int, str]]:
-        store = self._store
-        with store.engine.begin() as conn:
-            memory_id, duplicate = store.insert_memory(memory, conn)
-            replaced_ids = store.supersede(conn, replaces, memory_id) if replaces else []
-        contents = store.get_contents(replaced_ids)
-        return memory_id, duplicate, {i: contents[i] for i in replaced_ids if i in contents}
-
-    async def async_forget(
-        self,
-        ids: list[int],
-        *,
-        query_vector: list[float] | None,
-        embedding_tag: str | None,
-    ) -> list[str]:
-        """Retract memories (never deleted); also retract matching exchanges and queue digest rewrites."""
-        store = self._store
-        if store is None:
-            return []
-        retracted = await self.hass.async_add_executor_job(lambda: store.retract(ids, reason="forget"))
-        self._profile_cache.clear()
-        if retracted and query_vector is not None and embedding_tag:
-            ids_text = ",".join(str(memory_id) for memory_id, _, _ in retracted)
-            await self.hass.async_add_executor_job(
-                lambda: store.retract_similar(
-                    query_vector, embedding_tag, kinds=["exchange"], min_sim=_FORGET_EXCHANGE_MIN_SIM, reason="forget"
-                )
-            )
-            await self.hass.async_add_executor_job(
-                lambda: store.retract_similar(
-                    query_vector, embedding_tag, kinds=["digest"], min_sim=_FORGET_DIGEST_MIN_SIM,
-                    reason=f"scrub_pending:{ids_text}",
-                )
-            )
-        return [content for _, kind, content in retracted if kind != "digest"]
-
-    # ── turn logging ────────────────────────────────────────────────────────
+        space = self.space_for(self.last_known_mode)
+        if self.memory_allowed is False:
+            return {"v": 1, "status": space.context_status, "scope": space.mode}
+        return await space.async_turn_context(text, speaker, conversation_id)
 
     @callback
     def log_turn(
         self,
         *,
+        mode: str | None,
         conversation_id: str,
         speaker: Speaker,
         user_text: str,
@@ -685,62 +357,45 @@ class MemoryRuntime:
         tool_names: list[str],
         language: str | None,
     ) -> None:
-        """Queue one exchange (user message + reply) for the archive. Owner mode only (caller checks)."""
+        """Queue one exchange for the archive of the space of the turn's mode (the caller checks the mode)."""
         if not self.config.configured or self.state == MemoryState.ERROR:
             return
-        stated = self.stated_speakers.get(conversation_id)
-        if speaker.known:
-            source, name, person = speaker.source, speaker.name, speaker.person_entity_id
-        elif stated:
-            source, name, person = "stated", stated[0], stated[1]
-        else:
-            source, name, person = ("automation" if kind == "automatic" else "unknown"), None, None
-        now = dt_util.utcnow()
-        exchange_id = new_exchange_id()
-        common = {
-            "conversation_id": conversation_id,
-            "exchange_id": exchange_id,
-            "kind": kind,
-            "device_id": speaker.device_id,
-            "area": speaker.area,
-            "language": language,
-            "tool_names": tool_names,
-        }
-        rows = [
-            {
-                **common,
-                "role": "user",
-                "content": redact(user_text or "")[0][:4000],
-                "speaker_source": source,
-                "ha_user_id": speaker.ha_user_id,
-                "person_entity_id": person,
-                "speaker_name": name,
-                "created_at": now,
-            }
-        ]
-        if reply:
-            rows.append(
-                {
-                    **common,
-                    "role": "assistant",
-                    "content": redact(reply)[0][:4000],
-                    "speaker_source": "assistant",
-                    "created_at": now + timedelta(microseconds=1),
-                }
-            )
-        self._turn_logger.log_nowait(rows)
+        space = self.space_for(mode)
+        if space.is_guest and (not guest_memory_enabled(self.entry.options) or space.closed):
+            return
+        space.log_turn(
+            conversation_id=conversation_id,
+            speaker=speaker,
+            user_text=user_text,
+            reply=reply,
+            kind=kind,
+            tool_names=tool_names,
+            language=language,
+        )
 
-    async def _async_write_rows(self, rows: list[dict[str, Any]]) -> None:
-        store = self._store
-        if store is None or self.state != MemoryState.ENABLED:
-            raise MemoryDbError("cannot_connect", "Memory store is not connected")
-        await self.hass.async_add_executor_job(store.insert_messages, rows)
+    # ── the owner's memory, for callers that predate spaces ─────────────────
+
+    @property
+    def entities(self) -> list[SubjectEntity]:
+        return self.owner.entities
+
+    def household_people(self) -> list[dict[str, Any]]:
+        return self.owner.people()
+
+    def household_names(self) -> list[str]:
+        return self.owner.household_names()
+
+    def household_roster(self) -> list[dict[str, str]]:
+        return self.owner.household_roster()
+
+    async def async_backfill_embeddings(self, *, max_batches: int = 3) -> int:
+        return await self.owner.async_backfill_embeddings(max_batches=max_batches)
 
     # ── upkeep ──────────────────────────────────────────────────────────────
 
     async def async_import_legacy(self) -> None:
-        """Import preferences from the old file-based tool, once per file."""
-        store = self._store
+        """Import preferences from the old file-based tool into the owner's memory, once per file."""
+        store = self.owner.store
         if store is None:
             return
         config_dir = self.hass.config.config_dir
@@ -760,11 +415,11 @@ class MemoryRuntime:
 
         count = 0
         for plan in plans:
-            count += await self.hass.async_add_executor_job(self._import_plan_blocking, plan)
+            count += await self.hass.async_add_executor_job(self._import_plan_blocking, store, plan)
             imported.add(plan.file.sha256)
         await self.hass.async_add_executor_job(store.set_meta, "legacy_import", sorted(imported))
-        await self._async_refresh_entities()
-        self._profile_cache.clear()
+        await self.owner.async_refresh_entities()
+        self.owner.invalidate()
 
         lines = [f"Imported {count} saved preferences into Auri's memory."]
         if skipped:
@@ -778,42 +433,18 @@ class MemoryRuntime:
         if count:
             await self.async_backfill_embeddings()
 
-    def _import_plan_blocking(self, plan: LegacyImportPlan) -> int:
-        store = self._store
+    def _import_plan_blocking(self, store: MemoryStore, plan: LegacyImportPlan) -> int:
         count = 0
+        person_ids = self.owner.person_ids
         with store.engine.begin() as conn:
             subject_ids = store.resolve_entities([(plan.person_name, "person")], conn)
-            if plan.person_entity_id and plan.person_entity_id in self._person_ids:
-                subject_ids = [self._person_ids[plan.person_entity_id]]
+            if plan.person_entity_id and plan.person_entity_id in person_ids:
+                subject_ids = [person_ids[plan.person_entity_id]]
             for memory in plan.memories:
                 memory.about_entity_ids = subject_ids
                 _, duplicate = store.insert_memory(memory, conn)
                 count += 0 if duplicate else 1
         return count
-
-    async def async_backfill_embeddings(self, *, max_batches: int = 3) -> int:
-        """Embed memories that have no vector (or an old model's) through /memory/embed."""
-        store = self._store
-        if store is None:
-            return 0
-        done = 0
-        for _ in range(max_batches):
-            rows = await self.hass.async_add_executor_job(lambda: store.missing_embeddings(self.embedding_tag, limit=100))
-            if not rows:
-                break
-            try:
-                vectors, tag = await self.api.embed([content for _, content in rows], task_type="RETRIEVAL_DOCUMENT")
-            except MemoryApiError as err:
-                _LOGGER.debug("Embedding backfill paused: %s", err)
-                break
-            self.note_embedding_tag(tag)
-            await self.hass.async_add_executor_job(
-                store.set_embeddings, [(memory_id, vector) for (memory_id, _), vector in zip(rows, vectors)], tag
-            )
-            done += len(rows)
-            if len(rows) < 100:
-                break
-        return done
 
     # ── nightly ─────────────────────────────────────────────────────────────
 
@@ -841,74 +472,153 @@ class MemoryRuntime:
         self.entry.async_create_background_task(self.hass, self.async_run_nightly(), "hey_auri_client memory nightly")
 
     async def async_run_nightly(self, *, day: date | None = None, force: bool = False, days_back: int = 7) -> dict[str, Any]:
-        """Process one day (or catch up on missed days). Returns a summary."""
+        """Process one day (or catch up on missed days), for the owner and then any guests. Returns a summary."""
         if not self.enabled or self.memory_allowed is False:
             return {"status": "skipped", "reason": self.context_status if not self.enabled else "memory_not_allowed"}
         if day is not None and day >= current_day(dt_util.now(), self.config.day_boundary_hour):
             # A day still in progress would be marked done and its later turns never processed.
             return {"status": "skipped", "reason": "day_not_finished"}
+
+        async with self._nightly_lock:
+            result = await self._async_run_space_nightly(self.owner, day=day, force=force, days_back=days_back)
+            guest_result = None
+            # A guest erase waits for the guests' run, so the run can't write an old stay into an erased schema.
+            async with self._guest_lock:
+                if self.guest.enabled:
+                    guest_result = await self._async_run_space_nightly(self.guest, day=day, force=force, days_back=days_back)
+            if guest_result is not None:
+                result = {**result, "guest": guest_result}
+        self.last_nightly = {"finished_at": dt_util.utcnow().isoformat(), **_run_summary(result)}
+        if guest_result is not None:
+            self.last_nightly["guest"] = _run_summary(guest_result)
+        for space in self._spaces():
+            space.invalidate()
+            await space.async_refresh_entities()
+        self._notify()
+        return result
+
+    async def _async_run_space_nightly(
+        self, space: MemorySpace, *, day: date | None, force: bool, days_back: int
+    ) -> dict[str, Any]:
         from .nightly import NightlyJob  # pylint: disable=import-outside-toplevel
 
-        if self._nightly is None:
-            self._nightly = NightlyJob(self)
-        async with self._nightly_lock:
-            if day is not None:
-                result = await self._nightly.async_run_day(day, force=force)
-            else:
-                result = await self._nightly.async_catch_up(days_back=days_back)
-        self.last_nightly = {"finished_at": dt_util.utcnow().isoformat(), **_run_summary(result)}
-        self._profile_cache.clear()
-        await self._async_refresh_entities()
-        for listener in list(self._listeners):
-            listener()
-        return result
+        job = self._nightly_jobs.get(space.mode)
+        if job is None or job._space is not space:  # noqa: SLF001
+            job = self._nightly_jobs[space.mode] = NightlyJob(space)
+        if day is not None:
+            return await job.async_run_day(day, force=force)
+        return await job.async_catch_up(days_back=days_back)
 
     async def async_run_exam(self) -> dict[str, Any]:
         from .exam import async_run_exam  # pylint: disable=import-outside-toplevel
 
         return await async_run_exam(self)
 
-    # ── guest memory (switched off; see scope.py) ───────────────────────────
+    # ── guest memory ────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _guest_fingerprint(options: Any) -> tuple[str, str]:
-        return str(options.get(CONF_BOOKING_ID) or ""), str(options.get(CONF_CHECK_OUT) or "")
-
-    def _schedule_check_out(self) -> None:
-        """Purge the booking's memory when its check-out time comes."""
-        if self._check_out_unsub is not None:
-            self._check_out_unsub()
-            self._check_out_unsub = None
-        check_out = parse_check_out(self.entry.options.get(CONF_CHECK_OUT))
-        if check_out is None or check_out <= dt_util.now():
+    def _schedule_guest_erase(self) -> None:
+        """Erase guest memory when the stay ends, an hour after check-out."""
+        if self._erase_unsub is not None:
+            self._erase_unsub()
+            self._erase_unsub = None
+        erase_at = guest_erase_time(self.entry.options)
+        if erase_at is None or erase_at <= dt_util.now():
             return
 
-        async def _at_check_out(_now: datetime) -> None:
-            self._check_out_unsub = None
-            await self.async_purge_guest_memory()
+        async def _at_erase_time(_now: datetime) -> None:
+            self._erase_unsub = None
+            await self.async_sync_guest_memory()
 
-        self._check_out_unsub = async_track_point_in_time(self.hass, _at_check_out, check_out)
+        self._erase_unsub = async_track_point_in_time(self.hass, _at_erase_time, erase_at)
 
-    async def async_purge_guest_memory(self) -> list[str]:
-        """Hard-delete memory of guest bookings that ended or were replaced. Owner memory is never touched."""
-        store = self._store
-        if store is None:
-            return []
-        try:
-            scopes = await self.hass.async_add_executor_job(store.list_scopes)
-            stale = scopes_to_purge(
-                scopes,
-                booking_id=self.entry.options.get(CONF_BOOKING_ID),
-                check_out=parse_check_out(self.entry.options.get(CONF_CHECK_OUT)),
-                now=dt_util.now(),
+    async def _async_guest_check(self, _now: datetime | None = None) -> None:
+        """Every 15 minutes: an erase or setup that couldn't happen on time (database down) happens now."""
+        await self.async_sync_guest_memory()
+
+    async def async_sync_guest_memory(self) -> str | None:
+        """Bring guest memory in line with Guest Settings. Returns "reset", "erased", "removed" or None.
+
+        - switched off: the guest schema is removed;
+        - a new stay (booking ID, or check-in without one) or the host's reset:
+          erased and started again from the guest details;
+        - an hour after check-out: erased, and closed until the next stay
+          (MemorySpace.closed: nothing is recalled, kept or learned).
+        The owner's memory is never touched.
+        """
+        async with self._guest_lock:
+            engine = self._engine
+            if engine is None or not self.enabled:
+                return None
+            options = self.entry.options
+            try:
+                if not guest_memory_enabled(options):
+                    if self.guest.store is None and self._guest_known_off:
+                        return None
+                    await self.guest.turn_logger.async_clear()
+                    self.guest.detach()
+                    await self.hass.async_add_executor_job(lambda: drop_schema(engine, schema=GUEST_MEMORY_SCHEMA))
+                    self._guest_known_off = True
+                    self.guest_status = {"state": "off"}
+                    self._notify()
+                    return "removed"
+
+                self._guest_known_off = False
+                if self.guest.store is None:
+                    store = await self.hass.async_add_executor_job(self._attach_guest_blocking, engine)
+                else:
+                    store = self.guest.store
+                stay = await self.hass.async_add_executor_job(store.get_meta, STAY_META_KEY) or {}
+                marker = stay_marker(options)
+                same_stay = stay.get("stay") == marker["stay"] and stay.get("reset_at") == marker["reset_at"]
+                if stay_over(options):
+                    if same_stay and stay.get("erased_at"):
+                        self.guest_status = {"state": "closed", **stay}
+                        return None
+                    await self._async_reset_guest(engine, seed=False, marker={**marker, "erased_at": dt_util.utcnow().isoformat()})
+                    return "erased"
+                if same_stay and not stay.get("erased_at"):
+                    self.guest_status = {"state": "on", **stay}
+                    return None
+                await self._async_reset_guest(engine, seed=True, marker=marker)
+                return "reset"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Couldn't update guest memory: %s", err)
+                return None
+
+    def _attach_guest_blocking(self, engine) -> MemoryStore:
+        apply_migrations(engine, app_version=self.app_version, schema=GUEST_MEMORY_SCHEMA)
+        store = MemoryStore(engine, schema=GUEST_MEMORY_SCHEMA, scope=GUEST_SCOPE, iterative_scan=self._iterative_scan)
+        self.guest.attach_blocking(store)
+        return store
+
+    async def _async_reset_guest(self, engine, *, seed: bool, marker: dict[str, Any]) -> None:
+        """Erase guest memory completely (one transaction), then add the stay's seed memories."""
+        # Nothing queued for the old stay may be written into the new one.
+        await self.guest.turn_logger.async_clear()
+        self.guest.detach()
+        seeds = seed_memories(self.entry.options) if seed else []
+        marker = {**marker, "reset_done_at": dt_util.utcnow().isoformat(), "seeded": len(seeds)}
+
+        def _seed(conn) -> None:
+            store = MemoryStore(engine, schema=GUEST_MEMORY_SCHEMA, scope=GUEST_SCOPE)
+            for memory, subjects in seeds:
+                memory.about_entity_ids = store.resolve_entities(subjects, conn)
+                store.insert_memory(memory, conn)
+            store.set_meta(STAY_META_KEY, marker, conn)
+
+        await self.hass.async_add_executor_job(
+            lambda: reset_schema(engine, schema=GUEST_MEMORY_SCHEMA, app_version=self.app_version, seed=_seed)
+        )
+        store = MemoryStore(engine, schema=GUEST_MEMORY_SCHEMA, scope=GUEST_SCOPE, iterative_scan=self._iterative_scan)
+        await self.hass.async_add_executor_job(self.guest.attach_blocking, store)
+        await self.guest.async_refresh_entities()
+        self.guest_status = {"state": "on" if seed else "closed", **marker}
+        _LOGGER.info("Guest memory %s (%d memories from Guest Settings)", "erased" if not seed else "reset", len(seeds))
+        if seeds:
+            self.entry.async_create_background_task(
+                self.hass, self.guest.async_backfill_embeddings(), "hey_auri_client guest memory backfill"
             )
-            for scope in stale:
-                counts = await self.hass.async_add_executor_job(MemoryStore(store.engine, scope=scope).purge_scope)
-                _LOGGER.info("Deleted guest memory for %s: %s", scope, counts)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Couldn't check for guest memory to delete: %s", err)
-            return []
-        return stale
+        self._notify()
 
     # ── status ──────────────────────────────────────────────────────────────
 
@@ -919,8 +629,11 @@ class MemoryRuntime:
             "pgvector_version": self.pgvector_version,
             "embedding_model": self.embedding_tag,
             "last_known_mode": self.last_known_mode,
-            "pending_log_rows": self._turn_logger.pending,
+            "pending_log_rows": self.owner.turn_logger.pending + self.guest.turn_logger.pending,
             "last_nightly_run": self.last_nightly,
+            "guest_memory": self.guest_status.get("state"),
+            "guest_memory_reset": self.guest_status.get("reset_done_at"),
+            "guest_memory_erased": self.guest_status.get("erased_at"),
         }
 
 
@@ -942,9 +655,3 @@ def _version_at_least(version: str | None, minimum: tuple[int, ...]) -> bool:
         digits = "".join(ch for ch in piece if ch.isdigit())
         parts.append(int(digits) if digits else 0)
     return tuple(parts) >= minimum
-
-
-def _local_day_start(day: date, boundary_hour: int) -> datetime:
-    """When a local "day" starts, given the configured day boundary (e.g. 04:00)."""
-    tz = dt_util.get_default_time_zone()
-    return datetime.combine(day, time(hour=boundary_hour), tzinfo=tz)

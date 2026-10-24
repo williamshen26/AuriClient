@@ -24,11 +24,12 @@
       "psycopg2_missing": "The PostgreSQL driver (psycopg2) isn't installed in this Home Assistant. Home Assistant OS and Container include it; on a Core install run pip install psycopg2-binary in its virtual environment.",
       "pg_version_unsupported": "PostgreSQL 13 or newer is required.",
       "pgvector_missing": "This PostgreSQL server doesn't have the pgvector extension. On Home Assistant OS use the TimescaleDB app (add-on), which includes it; with Docker use the pgvector/pgvector:pg17 image.",
-      "insufficient_privilege": "This database user can't enable pgvector or create the auri_memory schema. Have an administrator run CREATE EXTENSION vector; in this database and grant the user CREATE on it.",
+      "insufficient_privilege": "This database user can't enable pgvector or create the auri_memory and auri_guest_memory schemas. Have an administrator run CREATE EXTENSION vector; in this database and grant the user CREATE on it.",
       "vault_public": "That folder is inside www, which Home Assistant serves without a login. Choose a folder outside it, such as /share/MyVault.",
       "vault_not_found": "That folder doesn't exist.",
       "vault_not_allowed": "Home Assistant isn't allowed to write there. Add the folder to allowlist_external_dirs in configuration.yaml.",
       "vault_not_writable": "Home Assistant can't write to that folder.",
+      "guest_memory_needs_memory": "Set up Memory first: guest memory uses the same database.",
       "unknown": "Unexpected error"
     },
     "step": {
@@ -70,12 +71,16 @@
           "trash_disposal_instruction": "Trash disposal instructions",
           "host_contact_instruction": "Host contact instructions",
           "property_knowledge": "Property knowledge",
-          "local_recommendations": "Local recommendations"
+          "local_recommendations": "Local recommendations",
+          "guest_memory_enabled": "Let guests use memory",
+          "reset_guest_memory": "Reset guest memory"
         },
         "data_description": {
           "guest_phone_number": "Only US/Canada numbers are supported. Use +1 format (for example, +16045551234) or a 10-digit local number (for example, 6045551234).",
           "property_knowledge": "Where non-IoT items are and how to use them. Example: Extra towels are in the hallway linen closet on the second shelf. Used towels should be placed in the laundry basket in the bathroom before checkout.",
-          "local_recommendations": "What is around the house. Example: For coffee, the host recommends Corner Bean Cafe on West 4th Avenue. It is a cozy local coffee shop that is good for morning coffee, pastries, and a quick breakfast before heading out. It is usually quieter before 9 AM."
+          "local_recommendations": "What is around the house. Example: For coffee, the host recommends Corner Bean Cafe on West 4th Avenue. It is a cozy local coffee shop that is good for morning coffee, pastries, and a quick breakfast before heading out. It is usually quieter before 9 AM.",
+          "guest_memory_enabled": "In guest mode, Auri remembers what guests tell it and learns from their conversations each night, for this stay only. It's kept apart from your own memory, in your PostgreSQL database (Memory must be set up). Erased an hour after check-out (then closed until the next booking), and started again for each new booking ID (or new check-in when there's no booking ID).",
+          "reset_guest_memory": "Erase all guest memory now and start again from the guest name, guest count, check-in and check-out, and notes above."
         }
       },
       "memory": {

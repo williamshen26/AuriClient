@@ -1,16 +1,21 @@
-"""Versioned schema for the memory store (schema "auri_memory").
+"""Versioned schema for the memory stores ("auri_memory", and "auri_guest_memory" for guests).
 
-Migrations run at startup inside one transaction holding an advisory lock,
-so two Home Assistant instances can't migrate the same database at once.
-A database newer than this code is refused rather than written to.
+Both schemas get the same tables. Migrations run at startup inside one
+transaction holding an advisory lock, so two Home Assistant instances can't
+migrate the same database at once. A database newer than this code is
+refused rather than written to.
 """
 from __future__ import annotations
 
-from .db import MEMORY_SCHEMA, MemoryDbError
+from collections.abc import Callable
+from typing import Any
+
+from .db import MEMORY_SCHEMA, SCHEMA_TOKEN, MemoryDbError
 
 EMBEDDING_DIMENSIONS = 768
 
-_S = MEMORY_SCHEMA
+# The statements name the schema with SCHEMA_TOKEN; _migrate fills it in.
+_S = SCHEMA_TOKEN
 
 MIGRATIONS: list[tuple[int, list[str]]] = [
     (
@@ -151,37 +156,86 @@ class SchemaTooNewError(MemoryDbError):
         self.found = found
 
 
-def apply_migrations(engine, *, app_version: str) -> int:
-    """Bring the schema up to date; return the resulting version."""
+def apply_migrations(engine, *, app_version: str, schema: str = MEMORY_SCHEMA) -> int:
+    """Bring one schema up to date; return the resulting version."""
+    with engine.begin() as conn:
+        _lock(conn, schema)
+        return _migrate(conn, schema=schema, app_version=app_version)
+
+
+def reset_schema(
+    engine,
+    *,
+    schema: str,
+    app_version: str,
+    seed: Callable[[Any], None] | None = None,
+) -> int:
+    """Drop a guest schema with everything in it and create it again, empty.
+
+    One transaction: the schema is either fully replaced (and seeded) or left
+    as it was. The owner's schema is never dropped.
+    """
+    if schema == MEMORY_SCHEMA:
+        raise ValueError("the owner's memory schema is never reset")
     from sqlalchemy import text  # pylint: disable=import-outside-toplevel
 
     with engine.begin() as conn:
-        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('auri_memory:migrations'))"))
-        # Extension before schema: while auri_memory doesn't exist yet, a fresh
-        # install lands in the usual schema (public) rather than ours, which
-        # comes first in the connection's search_path.
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {_S}"))
-        conn.execute(
-            text(
-                f"""CREATE TABLE IF NOT EXISTS {_S}.schema_migrations (
-                    version int PRIMARY KEY,
-                    applied_at timestamptz NOT NULL DEFAULT now(),
-                    app_version text NOT NULL)"""
-            )
-        )
-        current = int(conn.execute(text(f"SELECT COALESCE(MAX(version), 0) FROM {_S}.schema_migrations")).scalar())
-        if current > LATEST_SCHEMA_VERSION:
-            raise SchemaTooNewError(current)
+        _lock(conn, schema)
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        version = _migrate(conn, schema=schema, app_version=app_version)
+        if seed is not None:
+            seed(conn)
+    return version
 
-        for version, statements in MIGRATIONS:
-            if version <= current:
-                continue
-            for statement in statements:
-                conn.execute(text(statement))
-            conn.execute(
-                text(f"INSERT INTO {_S}.schema_migrations (version, app_version) VALUES (:version, :app_version)"),
-                {"version": version, "app_version": app_version},
-            )
-            current = version
+
+def drop_schema(engine, *, schema: str) -> None:
+    """Remove a guest schema with everything in it (guest memory switched off). Never the owner's."""
+    if schema == MEMORY_SCHEMA:
+        raise ValueError("the owner's memory schema is never dropped")
+    from sqlalchemy import text  # pylint: disable=import-outside-toplevel
+
+    with engine.begin() as conn:
+        _lock(conn, schema)
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+
+
+def _lock(conn, schema: str) -> None:
+    from sqlalchemy import text  # pylint: disable=import-outside-toplevel
+
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"{schema}:migrations"})
+
+
+def _migrate(conn, *, schema: str, app_version: str) -> int:
+    from sqlalchemy import text  # pylint: disable=import-outside-toplevel
+
+    def sql(statement: str):
+        return text(statement.replace(SCHEMA_TOKEN, schema))
+
+    # Extension before schema: while auri_memory doesn't exist yet, a fresh
+    # install lands in the usual schema (public) rather than ours, which
+    # comes first in the connection's search_path.
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    conn.execute(sql(f"CREATE SCHEMA IF NOT EXISTS {_S}"))
+    conn.execute(
+        sql(
+            f"""CREATE TABLE IF NOT EXISTS {_S}.schema_migrations (
+                version int PRIMARY KEY,
+                applied_at timestamptz NOT NULL DEFAULT now(),
+                app_version text NOT NULL)"""
+        )
+    )
+    current = int(conn.execute(sql(f"SELECT COALESCE(MAX(version), 0) FROM {_S}.schema_migrations")).scalar())
+    if current > LATEST_SCHEMA_VERSION:
+        raise SchemaTooNewError(current)
+
+    for version, statements in MIGRATIONS:
+        if version <= current:
+            continue
+        for statement in statements:
+            conn.execute(sql(statement))
+        conn.execute(
+            sql(f"INSERT INTO {_S}.schema_migrations (version, app_version) VALUES (:version, :app_version)"),
+            {"version": version, "app_version": app_version},
+        )
+        current = version
     return current

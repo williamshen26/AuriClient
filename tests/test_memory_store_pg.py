@@ -415,13 +415,3 @@ def test_embedding_backfill(store):
     store.set_embeddings([(memory_id, _unit(8))], "m@768")
     assert store.missing_embeddings("m@768") == []
     assert store.missing_embeddings("newer-model@768") == [(memory_id, "Imported preference without a vector.")]
-
-
-def test_owner_scope_is_never_purged(store, pg_engine):
-    with pytest.raises(ValueError):
-        store.purge_scope()
-    guest = MemoryStore(pg_engine, scope="guest:booking-42")
-    guest.insert_memory(NewMemory(kind="fact", content="The guest likes tea.", source="chat"))
-    _remember(store, "Owner fact stays.")
-    assert guest.purge_scope()["mem_memories"] == 1
-    assert store.counts() == {"fact": 1}
