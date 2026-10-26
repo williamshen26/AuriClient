@@ -82,6 +82,13 @@ run_memory_job:
           max: 30
           mode: box
 
+sync_bookings:
+  name: Check the booking calendar
+  description: >-
+    Read the booking calendar now (it's normally read every 30 minutes) and
+    update the booking ID, check-in and check-out in the Guest options.
+    Returns what it found.
+
 run_memory_exam:
   name: Run memory exam
   description: >-

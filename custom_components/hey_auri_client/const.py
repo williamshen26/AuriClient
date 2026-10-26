@@ -29,6 +29,16 @@ CONF_TRASH_DISPOSAL_INSTRUCTION = "trash_disposal_instruction"
 CONF_HOST_CONTACT_INSTRUCTION = "host_contact_instruction"
 CONF_PROPERTY_KNOWLEDGE = "property_knowledge"
 CONF_LOCAL_RECOMMENDATIONS = "local_recommendations"
+# The host's booking calendar (Airbnb's export link, or any iCal link): with
+# it, bookings/ fills in the booking ID, check-in and check-out by itself.
+CONF_BOOKING_CALENDAR_URL = "booking_calendar_url"
+# Not in the form: which link wrote the stay in Guest Settings (a fingerprint,
+# not the link). A stay another link wrote gives way at once to the new link's.
+CONF_BOOKING_CALENDAR_SOURCE = "booking_calendar_source"
+CONF_USUAL_CHECK_IN_TIME = "usual_check_in_time"
+CONF_USUAL_CHECK_OUT_TIME = "usual_check_out_time"
+DEFAULT_USUAL_CHECK_IN_TIME = "15:00:00"
+DEFAULT_USUAL_CHECK_OUT_TIME = "11:00:00"
 DEFAULT_REQUEST_TIMEOUT = 30
 DEFAULT_STT_PIPELINE_ID = "auri-cloud-voice"
 DEFAULT_STT_LANGUAGE = "en"
@@ -186,6 +196,7 @@ EVENT_AURI_TIMER_FINISHED = f"{DOMAIN}.auri_timer_finished"
 EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"
 
 DATA_AGENT = "agent"
+DATA_BOOKINGS = "bookings"
 DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
 
@@ -217,6 +228,7 @@ from .memory.config import (  # noqa: E402
 
 SERVICE_RUN_MEMORY_JOB = "run_memory_job"
 SERVICE_RUN_MEMORY_EXAM = "run_memory_exam"
+SERVICE_SYNC_BOOKINGS = "sync_bookings"
 ATTR_DATE = "date"
 ATTR_FORCE = "force"
 ATTR_DAYS_BACK = "days_back"

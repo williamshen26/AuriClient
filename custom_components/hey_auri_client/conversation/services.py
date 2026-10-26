@@ -19,6 +19,7 @@ from ..const import (
     ATTR_MARKDOWN,
     ATTR_NOTE_ID,
     ATTR_TITLE,
+    DATA_BOOKINGS,
     DATA_MEMORY,
     DOMAIN,
     SERVICE_ASSIGN_MAC,
@@ -29,7 +30,9 @@ from ..const import (
     SERVICE_RUN_MEMORY_EXAM,
     SERVICE_RUN_MEMORY_JOB,
     SERVICE_START_AURI_TIMER,
+    SERVICE_SYNC_BOOKINGS,
 )
+from ..bookings.sync import BookingSync
 from ..memory.api import MemoryApiError
 from ..memory.runtime import MemoryRuntime
 from .custom_services.timer_services import (
@@ -87,6 +90,7 @@ RUN_MEMORY_JOB_SCHEMA = vol.Schema(
     }
 )
 RUN_MEMORY_EXAM_SCHEMA = vol.Schema({})
+SYNC_BOOKINGS_SCHEMA = vol.Schema({})
 
 
 def _memory_runtime(hass: HomeAssistant) -> MemoryRuntime:
@@ -94,6 +98,14 @@ def _memory_runtime(hass: HomeAssistant) -> MemoryRuntime:
     for data in hass.data.get(DOMAIN, {}).values():
         if isinstance(data, dict) and isinstance(data.get(DATA_MEMORY), MemoryRuntime):
             return data[DATA_MEMORY]
+    raise HomeAssistantError("Hey Auri Client isn't set up")
+
+
+def _booking_sync(hass: HomeAssistant) -> BookingSync:
+    """The booking calendar sync of the (single) loaded config entry."""
+    for data in hass.data.get(DOMAIN, {}).values():
+        if isinstance(data, dict) and isinstance(data.get(DATA_BOOKINGS), BookingSync):
+            return data[DATA_BOOKINGS]
     raise HomeAssistantError("Hey Auri Client isn't set up")
 
 
@@ -180,6 +192,20 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
         except MemoryApiError as err:
             raise HomeAssistantError(f"Grading failed: {err}") from err
 
+    async def _handle_sync_bookings(call: ServiceCall) -> dict[str, object]:
+        del call
+        sync = _booking_sync(hass)
+        if not sync.url:
+            raise HomeAssistantError("Add the booking calendar link under Hey Auri Client → Configure → Booking calendar first")
+        return await sync.async_sync()
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SYNC_BOOKINGS,
+        _handle_sync_bookings,
+        schema=SYNC_BOOKINGS_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_RUN_MEMORY_JOB,

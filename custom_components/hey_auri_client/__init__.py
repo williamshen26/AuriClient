@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
+from .bookings.sync import BookingSync
 from .conversation.agent_class import ThinOpenAIAgent
 from .cache import (
     dump_media_player_sources,
@@ -23,6 +24,7 @@ from .cache import (
 )
 from .const import (
     DATA_AGENT,
+    DATA_BOOKINGS,
     DATA_MEMORY,
     DOMAIN,
     LEGACY_USER_DATA_DIR,
@@ -134,12 +136,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     memory = MemoryRuntime(hass, entry, agent.client, app_version=str(integration.version or "unknown"))
     agent.attach_memory(memory)
 
+    bookings = BookingSync(hass, entry)
+
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     data[DATA_AGENT] = agent
     data[DATA_MEMORY] = memory
+    data[DATA_BOOKINGS] = bookings
 
     # Connects in the background; conversations work (without memory) meanwhile.
     await memory.async_start()
+    await bookings.async_start()
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -148,10 +154,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Apply memory and booking changes. Options also change at runtime (set_language)."""
-    memory: MemoryRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(DATA_MEMORY)
+    """Apply memory and booking changes. Options also change at runtime (set_language, the booking calendar)."""
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    memory: MemoryRuntime | None = data.get(DATA_MEMORY)
     if memory is not None:
         await memory.async_options_updated(dict(entry.options))
+    bookings: BookingSync | None = data.get(DATA_BOOKINGS)
+    if bookings is not None:
+        await bookings.async_options_updated(dict(entry.options))
 
 
 async def _async_relocate_legacy_user_data(hass: HomeAssistant) -> None:
@@ -181,6 +191,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     data = hass.data[DOMAIN].pop(entry.entry_id, None) or {}
     ha_conversation.async_unset_agent(hass, entry)
+    bookings: BookingSync | None = data.get(DATA_BOOKINGS)
+    if bookings is not None:
+        await bookings.async_stop()
     memory: MemoryRuntime | None = data.get(DATA_MEMORY)
     if memory is not None:
         await memory.async_shutdown()

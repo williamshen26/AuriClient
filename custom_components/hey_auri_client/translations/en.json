@@ -30,7 +30,10 @@
       "vault_not_allowed": "Home Assistant isn't allowed to write there. Add the folder to allowlist_external_dirs in configuration.yaml.",
       "vault_not_writable": "Home Assistant can't write to that folder.",
       "guest_memory_needs_memory": "Set up Memory first: guest memory uses the same database.",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "calendar_invalid_link": "That isn't a calendar link. Copy the whole link, starting with https://.",
+      "calendar_unreachable": "Couldn't download a calendar from that link. Check that it's complete and still valid (Airbnb gives you a new link if you reset it).",
+      "calendar_not_ical": "That link doesn't return a calendar in iCal format."
     },
     "step": {
       "init": {
@@ -39,6 +42,7 @@
         "menu_options": {
           "general": "General",
           "guest": "Guest",
+          "booking_calendar": "Booking calendar",
           "memory": "Memory",
           "logins": "Who uses each login",
           "metrics": "Metrics"
@@ -54,7 +58,7 @@
       },
       "guest": {
         "title": "Guest settings",
-        "description": "Configure booking and guest-facing instruction defaults.",
+        "description": "Booking details, and what Auri tells guests.{calendar_booking}",
         "data": {
           "booking_id": "Booking ID",
           "guest_name": "Guest name",
@@ -81,6 +85,20 @@
           "local_recommendations": "What is around the house. Example: For coffee, the host recommends Corner Bean Cafe on West 4th Avenue. It is a cozy local coffee shop that is good for morning coffee, pastries, and a quick breakfast before heading out. It is usually quieter before 9 AM.",
           "guest_memory_enabled": "In guest mode, Auri remembers what guests tell it and learns from their conversations each night, for this stay only. It's kept apart from your own memory, in your PostgreSQL database (Memory must be set up). Erased an hour after check-out (then closed until the next booking), and started again for each new booking ID (or new check-in when there's no booking ID).",
           "reset_guest_memory": "Erase all guest memory now and start again from the guest name, guest count, check-in and check-out, and notes above."
+        }
+      },
+      "booking_calendar": {
+        "title": "Booking calendar",
+        "description": "With your listing's calendar link, Auri fills in the booking ID, check-in and check-out of each booking in the Guest options by itself. It checks for changes every 30 minutes and moves to the next booking an hour after each check-out.{calendar_booking}",
+        "data": {
+          "booking_calendar_url": "Booking calendar link",
+          "usual_check_in_time": "Usual check-in time",
+          "usual_check_out_time": "Usual check-out time"
+        },
+        "data_description": {
+          "booking_calendar_url": "Optional. Your Airbnb calendar's export link (on Airbnb: Calendar → Availability → Connect calendars → Export calendar), or any other iCal link. A new link starts afresh from its own calendar. Clear it to enter bookings yourself in the Guest options.",
+          "usual_check_in_time": "Airbnb's calendar has dates but no times, so Auri uses this one for every booking.",
+          "usual_check_out_time": "Used the same way for check-out. Guests keep their details and guest memory until an hour after it."
         }
       },
       "memory": {

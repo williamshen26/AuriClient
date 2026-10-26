@@ -63,6 +63,31 @@ Choose the mode on your dashboard at hey-auri.com:
   - Auri answers questions using the [Guest options](#options) and can send you a notification.
   - If you've filled in **Local recommendations**, Auri suggests those places before searching.
 
+### Bookings from your calendar
+
+Instead of typing in each booking, give Auri your listing's calendar link, and it fills in the booking ID, check-in and check-out by itself.
+
+1. **Copy the link.** On Airbnb, go to **Calendar → Availability → Connect calendars → Export calendar** and copy the link. Any other iCal link works too (VRBO, Booking.com or a property-management tool).
+2. **Paste it** into **Booking calendar link** under **Configure → Booking calendar**.
+3. **Set your usual times.** On the same page, check **Usual check-in time** and **Usual check-out time** (15:00 and 11:00 by default).
+
+From then on:
+
+- **Checks:** Auri reads the calendar every 30 minutes, so a same-day booking shows up in time.
+- **Changeover:** a booking stays in the Guest options until an hour after its check-out, so guests who leave late still have their details and guest memory. Then the next booking takes over, even when the next guests arrive the same afternoon.
+- **What the calendar fills in:** Airbnb's calendar has dates and a reservation code, but no guest name, number of guests, phone number or times.
+  - Times come from your usual check-in and check-out times, for every booking.
+  - When a new booking takes over, the guest name, count, phone number and notes are cleared, because they belonged to the last guests. Fill them in if you like. Calendars that include names, such as some property-management tools, fill them in for you.
+- **In the Guest options:** while there's a link, the Booking ID, Check-in and Check-out fields are hidden, because the calendar decides them. The form shows the booking the calendar filled in instead. The guest name, count, phone number and notes stay yours, and within the same booking they're kept. An extended stay moves check-out without starting guest memory again.
+- **Changing the link:** a new link starts afresh. The booking the last link filled in is replaced right away by the new calendar's, or cleared if the new calendar has nothing coming. A booking you typed in yourself that's under way when you first add a link stays until it ends.
+- **Cancellations:** a booking cancelled before check-in is replaced by the next one. A stay that has started is never cut short, even though Airbnb's calendar stops listing it once it begins.
+- **Ignored:** dates you've blocked on Airbnb.
+- **Problems:** if the calendar can't be read (for example after you reset the link on Airbnb), the Guest options keep the last booking, and after 6 hours Home Assistant shows a notification.
+
+The **Auri Guest Stay** sensor (`sensor.auri_guest_stay`) shows `none`, `upcoming`, `staying` or `checked_out`, with the booking, the next booking, and when the calendar was last read. It also follows bookings you type in, so you can build automations on it, such as heating on before check-in or eco mode after check-out.
+
+The link shows when your home is empty, so keep it private. Auri never writes it to its logs, and doesn't keep the phone digits Airbnb includes in the calendar.
+
 ## Options
 
 Go to **Settings → Devices & services → Hey Auri Client → Configure**.
@@ -79,13 +104,20 @@ Go to **Settings → Devices & services → Hey Auri Client → Configure**.
 
 | Option | Description |
 |---|---|
-| Booking ID, Guest name, Check-in, Check-out, Guest count, Notes | Details of the current booking. |
+| Booking ID, Guest name, Check-in, Check-out, Guest count, Notes | Details of the current booking. Booking ID, Check-in and Check-out are hidden while there's a booking calendar link. |
 | Guest phone number | US and Canada numbers only (`+16045551234` or `6045551234`). Used to text ride links to the guest. |
 | Check-in, Check-out, Wi-Fi, Parking, Trash disposal and Host contact instructions; House rules | What Auri tells guests when they ask. |
 | Property knowledge | Where things are and how to use them, for example where the spare towels are. |
 | Local recommendations | Your favorite places nearby. Auri suggests these before searching. |
 | Let guests use memory | Off by default. Gives guests a memory of their own for the stay. See [Guest memory](#guest-memory). |
 | Reset guest memory | Tick and save to erase guest memory and start it again from the guest details. |
+
+**Booking calendar** (optional)
+
+| Option | Description |
+|---|---|
+| Booking calendar link | Your listing's calendar link. With it, the booking ID, check-in and check-out in the Guest options fill in by themselves. Clear it to enter bookings yourself. See [Bookings from your calendar](#bookings-from-your-calendar). |
+| Usual check-in time, Usual check-out time | Used for every booking, because Airbnb's calendar gives dates but no times (15:00 and 11:00 by default). |
 
 **Memory** (optional)
 
@@ -181,7 +213,7 @@ When you rent your home out, guests can have a memory of their own. Turn on **Le
 - Guests never get your memories, and you never get theirs: each mode only uses its own.
 - It starts with the guest details from the Guest options: the guest's name, the number of guests, check-in and check-out, and your notes (a line that looks like a password or code is left out). Property information such as Wi-Fi or house rules isn't copied; Auri reads it from the Guest options when asked.
 - It's erased completely an hour after check-out, so guests who leave a little late can still use it. From then until you save the next booking, it's closed: Auri remembers nothing for guests and keeps nothing they say. If the database can't be reached at that moment, the erase happens at the next check, within 15 minutes of it coming back.
-- It starts again from the guest details when you save a new booking ID (or a new check-in, if you don't use booking IDs), so enter each booking after the previous guests have left. To start again yourself, tick **Reset guest memory** and save; after a stay has ended this erases it but doesn't reopen it. Turning guest memory off erases it too.
+- It starts again from the guest details when a new booking ID is saved (or a new check-in, if you don't use booking IDs). With a [booking calendar link](#bookings-from-your-calendar), that happens by itself an hour after each check-out. If you type bookings in, enter each one after the previous guests have left. To start again yourself, tick **Reset guest memory** and save; after a stay has ended this erases it but doesn't reopen it. Turning guest memory off erases it too.
 - Guests don't sign in. When the Guest options name a single guest, what they say about themselves is saved for them; with more, Auri asks who it's for, once per conversation.
 - Plans guests ask Auri to remember ("we have a dinner reservation Friday at 7") stay in guest memory and aren't added to your calendar, unless a guest asks for a calendar event.
 - It's never copied to Obsidian.
@@ -268,6 +300,7 @@ actions:
 | `hey_auri_client.delete_auri_sticky_note` | Deletes the note with the given `note_id`. |
 | `hey_auri_client.get_auri_sticky_notes` | Returns all notes. |
 | `hey_auri_client.assign_mac` | Adds MAC addresses to a media player for Wake-on-LAN. Use it when a device has more than one network interface and Home Assistant only knows one of them. |
+| `hey_auri_client.sync_bookings` | Reads the booking calendar now, rather than waiting for the next 30-minute check, and returns what it found: the number of bookings, the next booking, and whether the Guest options changed. |
 | `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. |
 | `hey_auri_client.run_memory_exam` | Asks the questions in `hey_auri_memory_exam.yaml` and returns the score (see [Testing what Auri remembers](#testing-what-auri-remembers)). |
 
@@ -312,6 +345,7 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
 | `sensor.auri_memory` is `unavailable` | Home Assistant can't reach the database. Auri keeps working without memory, holds on to the latest conversation (up to 1,000 messages), and saves it when the database is back. |
 | `sensor.auri_memory` is `error` | Its `error` attribute names the problem, for example `pgvector_missing`, `insufficient_privilege` or `schema_too_new` (the database was set up by a newer version of this integration: update it). |
+| A booking didn't fill in from the calendar | Look at the `error` and `last_sync` attributes of `sensor.auri_guest_stay`, or run `hey_auri_client.sync_bookings`. If you reset the link on Airbnb, paste the new one under **Configure → Booking calendar**. |
 | Auri didn't learn something from yesterday | Check the `last_nightly_run` attribute of `sensor.auri_memory`, or run `hey_auri_client.run_memory_job` and look at what it returns. |
 
 To turn on detailed logs, add this to `configuration.yaml`:

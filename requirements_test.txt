@@ -10,3 +10,5 @@ mutagen==1.48.1
 ha-ffmpeg==3.2.2
 influxdb==5.3.2
 aiofiles==25.1.0
+# The version Home Assistant 2026.10.1 ships (its Remote and Local Calendar integrations use it).
+ical==14.3.0

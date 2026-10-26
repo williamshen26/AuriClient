@@ -1,6 +1,7 @@
 """Config flow for the thin frontend integration prototype."""
 from __future__ import annotations
 
+from datetime import datetime
 from functools import partial
 import logging
 import re
@@ -13,10 +14,15 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
+from .bookings.calendar import CalendarError, bookings_only_feed, fetch_calendar, parse_bookings, valid_calendar_url
+from .bookings.schedule import current_stay
 from .const import (
     API_ENDPOINT,
+    CONF_BOOKING_CALENDAR_SOURCE,
+    CONF_BOOKING_CALENDAR_URL,
     CONF_BOOKING_ID,
     CONF_CHECK_IN,
     CONF_CHECK_IN_INSTRUCTION,
@@ -60,7 +66,11 @@ from .const import (
     CONF_SHARED_SECRET,
     SUPPORTED_LANGUAGES,
     CONF_TRASH_DISPOSAL_INSTRUCTION,
+    CONF_USUAL_CHECK_IN_TIME,
+    CONF_USUAL_CHECK_OUT_TIME,
     CONF_WIFI_INSTRUCTION,
+    DEFAULT_USUAL_CHECK_IN_TIME,
+    DEFAULT_USUAL_CHECK_OUT_TIME,
     DEFAULT_MEMORY_ARCHIVE_RETENTION_DAYS,
     DEFAULT_MEMORY_DAY_BOUNDARY_HOUR,
     DEFAULT_MEMORY_DB_PORT,
@@ -88,6 +98,16 @@ _LOGIN_LINKED = "linked"
 # Guest Settings checkbox: erase guest memory and start it again from the guest details.
 _RESET_GUEST_MEMORY = "reset_guest_memory"
 _PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
+
+
+def _optional_with_value(key: str, value: Any) -> vol.Optional:
+    """An optional field pre-filled with its value, or left out when empty.
+
+    Date-and-time fields reject an empty default, so a form without a booking
+    yet (a booking calendar link entered first) couldn't be saved.
+    """
+    text = str(value or "").strip()
+    return vol.Optional(key, default=text) if text else vol.Optional(key)
 
 # Display names for the STT language dropdown only — SUPPORTED_LANGUAGES
 # itself stays plain ISO 639-1 codes for everything else (Cartesia's API,
@@ -264,7 +284,7 @@ class OptionsFlow(config_entries.OptionsFlow):
         """Show options group menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["general", "guest", "memory", "logins", "metrics"],
+            menu_options=["general", "guest", "booking_calendar", "memory", "logins", "metrics"],
         )
 
     async def async_step_general(
@@ -309,13 +329,13 @@ class OptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            user_input = dict(user_input)
             normalized_phone_number = _normalize_guest_phone_number(
                 user_input.get(CONF_GUEST_PHONE_NUMBER, "")
             )
             if normalized_phone_number is None:
                 errors[CONF_GUEST_PHONE_NUMBER] = "invalid_guest_phone_number"
             else:
-                user_input = dict(user_input)
                 user_input[CONF_GUEST_PHONE_NUMBER] = normalized_phone_number
 
             if user_input.get(CONF_GUEST_MEMORY_ENABLED) and not MemoryConfig.from_options(self.config_entry.options).configured:
@@ -330,13 +350,22 @@ class OptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(title="", data=data)
 
         options = user_input or self.config_entry.options
+        calendar_link = str(self.config_entry.options.get(CONF_BOOKING_CALENDAR_URL) or "").strip()
+        # With a booking calendar link (its own options page), the calendar owns the booking ID,
+        # check-in and check-out: they're shown in the description instead of as fields.
+        booking_fields = (
+            {}
+            if calendar_link
+            else {
+                vol.Optional(CONF_BOOKING_ID, default=str(options.get(CONF_BOOKING_ID, ""))): str,
+                _optional_with_value(CONF_CHECK_IN, options.get(CONF_CHECK_IN)): selector.DateTimeSelector(),
+                _optional_with_value(CONF_CHECK_OUT, options.get(CONF_CHECK_OUT)): selector.DateTimeSelector(),
+            }
+        )
 
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_BOOKING_ID,
-                    default=str(options.get(CONF_BOOKING_ID, "")),
-                ): str,
+                **booking_fields,
                 vol.Optional(
                     CONF_GUEST_NAME,
                     default=str(options.get(CONF_GUEST_NAME, "")),
@@ -345,14 +374,6 @@ class OptionsFlow(config_entries.OptionsFlow):
                     CONF_GUEST_PHONE_NUMBER,
                     default=str(options.get(CONF_GUEST_PHONE_NUMBER, "")),
                 ): str,
-                vol.Optional(
-                    CONF_CHECK_IN,
-                    default=str(options.get(CONF_CHECK_IN, "")),
-                ): selector.DateTimeSelector(),
-                vol.Optional(
-                    CONF_CHECK_OUT,
-                    default=str(options.get(CONF_CHECK_OUT, "")),
-                ): selector.DateTimeSelector(),
                 vol.Optional(
                     CONF_GUEST_COUNT,
                     default=int(options.get(CONF_GUEST_COUNT, 4)),
@@ -458,7 +479,100 @@ class OptionsFlow(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="guest", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="guest",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "calendar_booking": self._calendar_booking_text(
+                    calendar_link,
+                    without_link="\n\nTo fill in bookings by themselves, add your calendar's link under **Booking calendar**.",
+                )
+            },
+        )
+
+    async def async_step_booking_calendar(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """The host's booking calendar: with its link, Auri fills in each booking by itself."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            user_input = dict(user_input)
+            # An emptied link field isn't sent at all: that clears the link.
+            calendar_url = str(user_input.get(CONF_BOOKING_CALENDAR_URL) or "").strip()
+            user_input[CONF_BOOKING_CALENDAR_URL] = calendar_url
+            if calendar_url and calendar_url != str(self.config_entry.options.get(CONF_BOOKING_CALENDAR_URL) or "").strip():
+                calendar_error = await self._async_validate_calendar(calendar_url)
+                if calendar_error:
+                    errors[CONF_BOOKING_CALENDAR_URL] = calendar_error
+
+            if not errors:
+                data = dict(self.config_entry.options)
+                data.update(user_input)
+                if not calendar_url:
+                    # Without a link, the stay in Guest Settings is the host's.
+                    data.pop(CONF_BOOKING_CALENDAR_SOURCE, None)
+                return self.async_create_entry(title="", data=data)
+
+        values = {**self.config_entry.options, **(user_input or {})}
+        schema = vol.Schema(
+            {
+                # suggested_value rather than default, so the link can be cleared.
+                vol.Optional(
+                    CONF_BOOKING_CALENDAR_URL,
+                    description={"suggested_value": str(values.get(CONF_BOOKING_CALENDAR_URL) or "")},
+                ): selector.TextSelector(),
+                vol.Optional(
+                    CONF_USUAL_CHECK_IN_TIME,
+                    default=str(values.get(CONF_USUAL_CHECK_IN_TIME) or DEFAULT_USUAL_CHECK_IN_TIME),
+                ): selector.TimeSelector(),
+                vol.Optional(
+                    CONF_USUAL_CHECK_OUT_TIME,
+                    default=str(values.get(CONF_USUAL_CHECK_OUT_TIME) or DEFAULT_USUAL_CHECK_OUT_TIME),
+                ): selector.TimeSelector(),
+            }
+        )
+        calendar_link = str(self.config_entry.options.get(CONF_BOOKING_CALENDAR_URL) or "").strip()
+        return self.async_show_form(
+            step_id="booking_calendar",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"calendar_booking": self._calendar_booking_text(calendar_link)},
+        )
+
+    def _calendar_booking_text(self, calendar_link: str, *, without_link: str = "") -> str:
+        """What the booking calendar filled in, for a form's description (without_link when there's no link)."""
+        if not calendar_link:
+            return without_link
+        tz = dt_util.get_default_time_zone()
+        stay = current_stay(self.config_entry.options, tz)
+        if stay is None or not stay.booking_id:
+            return "\n\n**From the booking calendar:** no booking yet."
+
+        def when(moment: datetime | None) -> str:
+            return moment.astimezone(tz).strftime("%a %Y-%m-%d %H:%M") if moment else "not set"
+
+        return (
+            f"\n\n**From the booking calendar:** booking {stay.booking_id}, "
+            f"check-in {when(stay.check_in)}, check-out {when(stay.check_out)}."
+        )
+
+    async def _async_validate_calendar(self, url: str) -> str | None:
+        """Check a new booking calendar link downloads and reads as iCal; returns an error key."""
+        if not valid_calendar_url(url):
+            return "calendar_invalid_link"
+        try:
+            fetched = await fetch_calendar(async_get_clientsession(self.hass), url)
+        except CalendarError:
+            return "calendar_unreachable"
+        try:
+            await self.hass.async_add_executor_job(
+                partial(parse_bookings, fetched.text or "", bookings_only=bookings_only_feed(url))
+            )
+        except CalendarError:
+            return "calendar_not_ical"
+        return None
 
     async def async_step_memory(
         self, user_input: dict[str, Any] | None = None
