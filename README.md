@@ -53,6 +53,8 @@ The integration adds three things to Home Assistant:
 
 Auri can only see and control entities that are exposed to Assist. Choose them under **Settings → Voice assistants → Expose**.
 
+When Auri asks you something, such as "Which light, the kitchen or the hall?", a satellite built on ESPHome, such as Home Assistant Voice Preview Edition, keeps listening for your answer, so you don't need the wake word. If nobody answers, it goes back to waiting for the wake word. Wyoming satellites always wait for the wake word.
+
 ## Owner and guest mode
 
 Choose the mode on your dashboard at hey-auri.com:
@@ -62,6 +64,17 @@ Choose the mode on your dashboard at hey-auri.com:
   - Automation editing is turned off, and Auri never uses what it remembers about your household. Guests get memory of their own only if you turn on [guest memory](#guest-memory); otherwise nothing they say is saved.
   - Auri answers questions using the [Guest options](#options) and can send you a notification.
   - If you've filled in **Local recommendations**, Auri suggests those places before searching.
+- **Automatic**: for a home you live in and rent out sometimes. Auri switches by itself.
+  - **Guest mode** applies while a booking is on (from check-in until an hour after check-out), and whenever nobody from your household is home.
+  - **Owner mode** applies when you're home between bookings.
+
+  So cleaners, contractors and other visitors who come while you're out never get owner mode.
+
+  It needs two things in Home Assistant:
+  - **your bookings**, from a [booking calendar link](#bookings-from-your-calendar) or typed into the Guest options;
+  - **at least one household member's phone sharing its location with Home Assistant**, for example through the Home Assistant companion app, so the household member's person shows as home.
+
+  Without a tracked phone, Auri stays in guest mode between bookings. A person whose login is marked **Not a person** under **Who uses each login** doesn't count. A home that's only ever rented out doesn't need Automatic: keep it on Guest.
 
 ### Bookings from your calendar
 
@@ -77,6 +90,7 @@ From then on:
 - **Changeover:** a booking stays in the Guest options until an hour after its check-out, so guests who leave late still have their details and guest memory. Then the next booking takes over, even when the next guests arrive the same afternoon.
 - **What the calendar fills in:** Airbnb's calendar has dates and a reservation code, but no guest name, number of guests, phone number or times.
   - Times come from your usual check-in and check-out times, for every booking.
+  - Auri asks the guests their name (see [The guest's name](#the-guests-name)).
   - When a new booking takes over, the guest name, count, phone number and notes are cleared, because they belonged to the last guests. Fill them in if you like. Calendars that include names, such as some property-management tools, fill them in for you.
 - **In the Guest options:** while there's a link, the Booking ID, Check-in and Check-out fields are hidden, because the calendar decides them. The form shows the booking the calendar filled in instead. The guest name, count, phone number and notes stay yours, and within the same booking they're kept. An extended stay moves check-out without starting guest memory again.
 - **Changing the link:** a new link starts afresh. The booking the last link filled in is replaced right away by the new calendar's, or cleared if the new calendar has nothing coming. A booking you typed in yourself that's under way when you first add a link stays until it ends.
@@ -84,9 +98,21 @@ From then on:
 - **Ignored:** dates you've blocked on Airbnb.
 - **Problems:** if the calendar can't be read (for example after you reset the link on Airbnb), the Guest options keep the last booking, and after 6 hours Home Assistant shows a notification.
 
-The **Auri Guest Stay** sensor (`sensor.auri_guest_stay`) shows `none`, `upcoming`, `staying` or `checked_out`, with the booking, the next booking, and when the calendar was last read. It also follows bookings you type in, so you can build automations on it, such as heating on before check-in or eco mode after check-out.
+The **Auri Guest Stay** sensor (`sensor.auri_guest_stay`) shows `none`, `upcoming`, `staying` or `checked_out`, with the booking, the guest's name, the next booking, and when the calendar was last read. It also follows bookings you type in, so you can build automations on it, such as heating on before check-in or eco mode after check-out.
 
 The link shows when your home is empty, so keep it private. Auri never writes it to its logs, and doesn't keep the phone digits Airbnb includes in the calendar.
+
+### The guest's name
+
+Airbnb's calendar doesn't include the guest's name. When **Guest name** in the Guest options is empty, Auri asks the guests.
+
+- **When:** the first time a guest talks with Auri after check-in, Auri helps with whatever they asked, then asks their name ("By the way, may I ask your name?"). On a voice satellite, it keeps listening for the answer. A device command Auri only answers "Done" to doesn't count.
+- **What it keeps:** the answer, for that booking only. Auri greets the guests with it, and with [guest memory](#guest-memory) on, it's one of the guests staying. A guest can correct it ("actually, it's Sara").
+- **Once a booking:** if the guest would rather not say, or talks about something else, Auri doesn't ask again during that booking. The next booking starts without a name, and its guests are asked.
+- **Your name wins:** a name you type in **Guest name** is always used, and then Auri doesn't ask. The Guest options show the name the guests gave, and so does the `guest_name` attribute of `sensor.auri_guest_stay`.
+- **Not asked:** in owner mode, and in conversations an automation starts.
+
+It works the same for bookings you type in: leave **Guest name** empty.
 
 ## Options
 
@@ -104,7 +130,7 @@ Go to **Settings → Devices & services → Hey Auri Client → Configure**.
 
 | Option | Description |
 |---|---|
-| Booking ID, Guest name, Check-in, Check-out, Guest count, Notes | Details of the current booking. Booking ID, Check-in and Check-out are hidden while there's a booking calendar link. |
+| Booking ID, Guest name, Check-in, Check-out, Guest count, Notes | Details of the current booking. Booking ID, Check-in and Check-out are hidden while there's a booking calendar link. Leave Guest name empty and Auri asks the guests (see [The guest's name](#the-guests-name)). |
 | Guest phone number | US and Canada numbers only (`+16045551234` or `6045551234`). Used to text ride links to the guest. |
 | Check-in, Check-out, Wi-Fi, Parking, Trash disposal and Host contact instructions; House rules | What Auri tells guests when they ask. |
 | Property knowledge | Where things are and how to use them, for example where the spare towels are. |
@@ -214,7 +240,7 @@ When you rent your home out, guests can have a memory of their own. Turn on **Le
 - It starts with the guest details from the Guest options: the guest's name, the number of guests, check-in and check-out, and your notes (a line that looks like a password or code is left out). Property information such as Wi-Fi or house rules isn't copied; Auri reads it from the Guest options when asked.
 - It's erased completely an hour after check-out, so guests who leave a little late can still use it. From then until you save the next booking, it's closed: Auri remembers nothing for guests and keeps nothing they say. If the database can't be reached at that moment, the erase happens at the next check, within 15 minutes of it coming back.
 - It starts again from the guest details when a new booking ID is saved (or a new check-in, if you don't use booking IDs). With a [booking calendar link](#bookings-from-your-calendar), that happens by itself an hour after each check-out. If you type bookings in, enter each one after the previous guests have left. To start again yourself, tick **Reset guest memory** and save; after a stay has ended this erases it but doesn't reopen it. Turning guest memory off erases it too.
-- Guests don't sign in. When the Guest options name a single guest, what they say about themselves is saved for them; with more, Auri asks who it's for, once per conversation.
+- Guests don't sign in. When the Guest options are for a single guest whose name Auri knows (yours, or the one the guest gave), what they say about themselves is saved for them; with more, Auri asks who it's for, once per conversation.
 - Plans guests ask Auri to remember ("we have a dinner reservation Friday at 7") stay in guest memory and aren't added to your calendar, unless a guest asks for a calendar event.
 - It's never copied to Obsidian.
 
@@ -320,7 +346,8 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - your message;
   - the exposed entities' IDs, names, aliases, states, areas and selected attributes;
   - your home's location (latitude and longitude, time zone, country);
-  - the current time, the Home Assistant user's name, the language, and which device and area you're speaking from.
+  - the current time, the Home Assistant user's name, the language, and which device and area you're speaking from;
+  - whether a booking is under way, whether anyone from your household is home (yes or no, not who), and whether Auri should ask the guests their name.
 - **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.
 - **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):
@@ -340,11 +367,13 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | Auri doesn't know about a device | Expose the entity under **Settings → Voice assistants → Expose**. |
 | Auri asks you to set up Music Assistant | Music playback needs [Music Assistant](https://music-assistant.io). |
 | Auri listens or replies in the wrong language | Ask it to switch (for example, "speak English"), or change **STT default language** in the General options. |
+| An automation's sentence trigger didn't run | If Auri had just asked you something, Home Assistant sent your answer straight to Auri. Say the sentence again after the wake word. |
 | The QR code opens the Auri home page | Press **Refresh Session**. |
 | Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
 | `sensor.auri_memory` is `unavailable` | Home Assistant can't reach the database. Auri keeps working without memory, holds on to the latest conversation (up to 1,000 messages), and saves it when the database is back. |
 | `sensor.auri_memory` is `error` | Its `error` attribute names the problem, for example `pgvector_missing`, `insufficient_privilege` or `schema_too_new` (the database was set up by a newer version of this integration: update it). |
+| Auri uses the wrong name for the guests | A name typed in **Guest name** is always used. Otherwise it's the one the guests gave Auri, shown at the top of the Guest options: type the right one in **Guest name**. |
 | A booking didn't fill in from the calendar | Look at the `error` and `last_sync` attributes of `sensor.auri_guest_stay`, or run `hey_auri_client.sync_bookings`. If you reset the link on Airbnb, paste the new one under **Configure → Booking calendar**. |
 | Auri didn't learn something from yesterday | Check the `last_nightly_run` attribute of `sensor.auri_memory`, or run `hey_auri_client.run_memory_job` and look at what it returns. |
 

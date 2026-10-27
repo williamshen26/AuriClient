@@ -25,6 +25,7 @@ from ..const import (
     CONF_BOOKING_ID,
     CONF_CHECK_IN,
     CONF_CHECK_OUT,
+    CONF_GUEST_ASKED_NAME,
     CONF_GUEST_COUNT,
     CONF_GUEST_NAME,
     CONF_GUEST_PHONE_NUMBER,
@@ -34,8 +35,9 @@ from .calendar import Booking
 
 # What Guest Settings' date-and-time fields store (local time).
 OPTION_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-# Cleared when a new booking takes over: they belong to the previous guests.
-_PER_STAY_FIELDS = (CONF_GUEST_NAME, CONF_GUEST_COUNT, CONF_GUEST_PHONE_NUMBER, CONF_NOTES)
+# Cleared when a new booking takes over: they belong to the previous guests
+# (with the name they gave Auri, which only counts for their stay anyway).
+_PER_STAY_FIELDS = (CONF_GUEST_NAME, CONF_GUEST_COUNT, CONF_GUEST_PHONE_NUMBER, CONF_NOTES, CONF_GUEST_ASKED_NAME)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,16 @@ def stay_state(options: Mapping[str, Any], now: datetime, tz: tzinfo) -> tuple[s
     if stay.check_out is None or now < stay.check_out:
         return "staying", stay.check_out
     return "checked_out", None
+
+
+def stay_active(options: Mapping[str, Any], now: datetime, tz: tzinfo, grace: timedelta) -> bool:
+    """Whether the held stay is under way: from check-in until its guest memory is erased (check-out + grace)."""
+    stay = current_stay(options, tz)
+    if stay is None or (stay.check_in is None and stay.check_out is None):
+        return False
+    started = stay.check_in is None or now >= stay.check_in
+    ended = stay.check_out is not None and now >= stay.check_out + grace
+    return started and not ended
 
 
 def _at(moment: date | datetime, at: time, tz: tzinfo) -> datetime:

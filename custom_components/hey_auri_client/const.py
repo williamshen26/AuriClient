@@ -37,6 +37,9 @@ CONF_BOOKING_CALENDAR_URL = "booking_calendar_url"
 CONF_BOOKING_CALENDAR_SOURCE = "booking_calendar_source"
 CONF_USUAL_CHECK_IN_TIME = "usual_check_in_time"
 CONF_USUAL_CHECK_OUT_TIME = "usual_check_out_time"
+# Not in the form: Auri asked the guests their name, {"stay": the stay key,
+# "name": their answer or ""}. It only counts for that stay (bookings/guest_name.py).
+CONF_GUEST_ASKED_NAME = "guest_asked_name"
 DEFAULT_USUAL_CHECK_IN_TIME = "15:00:00"
 DEFAULT_USUAL_CHECK_OUT_TIME = "11:00:00"
 DEFAULT_REQUEST_TIMEOUT = 30

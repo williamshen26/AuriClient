@@ -25,6 +25,8 @@ from ..const import (
     MEMORY_EXAM_CONVERSATION_PREFIX,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
 )
+from ..bookings.automatic_mode import stay_context
+from ..bookings.guest_name import async_mark_asked
 from ..cache import reset_processed_entities
 from ..exceptions import SaaSRequestError, ToolExecutionError
 from .helpers import build_context_snapshot, get_response_language
@@ -82,6 +84,8 @@ _FAST_PATH_ACTION_TOOL_NAMES = frozenset(
     }
 )
 _DEVICE_TOOL_NAMES = _FAST_PATH_ACTION_TOOL_NAMES | {"turn_on", "turn_off", "call_service"}
+# What a reply that asks something ends with (as Home Assistant's own agents check).
+_QUESTION_MARKS = ("?", ";", "？")
 
 
 def _turn_kind(user_input: conversation.ConversationInput, tool_names: list[str]) -> str:
@@ -229,6 +233,12 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         conversation_id = user_input.conversation_id or str(uuid.uuid4())
         reset_processed_entities(conversation_id)
         context = await build_context_snapshot(self.hass, user_input)
+        # For the dashboard's Automatic mode (the backend decides the mode from
+        # this), and for asking the guests their name.
+        stay = stay_context(self.hass, self.entry.options)
+        if user_input.context.user_id is None and user_input.device_id is None:
+            stay["ask_name"] = False  # an automation talking to Auri: nobody would answer
+        context["stay"] = stay
         speaker = await async_resolve_speaker(
             self.hass,
             user_id=user_input.context.user_id,
@@ -332,6 +342,9 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         intent_response = intent.IntentResponse(language=get_response_language(self.hass))
         intent_response.async_set_speech(response.content or "")
         self._log_turn(user_input, turn, reply=response.content, tool_names=tool_names)
+        # This reply was to ask the guests their name: that's once for the stay.
+        if stay["ask_name"] and turn.mode == "guest":
+            async_mark_asked(self.hass, self.entry)
 
         self.hass.bus.async_fire(
             EVENT_CONVERSATION_FINISHED,
@@ -343,7 +356,11 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             },
         )
 
+        # A reply that asks something: an ESPHome satellite (Voice PE) listens
+        # for the answer without the wake word, and Home Assistant sends it
+        # straight back to Auri in this conversation.
         return conversation.ConversationResult(
             response=intent_response,
             conversation_id=conversation_id,
+            continue_conversation=(response.content or "").strip().endswith(_QUESTION_MARKS),
         )

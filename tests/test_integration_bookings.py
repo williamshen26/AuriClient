@@ -6,6 +6,8 @@ test harness doesn't run on Windows). The calendar is served by aioclient_mock.
 from __future__ import annotations
 
 from datetime import timedelta
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,10 +17,13 @@ pytest.importorskip("ical")
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed  # noqa: E402
 
-from homeassistant.core import HomeAssistant  # noqa: E402
+from homeassistant.components import conversation  # noqa: E402
+from homeassistant.core import Context, HomeAssistant  # noqa: E402
 from homeassistant.data_entry_flow import FlowResultType  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
+from homeassistant.setup import async_setup_component  # noqa: E402
 
+from custom_components.hey_auri_client.bookings.automatic_mode import stay_context  # noqa: E402
 from custom_components.hey_auri_client.bookings.sync import BookingSync  # noqa: E402
 from custom_components.hey_auri_client.const import (  # noqa: E402
     CONF_BOOKING_CALENDAR_SOURCE,
@@ -27,15 +32,22 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     CONF_CHECK_IN,
     CONF_CHECK_OUT,
     CONF_CLIENT_ID,
+    CONF_GUEST_ASKED_NAME,
+    CONF_GUEST_COUNT,
     CONF_GUEST_NAME,
+    CONF_MEMORY_LOGIN_PEOPLE,
     CONF_NOTES,
     CONF_SHARED_SECRET,
     CONF_USUAL_CHECK_IN_TIME,
     DATA_BOOKINGS,
     DOMAIN,
 )
+from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
+from custom_components.hey_auri_client.conversation.custom_services.guest_services import GuestToolService  # noqa: E402
 from custom_components.hey_auri_client.conversation.services import async_setup_services  # noqa: E402
 from custom_components.hey_auri_client.entities.guest_stay import AuriGuestStaySensor  # noqa: E402
+from custom_components.hey_auri_client.memory.space import MemorySpace  # noqa: E402
+from custom_components.hey_auri_client.saas_client import SaaSTurnResponse  # noqa: E402
 
 URL = "https://www.airbnb.com/calendar/ical/41234.ics?s=0123456789abcdef"
 ENTRY_DATA = {CONF_CLIENT_ID: "client", CONF_SHARED_SECRET: "secret"}
@@ -213,6 +225,177 @@ async def test_with_a_link_the_guest_form_shows_the_calendars_booking(
     result = await _open_options_step(hass, entry, "guest")
     assert {CONF_BOOKING_ID, CONF_CHECK_IN, CONF_CHECK_OUT} <= _fields(result)
     assert "Booking calendar" in result["description_placeholders"]["calendar_booking"]
+
+
+class FakeClient:
+    """The backend, answering every turn and keeping what it was sent."""
+
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
+    async def send_user_turn(self, payload: dict) -> SaaSTurnResponse:
+        self.payloads.append(payload)
+        return SaaSTurnResponse(
+            response_type="final", conversation_id=payload["conversation_id"], content="OK", mode="guest", memory_allowed=False
+        )
+
+
+async def test_automatic_mode_hears_about_the_stay_and_the_household(
+    hass: HomeAssistant, booking_sync, aioclient_mock, freezer
+) -> None:
+    entry, sync = booking_sync
+    await async_setup_component(hass, "homeassistant", {})
+    serve(aioclient_mock, A, B)
+    await sync.async_sync()  # HMAAAAAAAA: Oct 20 15:00 to Oct 25 11:00
+    will = await hass.auth.async_create_user("Will")
+    mqtt = await hass.auth.async_create_user("mqtt")
+    hass.states.async_set("person.will", "not_home", {"friendly_name": "Will", "user_id": will.id})
+    hass.states.async_set("person.mqtt", "home", {"friendly_name": "mqtt", "user_id": mqtt.id})
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MEMORY_LOGIN_PEOPLE: {mqtt.id: "not_a_person"}})
+
+    def mode_report(stay: dict) -> tuple[bool, bool]:
+        return stay["active"], stay["household_home"]
+
+    # The MQTT login's person is always "home", but it isn't a household member.
+    assert mode_report(stay_context(hass, entry.options)) == (False, False)
+    hass.states.async_set("person.will", "home", {"friendly_name": "Will", "user_id": will.id})
+    assert mode_report(stay_context(hass, entry.options)) == (False, True)
+    freezer.move_to("2026-10-25 11:30:00-07:00")  # the guests may still be there
+    assert mode_report(stay_context(hass, entry.options)) == (True, True)
+
+    # The agent sends it with the request; the backend decides the mode from it.
+    agent = ThinOpenAIAgent(hass, entry)
+    agent.client = client = FakeClient()
+    await agent.async_process(
+        conversation.ConversationInput(
+            text="What's the Wi-Fi password?", context=Context(), conversation_id="s1", device_id="satellite-1",
+            satellite_id=None, language="en", agent_id="hey_auri_client",
+        )
+    )
+    assert mode_report(client.payloads[0]["context"]["stay"]) == (True, True)
+
+
+class ScriptedClient:
+    """The backend, answering turns and tool results from a script and keeping what it was sent."""
+
+    def __init__(self, *responses: SaaSTurnResponse) -> None:
+        self.responses = list(responses)
+        self.payloads: list[dict] = []
+
+    async def send_user_turn(self, payload: dict) -> SaaSTurnResponse:
+        self.payloads.append(payload)
+        return self.responses.pop(0)
+
+    send_tool_results = send_user_turn
+
+
+def reply(content: str, mode: str = "guest") -> SaaSTurnResponse:
+    return SaaSTurnResponse(response_type="final", conversation_id="s1", content=content, mode=mode)
+
+
+def save_name(name: str) -> SaaSTurnResponse:
+    call = {"id": "c1", "type": "function", "function": {"name": "save_guest_name", "arguments": json.dumps({"name": name})}}
+    return SaaSTurnResponse(response_type="tool_calls", conversation_id="s1", turn_id="t1", tool_calls=[call], mode="guest")
+
+
+async def say(agent: ThinOpenAIAgent, text: str, *, device_id: str | None = "satellite-1") -> conversation.ConversationResult:
+    return await agent.async_process(
+        conversation.ConversationInput(
+            text=text, context=Context(), conversation_id="s1", device_id=device_id,
+            satellite_id=None, language="en", agent_id="hey_auri_client",
+        )
+    )
+
+
+def name_request(hass: HomeAssistant, entry: MockConfigEntry) -> tuple[bool, bool]:
+    stay = stay_context(hass, entry.options)
+    return stay["can_save_name"], stay["ask_name"]
+
+
+async def test_auri_asks_the_guests_their_name_once_a_stay(
+    hass: HomeAssistant, booking_sync, aioclient_mock, freezer
+) -> None:
+    entry, sync = booking_sync
+    await async_setup_component(hass, "homeassistant", {})
+    serve(aioclient_mock, A, B)
+    await sync.async_sync()  # HMAAAAAAAA: Oct 20 15:00 to Oct 25 11:00, no guest name (Airbnb's never has one)
+    agent = ThinOpenAIAgent(hass, entry)
+    guest = GuestToolService(hass)
+    assert name_request(hass, entry) == (False, False)  # before check-in, there's nobody to ask
+
+    freezer.move_to("2026-10-21 09:00:00-07:00")
+    assert name_request(hass, entry) == (True, True)
+
+    # An automation talking to Auri isn't asked.
+    agent.client = client = ScriptedClient(reply("The pool closes at 9."))
+    await say(agent, "Tell the guests the pool closes at 9", device_id=None)
+    assert client.payloads[0]["context"]["stay"]["ask_name"] is False
+    assert CONF_GUEST_ASKED_NAME not in entry.options
+
+    # Nor in owner mode (the host at home, under Automatic): Auri asks another time.
+    agent.client = ScriptedClient(reply("Done. Anything else?", mode="owner"))
+    await say(agent, "Turn on the porch light")
+    assert CONF_GUEST_ASKED_NAME not in entry.options
+
+    # The first guest conversation: Auri asks, once, and the satellite keeps listening for the answer.
+    agent.client = client = ScriptedClient(reply("The Wi-Fi is HomeNet. By the way, may I ask your name?"))
+    result = await say(agent, "What's the Wi-Fi?")
+    assert client.payloads[0]["context"]["stay"]["ask_name"] is True
+    assert result.continue_conversation
+    assert entry.options[CONF_GUEST_ASKED_NAME] == {"stay": "booking:HMAAAAAAAA", "name": ""}
+    assert name_request(hass, entry) == (True, False)
+
+    # The answer is kept for the stay. It can still be corrected, so saving stays possible.
+    agent.client = client = ScriptedClient(save_name("  Sarah  "), reply("Nice to meet you, Sarah!"))
+    result = await say(agent, "I'm Sarah")
+    assert client.payloads[1]["tool_results"][0]["result"] == {"success": True, "guest_name": "Sarah"}
+    assert not result.continue_conversation
+    assert (await guest.get_guest_data({}))["guest_name"] == "Sarah"
+    assert AuriGuestStaySensor(entry, sync).extra_state_attributes["guest_name"] == "Sarah"
+    assert name_request(hass, entry) == (True, False)
+    assert "Sarah" in (await _open_options_step(hass, entry, "guest"))["description_placeholders"]["stated_name"]
+    assert "retry" in await guest.save_guest_name({"name": " 42 "})
+
+    # A name the host enters wins.
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_GUEST_NAME: "Sarah Lee"})
+    assert (await guest.get_guest_data({}))["guest_name"] == "Sarah Lee"
+    assert name_request(hass, entry) == (False, False)
+    assert "already entered" in (await guest.save_guest_name({"name": "Sam"}))["error"]
+    assert (await _open_options_step(hass, entry, "guest"))["description_placeholders"]["stated_name"] == ""
+
+    # The next stay starts without a name, and its guests are asked again.
+    freezer.move_to("2026-10-25 16:00:00-07:00")
+    await sync.async_sync()
+    assert entry.options[CONF_BOOKING_ID] == "HMBBBBBBBB" and CONF_GUEST_ASKED_NAME not in entry.options
+    assert (await guest.get_guest_data({}))["guest_name"] == "There is no guest name configured."
+    assert name_request(hass, entry) == (True, True)
+
+    # After check-out, nothing is saved.
+    freezer.move_to("2026-10-28 11:30:00-07:00")
+    assert name_request(hass, entry) == (False, False)
+    assert "No stay is under way" in (await guest.save_guest_name({"name": "Sam"}))["error"]
+
+
+async def test_the_guests_own_name_is_on_the_guest_memory_roster(hass: HomeAssistant, freezer) -> None:
+    await hass.config.async_set_time_zone("America/Los_Angeles")
+    freezer.move_to("2026-10-21 09:00:00-07:00")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=ENTRY_DATA,
+        options={
+            CONF_BOOKING_ID: "HMAAAAAAAA",
+            CONF_CHECK_IN: "2026-10-20 15:00:00",
+            CONF_CHECK_OUT: "2026-10-25 11:00:00",
+            CONF_GUEST_COUNT: 1,
+        },
+    )
+    entry.add_to_hass(hass)
+    space = MemorySpace(SimpleNamespace(hass=hass, entry=entry), mode="guest", schema="auri_guest_memory", spool_key="test")
+    assert space.household_roster() == [] and space._only_guest() is None
+
+    assert (await GuestToolService(hass).save_guest_name({"name": "Sarah"}))["success"]
+    assert space.household_roster() == [{"name": "Sarah", "kind": "person"}]
+    assert space._only_guest() == "Sarah"  # a party of one: whoever is speaking is Sarah
 
 
 async def test_checking_the_calendar_on_demand(hass: HomeAssistant, booking_sync, aioclient_mock) -> None:

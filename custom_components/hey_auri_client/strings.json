@@ -58,7 +58,7 @@
       },
       "guest": {
         "title": "Guest settings",
-        "description": "Booking details, and what Auri tells guests.{calendar_booking}",
+        "description": "Booking details, and what Auri tells guests.{calendar_booking}{stated_name}",
         "data": {
           "booking_id": "Booking ID",
           "guest_name": "Guest name",
@@ -80,6 +80,7 @@
           "reset_guest_memory": "Reset guest memory"
         },
         "data_description": {
+          "guest_name": "Leave it empty and Auri asks the guests their name once during the stay, and keeps their answer for that stay only. A name you enter here is always used instead.",
           "guest_phone_number": "Only US/Canada numbers are supported. Use +1 format (for example, +16045551234) or a 10-digit local number (for example, 6045551234).",
           "property_knowledge": "Where non-IoT items are and how to use them. Example: Extra towels are in the hallway linen closet on the second shelf. Used towels should be placed in the laundry basket in the bathroom before checkout.",
           "local_recommendations": "What is around the house. Example: For coffee, the host recommends Corner Bean Cafe on West 4th Avenue. It is a cozy local coffee shop that is good for morning coffee, pastries, and a quick breakfast before heading out. It is usually quieter before 9 AM.",

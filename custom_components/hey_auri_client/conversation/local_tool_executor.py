@@ -87,6 +87,7 @@ class LocalToolExecutor:
             "transfer_music": self.media_player.transfer_music,
             "get_forecasts": self.weather.get_forecasts,
             "get_guest_data": self.guest.get_guest_data,
+            "save_guest_name": self.guest.save_guest_name,
             "house_layout": self.guest.house_layout,
             "check_in_instruction": self.guest.check_in_instruction,
             "check_out_instruction": self.guest.check_out_instruction,

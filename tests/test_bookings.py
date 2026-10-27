@@ -19,6 +19,7 @@ from custom_components.hey_auri_client.bookings.schedule import (
     choose,
     current_stay,
     following,
+    stay_active,
     stay_state,
 )
 from custom_components.hey_auri_client.const import (
@@ -284,6 +285,20 @@ def test_the_booking_after_the_one_held():
     assert upcoming.booking.code == "HMBBBBBBBB"
     assert following([A], after_code="HMAAAAAAAA", after_check_in=None, now=now, tz=tz,
                      check_in_time=CHECK_IN, check_out_time=CHECK_OUT) is None
+
+
+def test_a_stay_is_under_way_from_check_in_until_its_guest_memory_is_erased():
+    tz = zone()
+    options = held("HMAAAAAAAA", "2026-10-20 15:00:00", "2026-10-25 11:00:00")
+    for now, active in (
+        ("2026-10-20 14:59", False),
+        ("2026-10-20 15:00", True),
+        ("2026-10-25 11:30", True),  # guests leaving a little late
+        ("2026-10-25 12:00", False),
+    ):
+        assert stay_active(options, at(tz, now), tz, GRACE) is active, now
+    assert stay_active({}, at(tz, "2026-10-22 09:00"), tz, GRACE) is False
+    assert stay_active({CONF_BOOKING_ID: "HMAAAAAAAA"}, at(tz, "2026-10-22 09:00"), tz, GRACE) is False
 
 
 def test_the_stay_state_and_when_it_changes():

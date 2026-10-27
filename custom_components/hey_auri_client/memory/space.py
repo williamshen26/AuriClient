@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.core import callback
 from homeassistant.util import dt as dt_util
 
-from ..const import CONF_GUEST_COUNT, CONF_GUEST_NAME
+from ..bookings.guest_name import guest_name
+from ..const import CONF_GUEST_COUNT
 from .api import MemoryApiError
 from .config import CONF_MEMORY_LOGIN_PEOPLE
 from .db import MemoryDbError
@@ -184,8 +185,8 @@ class MemorySpace:
         return Speaker(device_id=speaker.device_id, area=speaker.area)
 
     def _only_guest(self) -> str | None:
-        """The guest's name when Guest Settings name a party of one."""
-        name = " ".join(str(self.entry.options.get(CONF_GUEST_NAME) or "").split())[:60]
+        """The guest's name (the host's, or the one the guests gave) when Guest Settings name a party of one."""
+        name = guest_name(self.entry.options)
         try:
             count = int(self.entry.options.get(CONF_GUEST_COUNT) or 0)
         except (TypeError, ValueError):
@@ -248,7 +249,12 @@ class MemorySpace:
 
     def _roster_people(self) -> list[str]:
         if self.is_guest:
-            return [entity.name for entity in self._entities if entity.kind == "person"]
+            names = [entity.name for entity in self._entities if entity.kind == "person"]
+            # The guest's name, the host's or the one the guests gave, even before memory has anything about them.
+            name = guest_name(self.entry.options)
+            if name and name.lower() not in (known.lower() for known in names):
+                names.insert(0, name)
+            return names
         return [person["name"] for person in self.people()]
 
     def household_names(self) -> list[str]:

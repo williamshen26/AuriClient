@@ -18,6 +18,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .bookings.calendar import CalendarError, bookings_only_feed, fetch_calendar, parse_bookings, valid_calendar_url
+from .bookings.guest_name import host_guest_name, stated_guest_name
 from .bookings.schedule import current_stay
 from .const import (
     API_ENDPOINT,
@@ -487,9 +488,18 @@ class OptionsFlow(config_entries.OptionsFlow):
                 "calendar_booking": self._calendar_booking_text(
                     calendar_link,
                     without_link="\n\nTo fill in bookings by themselves, add your calendar's link under **Booking calendar**.",
-                )
+                ),
+                "stated_name": self._stated_name_text(),
             },
         )
+
+    def _stated_name_text(self) -> str:
+        """The name this stay's guests gave Auri, for the Guest form's description (while the host's is empty)."""
+        options = self.config_entry.options
+        stated = stated_guest_name(options)
+        if not stated or host_guest_name(options):
+            return ""
+        return f"\n\n**The guests told Auri their name:** {stated}. To use another, type it in Guest name."
 
     async def async_step_booking_calendar(
         self, user_input: dict[str, Any] | None = None

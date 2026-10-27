@@ -16,6 +16,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.util import dt as dt_util
 
+from ..bookings.guest_name import guest_name
 from ..bookings.schedule import current_stay, stay_state
 from ..bookings.sync import BookingSync
 
@@ -78,5 +79,7 @@ class AuriGuestStaySensor(SensorEntity):
             "booking_id": (stay.booking_id or None) if stay else None,
             "check_in": stay.check_in.isoformat() if stay and stay.check_in else None,
             "check_out": stay.check_out.isoformat() if stay and stay.check_out else None,
+            # The host's, else the one the guests gave Auri.
+            "guest_name": guest_name(self._entry.options) or None,
             **self._bookings.status,
         }
