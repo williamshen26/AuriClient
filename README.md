@@ -270,11 +270,58 @@ To check how well memory works, create `hey_auri_memory_exam.yaml` in your confi
 ```yaml
 - q: What day is Mia's piano lesson?
   expected: Thursday.
+  memory: Mia piano
 - q: Where are we going on vacation this summer?
   expected: Portugal, in July.
 ```
 
-Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked in a new conversation, and the answers are graded. The result has a score from 0 to 1 and the grade for each question. Exam conversations aren't saved to memory. The questions run like real requests, so ask questions, not commands.
+Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked in a new conversation, and the answers are graded. The result has a score from 0 to 1 and the grade for each question. Exam conversations aren't saved to memory. The questions run like real requests, so ask questions, not commands. They're asked without anyone signed in, as on a voice satellite.
+
+**Where an answer's memory came from.** `memory` is optional: a few words from the memory that answers the question. A memory matches when it has every word, and a word also matches its longer forms, so "lesson" matches "lessons". Each question then shows where that memory reached Auri, in `memory_found_in`:
+- `profile`: the short profile of important facts Auri gets with every message;
+- `notes`: the notes matched to the question;
+- `recall_memory`: Auri had to search for it;
+- `none`: it never reached Auri.
+
+`memory_rank` is its place in that list (1 is first). The result's `memory` section adds them up, over the questions that name a memory:
+- **`found`:** the share whose memory reached Auri.
+- **`mrr`:** how high it came, from 0 to 1. It's the average of 1 divided by its place, counting 0 when it wasn't found.
+- **`not_correct`:** the answers that weren't correct.
+  - `memory_shown`: Auri had the memory and still got it wrong.
+  - `memory_not_shown`: the memory never reached Auri, so the search is what needs work.
+- **`by_case`:** the same numbers for each `case`, an optional label you give questions, such as `paraphrase`.
+
+**A test memory.** To test with memories you choose instead of your household's, list a household and memories in the file. Auri is asked about those, in a test memory built when the exam starts and deleted when it ends.
+- **Your real memory is safe:** the exam's questions never read or change it, even one that makes Auri remember or forget something.
+- **Runs compare:** the memories are the same every time.
+
+```yaml
+household:
+  people: [Will, Mia]
+  pets: [Biscuit]
+memories:
+  - text: Mia has piano every Thursday at 16:00.
+    about: [Mia]
+    importance: 4
+  - text: Will has a dentist appointment at 10:00.
+    about: [Will]
+    kind: commitment
+    due_in_days: 3
+questions:
+  - q: What day is Mia's piano lesson?
+    expected: Thursday.
+    memory: Mia piano
+```
+
+Each memory has `text`, and optionally:
+- **`about`:** who or what it's about. Names that aren't under `household` are topics, such as a school or a place.
+- **`kind`:** `fact` (the default), `preference`, `decision`, `commitment` or `digest` (the summary of a day).
+- **`importance`:** from 1 to 5, 3 by default.
+- **`private`:** `true` for a private memory. Private memories aren't in the notes for someone who isn't signed in, unless **Share memories within the household** is on.
+- **`days_ago`:** when it was said, 0 by default.
+- **`due_in_days`:** when a commitment is due.
+
+A test memory holds up to 300 memories. To keep more than one exam file, give the action's `file` option a file name from the config folder, for example `hey_auri_memory_benchmark.yaml`.
 
 ### Old saved preferences
 
@@ -328,7 +375,7 @@ actions:
 | `hey_auri_client.assign_mac` | Adds MAC addresses to a media player for Wake-on-LAN. Use it when a device has more than one network interface and Home Assistant only knows one of them. |
 | `hey_auri_client.sync_bookings` | Reads the booking calendar now, rather than waiting for the next 30-minute check, and returns what it found: the number of bookings, the next booking, and whether the Guest options changed. |
 | `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. |
-| `hey_auri_client.run_memory_exam` | Asks the questions in `hey_auri_memory_exam.yaml` and returns the score (see [Testing what Auri remembers](#testing-what-auri-remembers)). |
+| `hey_auri_client.run_memory_exam` | Asks the questions in `hey_auri_memory_exam.yaml` (or the file named in `file`) and returns the score and where each answer's memory came from (see [Testing what Auri remembers](#testing-what-auri-remembers)). |
 
 ## Events
 

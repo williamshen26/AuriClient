@@ -93,8 +93,17 @@ run_memory_exam:
   name: Run memory exam
   description: >-
     Ask Auri the questions in hey_auri_memory_exam.yaml (config folder) and
-    grade the answers against the expected ones. Write questions, not
-    commands: they run like real requests.
+    grade the answers against the expected ones. A question's memory (words
+    from the memory that answers it) also shows whether that memory reached
+    Auri. A file that lists its own memories is asked against them, in a test
+    memory deleted afterwards, instead of your real memory. Write questions,
+    not commands: they run like real requests.
+  fields:
+    file:
+      required: false
+      example: hey_auri_memory_benchmark.yaml
+      selector:
+        text:
 
 assign_mac:
   name: Assign media player MAC

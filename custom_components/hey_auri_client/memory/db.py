@@ -15,6 +15,8 @@ from .config import MemoryConfig
 MEMORY_SCHEMA = "auri_memory"
 # Guest memory: the current home-share stay only, dropped as a whole when it's reset.
 GUEST_MEMORY_SCHEMA = "auri_guest_memory"
+# The memory exam's test memory: an exam file's own memories, dropped when the exam ends.
+EXAM_MEMORY_SCHEMA = "auri_exam_memory"
 # Stands for the schema in SQL text; each store and migration run fills in its own.
 SCHEMA_TOKEN = "__memory_schema__"
 MIN_SERVER_VERSION_NUM = 130000  # PostgreSQL 13

@@ -170,7 +170,7 @@ def reset_schema(
     app_version: str,
     seed: Callable[[Any], None] | None = None,
 ) -> int:
-    """Drop a guest schema with everything in it and create it again, empty.
+    """Drop a guest (or exam) schema with everything in it and create it again, empty.
 
     One transaction: the schema is either fully replaced (and seeded) or left
     as it was. The owner's schema is never dropped.
@@ -189,7 +189,7 @@ def reset_schema(
 
 
 def drop_schema(engine, *, schema: str) -> None:
-    """Remove a guest schema with everything in it (guest memory switched off). Never the owner's."""
+    """Remove a guest or exam schema with everything in it (guest memory switched off, an exam over). Never the owner's."""
     if schema == MEMORY_SCHEMA:
         raise ValueError("the owner's memory schema is never dropped")
     from sqlalchemy import text  # pylint: disable=import-outside-toplevel

@@ -235,6 +235,7 @@ SERVICE_SYNC_BOOKINGS = "sync_bookings"
 ATTR_DATE = "date"
 ATTR_FORCE = "force"
 ATTR_DAYS_BACK = "days_back"
+ATTR_FILE = "file"
 EVENT_MEMORY_RUN_FINISHED = f"{DOMAIN}.memory_run_finished"
 # Exam questions live here in the config folder; their conversations are never archived.
 MEMORY_EXAM_FILE = "hey_auri_memory_exam.yaml"

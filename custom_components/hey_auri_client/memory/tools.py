@@ -2,7 +2,8 @@
 
 Identity and mode come from the injected _turn (TurnMeta), never from tool
 arguments: each call runs against the memory space of the turn's mode only
-(the owner's, or the guests' in guest mode). The query/statement embedding
+(the owner's, or the guests' in guest mode; a memory exam's own turns use
+its test memory while it has one). The query/statement embedding
 arrives with the tool call (_memory_embedding) because this client has no
 embedding key.
 """
@@ -107,7 +108,7 @@ class MemoryToolService:
                 "error": "memory_unavailable",
                 "say": "Long-term memory isn't available right now.",
             }
-        space = self._runtime.space_for(turn.mode)
+        space = self._runtime.space_for_turn(turn.mode, turn.conversation_id)
         if space.closed:
             return None, None, {
                 "success": False,

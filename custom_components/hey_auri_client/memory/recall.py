@@ -405,3 +405,34 @@ class ShownNotesCache:
 
     def clear(self) -> None:
         self._entries.clear()
+
+
+class RecallTrace:
+    """Per memory exam conversation, the lists of memories Auri was shown, in the order it saw them.
+
+    Each list is (source, rows): "profile" and "notes" from the memory block,
+    then "recall_memory" once per tool call. The exam reads it to tell where
+    the memory behind each answer reached Auri.
+    """
+
+    def __init__(self, max_conversations: int = 60) -> None:
+        self._max = max_conversations
+        self._entries: OrderedDict[str, list[tuple[str, list[RecallRow]]]] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def add(self, conversation_id: str | None, source: str, rows: Iterable[RecallRow]) -> None:
+        shown = list(rows)
+        if not conversation_id or not shown:
+            return
+        self._entries.setdefault(conversation_id, []).append((source, shown))
+        self._entries.move_to_end(conversation_id)
+        while len(self._entries) > self._max:
+            self._entries.popitem(last=False)
+
+    def pop(self, conversation_id: str) -> list[tuple[str, list[RecallRow]]]:
+        return self._entries.pop(conversation_id, [])
+
+    def clear(self) -> None:
+        self._entries.clear()

@@ -13,6 +13,7 @@ from ..const import (
     ATTR_DAYS_BACK,
     ATTR_DURATION,
     ATTR_ENTITY_ID,
+    ATTR_FILE,
     ATTR_FORCE,
     ATTR_MAC,
     ATTR_SATELLITE_SPEAKER,
@@ -89,7 +90,12 @@ RUN_MEMORY_JOB_SCHEMA = vol.Schema(
         vol.Optional(ATTR_DAYS_BACK, default=7): vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
     }
 )
-RUN_MEMORY_EXAM_SCHEMA = vol.Schema({})
+RUN_MEMORY_EXAM_SCHEMA = vol.Schema(
+    {
+        # A file in the config folder, by name only (no folders).
+        vol.Optional(ATTR_FILE): vol.All(cv.string, vol.Match(r"^\w[\w.-]*\.ya?ml$")),
+    }
+)
 SYNC_BOOKINGS_SCHEMA = vol.Schema({})
 
 
@@ -186,9 +192,8 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
         return result
 
     async def _handle_run_memory_exam(call: ServiceCall) -> dict[str, object]:
-        del call
         try:
-            return await _memory_runtime(hass).async_run_exam()
+            return await _memory_runtime(hass).async_run_exam(call.data.get(ATTR_FILE))
         except MemoryApiError as err:
             raise HomeAssistantError(f"Grading failed: {err}") from err
 

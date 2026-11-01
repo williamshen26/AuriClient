@@ -3,7 +3,8 @@
 Owns the database connection and its health, and two memory spaces: the
 household's (owner mode, schema auri_memory) and the current guests' (guest
 mode, schema auri_guest_memory, only when Guest Settings switch it on). Each
-turn uses the space for its mode and no other. Also imports legacy
+turn uses the space for its mode and no other, except a memory exam's own
+turns while the exam brings a test memory (exam_memory.py). Also imports legacy
 preferences, keeps guest memory in step with Guest Settings, and schedules
 the nightly job. Nothing here may slow a conversation: database work runs in
 executor threads with tight timeouts, and failures degrade to "no memory
@@ -24,6 +25,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
@@ -34,11 +36,19 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from ..const import DOMAIN, LEGACY_USER_DATA_DIR
+from ..const import DOMAIN, LEGACY_USER_DATA_DIR, MEMORY_EXAM_CONVERSATION_PREFIX
 from ..saas_client import SaaSClient
 from .api import EMBEDDING_DIMENSIONS, MemoryApi, embedding_tag
 from .config import MemoryConfig
-from .db import GUEST_MEMORY_SCHEMA, MEMORY_SCHEMA, MemoryDbError, build_engine, detect_vector_extension
+from .db import (
+    EXAM_MEMORY_SCHEMA,
+    GUEST_MEMORY_SCHEMA,
+    MEMORY_SCHEMA,
+    MemoryDbError,
+    build_engine,
+    detect_vector_extension,
+)
+from .exam_memory import MAX_EXAM_MEMORIES, ExamMemory, ExamMemorySpace, exam_seeds
 from .guest import STAY_META_KEY, guest_erase_time, guest_memory_enabled, seed_memories, stay_marker, stay_over
 from .identity import Speaker, household_persons
 from .legacy import LegacyImportPlan, load_legacy_files, plan_legacy_import
@@ -93,6 +103,8 @@ class MemoryRuntime:
         self.pgvector_version: str | None = None
         self.owner = MemorySpace(self, mode="owner", schema=MEMORY_SCHEMA, spool_key=_OWNER_SPOOL_KEY)
         self.guest = MemorySpace(self, mode="guest", schema=GUEST_MEMORY_SCHEMA, spool_key=_GUEST_SPOOL_KEY)
+        # A memory exam's test memory, only while that exam runs.
+        self.exam: MemorySpace | None = None
 
         self._engine = None
         self._iterative_scan = False
@@ -149,6 +161,12 @@ class MemoryRuntime:
         """The space a turn in this mode uses (owner unless the account is in guest mode)."""
         return self.guest if mode == "guest" else self.owner
 
+    def space_for_turn(self, mode: str | None, conversation_id: str | None) -> MemorySpace:
+        """space_for(mode), except that a memory exam's own turns use its test memory while there is one."""
+        if self.exam is not None and conversation_id and conversation_id.startswith(MEMORY_EXAM_CONVERSATION_PREFIX):
+            return self.exam
+        return self.space_for(mode)
+
     async def async_start(self) -> None:
         """Load saved state, then connect in the background if memory is set up."""
         saved = await self._state_store.async_load() or {}
@@ -187,6 +205,10 @@ class MemoryRuntime:
         engine, self._engine = self._engine, None
         for space in self._spaces():
             space.detach()
+        if self.exam is not None:
+            # A test memory left behind is dropped after the next connect.
+            self.exam.detach()
+            self.exam = None
         self._guest_known_off = False
         if engine is not None:
             await self.hass.async_add_executor_job(engine.dispose)
@@ -251,6 +273,9 @@ class MemoryRuntime:
         return engine, store, schema_version, pgvector_version
 
     async def _async_after_connect(self) -> None:
+        if self.exam is None:
+            # An exam that didn't finish (Home Assistant stopped) can leave its test memory.
+            await self._async_drop_exam_memory()
         await self.async_sync_guest_memory()
         if self.guest.enabled:
             await self.guest.turn_logger.async_load_spool()
@@ -339,7 +364,7 @@ class MemoryRuntime:
 
         The backend decides the mode again; a block for the wrong space is dropped there.
         """
-        space = self.space_for(self.last_known_mode)
+        space = self.space_for_turn(self.last_known_mode, conversation_id)
         if self.memory_allowed is False:
             return {"v": 1, "status": space.context_status, "scope": space.mode}
         return await space.async_turn_context(text, speaker, conversation_id)
@@ -509,10 +534,57 @@ class MemoryRuntime:
             return await job.async_run_day(day, force=force)
         return await job.async_catch_up(days_back=days_back)
 
-    async def async_run_exam(self) -> dict[str, Any]:
+    async def async_run_exam(self, file_name: str | None = None) -> dict[str, Any]:
         from .exam import async_run_exam  # pylint: disable=import-outside-toplevel
 
-        return await async_run_exam(self)
+        return await async_run_exam(self, file_name)
+
+    # ── the memory exam's test memory ───────────────────────────────────────
+
+    async def async_open_exam_memory(self, memory: ExamMemory) -> MemorySpace:
+        """Build an exam file's memories into the test memory (replacing any left over) and use it for the exam's turns."""
+        engine = self._engine
+        if engine is None or not self.enabled:
+            raise HomeAssistantError("Memory isn't set up, or its database can't be reached")
+        seeds = exam_seeds(memory, now=dt_util.now())
+
+        def _seed(conn) -> None:
+            store = MemoryStore(engine, schema=EXAM_MEMORY_SCHEMA)
+            # Everyone in the household, even someone no memory is about.
+            store.resolve_entities([*((name, "person") for name in memory.people), *((name, "pet") for name in memory.pets)], conn)
+            for new, subjects in seeds:
+                new.about_entity_ids = store.resolve_entities(subjects, conn)
+                store.insert_memory(new, conn)
+
+        await self.hass.async_add_executor_job(
+            lambda: reset_schema(engine, schema=EXAM_MEMORY_SCHEMA, app_version=self.app_version, seed=_seed)
+        )
+        space = ExamMemorySpace(self, memory.people)
+        store = MemoryStore(engine, schema=EXAM_MEMORY_SCHEMA, iterative_scan=self._iterative_scan)
+        await self.hass.async_add_executor_job(space.attach_blocking, store)
+        await space.async_refresh_entities(sync_persons=True)
+        self.exam = space
+        # Searching by meaning (recall_memory) needs every memory embedded.
+        await space.async_backfill_embeddings(max_batches=MAX_EXAM_MEMORIES // 100 + 1)
+        if await self.hass.async_add_executor_job(lambda: store.missing_embeddings(self.embedding_tag, limit=1)):
+            raise HomeAssistantError("Couldn't prepare the test memory's search (embeddings); try again in a moment")
+        return space
+
+    async def async_close_exam_memory(self) -> None:
+        """Stop using the test memory and drop it."""
+        space, self.exam = self.exam, None
+        if space is not None:
+            space.detach()
+        await self._async_drop_exam_memory()
+
+    async def _async_drop_exam_memory(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        try:
+            await self.hass.async_add_executor_job(lambda: drop_schema(engine, schema=EXAM_MEMORY_SCHEMA))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Couldn't remove the memory exam's test memory (it's removed after the next restart): %s", err)
 
     # ── guest memory ────────────────────────────────────────────────────────
 

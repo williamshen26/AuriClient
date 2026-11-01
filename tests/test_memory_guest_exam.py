@@ -1,7 +1,7 @@
-"""Guest memory (Guest Settings, seeds, the guest schema) and the memory exam's question file and scoring."""
+"""Guest memory (Guest Settings, seeds, the guest schema), and the memory exam's file, scoring and test memory."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import zoneinfo
 
 import pytest
@@ -10,9 +10,20 @@ pytest.importorskip("homeassistant")
 
 from homeassistant.util import dt as dt_util  # noqa: E402
 
+import voluptuous as vol  # noqa: E402
+
+from custom_components.hey_auri_client.conversation.services import RUN_MEMORY_EXAM_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory import guest  # noqa: E402
 from custom_components.hey_auri_client.memory.db import GUEST_MEMORY_SCHEMA, MEMORY_SCHEMA  # noqa: E402
-from custom_components.hey_auri_client.memory.exam import parse_exam, score  # noqa: E402
+from custom_components.hey_auri_client.memory.exam import (  # noqa: E402
+    find_memory,
+    memory_words,
+    parse_exam,
+    recall_summary,
+    score,
+)
+from custom_components.hey_auri_client.memory.exam_memory import SeedMemory, exam_seeds, parse_exam_memory  # noqa: E402
+from custom_components.hey_auri_client.memory.recall import RecallRow  # noqa: E402
 from custom_components.hey_auri_client.memory.migrations import apply_migrations, drop_schema, reset_schema  # noqa: E402
 from custom_components.hey_auri_client.memory.store import GUEST_SCOPE, MemoryStore, NewMemory  # noqa: E402
 
@@ -147,3 +158,124 @@ def test_exam_file_parsing_and_score():
 
     grades = [{"grade": g} for g in ("correct", "partial", "wrong", "missed")]
     assert score(grades) == (0.375, {"correct": 1, "partial": 1, "wrong": 1, "missed": 1})
+
+
+def test_exam_questions_can_name_their_memory():
+    questions = parse_exam([
+        {"q": "When is piano?", "expected": "Thursday", "memory": "  Mia   piano ", "case": "direct"},
+        {"q": "Anything else?", "expected": "No", "memory": "?!", "case": " "},  # no words: nothing to match
+    ])
+    assert questions == [
+        {"q": "When is piano?", "expected": "Thursday", "memory": "Mia piano", "case": "direct"},
+        {"q": "Anything else?", "expected": "No"},
+    ]
+    with pytest.raises(ValueError, match="benchmark.yaml"):
+        parse_exam({"nothing": True}, "benchmark.yaml")
+
+
+def test_the_exam_file_is_named_inside_the_config_folder():
+    assert RUN_MEMORY_EXAM_SCHEMA({}) == {}
+    assert RUN_MEMORY_EXAM_SCHEMA({"file": "hey_auri_memory_benchmark.yaml"}) == {"file": "hey_auri_memory_benchmark.yaml"}
+    for outside in ("../secrets.yaml", "exams/benchmark.yaml", "/config/benchmark.yaml", ".benchmark.yaml", "benchmark.txt"):
+        with pytest.raises(vol.Invalid):
+            RUN_MEMORY_EXAM_SCHEMA({"file": outside})
+
+
+def _row(memory_id: int, content: str) -> RecallRow:
+    return RecallRow(id=memory_id, kind="fact", content=content, at=None)
+
+
+def test_where_an_answers_memory_reached_auri():
+    lesson = _row(3, "Mia has PIANO lessons, every Thursday.")
+    trace = [
+        ("profile", [_row(1, "The recycling goes out on Tuesdays.")]),
+        ("notes", [_row(2, "Will had piano lessons in 2024."), lesson]),
+        ("recall_memory", [lesson]),
+    ]
+    assert memory_words("Mia's piano, 16:00") == ["mia's", "piano", "16", "00"]
+    assert find_memory(memory_words("mia lesson thursday"), trace) == ("notes", 2)  # the first place it was shown
+    assert find_memory(memory_words("Tuesday"), trace) == ("profile", 1)  # a word matches its longer forms
+    assert find_memory(memory_words("Mia violin"), trace) is None  # every word is needed
+    assert find_memory(memory_words("ano"), trace) is None  # words match from their start
+    assert find_memory([], trace) is None
+
+
+def test_recall_and_mrr():
+    def graded(grade: str, found_in: str, rank: int | None = None, case: str | None = None) -> dict:
+        return {"grade": grade, "memory_found_in": found_in, "memory_rank": rank, **({"case": case} if case else {})}
+
+    grades = [
+        graded("correct", "notes", 1, "direct"),
+        graded("wrong", "profile", 2, "direct"),
+        graded("partial", "none", case="paraphrase"),
+        graded("correct", "recall_memory", 4, "paraphrase"),
+        {"grade": "wrong"},  # names no memory: left out
+    ]
+    assert recall_summary(grades) == {
+        "questions": 4,
+        "found": 0.75,
+        "mrr": 0.4375,  # (1 + 1/2 + 0 + 1/4) / 4
+        "found_in": {"profile": 1, "notes": 1, "recall_memory": 1, "none": 1},
+        "not_correct": {"memory_shown": 1, "memory_not_shown": 1},
+        "by_case": {
+            "direct": {"questions": 2, "found": 1.0, "mrr": 0.75},
+            "paraphrase": {"questions": 2, "found": 0.5, "mrr": 0.125},
+        },
+    }
+    assert "by_case" not in recall_summary([graded("correct", "notes", 1)])
+    assert recall_summary([{"grade": "correct"}]) is None
+
+
+def test_an_exam_file_can_bring_its_own_memories():
+    assert parse_exam_memory([{"q": "a", "expected": "b"}], "exam.yaml") is None
+    assert parse_exam_memory({"questions": [{"q": "a", "expected": "b"}]}, "exam.yaml") is None
+    memory = parse_exam_memory(
+        {
+            "household": {"people": ["Will", " Mia ", "will"], "pets": "Biscuit"},
+            "memories": [
+                "The recycling goes out on Tuesdays.",
+                {"text": "Mia has piano every Thursday.", "about": ["Mia", "Lincoln Elementary"], "importance": 4},
+                {"text": "Dentist at 10.", "about": "Will", "kind": "Commitment", "due_in_days": "3", "private": True,
+                 "days_ago": 2},
+            ],
+        },
+        "exam.yaml",
+    )
+    assert (memory.people, memory.pets) == (["Will", "Mia"], ["Biscuit"])
+    assert memory.memories == [
+        SeedMemory(text="The recycling goes out on Tuesdays."),
+        SeedMemory(text="Mia has piano every Thursday.", about=["Mia", "Lincoln Elementary"], importance=4),
+        SeedMemory(text="Dentist at 10.", about=["Will"], kind="commitment", private=True, days_ago=2, due_in_days=3),
+    ]
+    for bad, message in [
+        ({"memories": []}, "memories must be a list"),
+        ({"memories": [{"about": ["Mia"]}]}, "exam.yaml: memory 1 has no text"),
+        ({"memories": ["a", {"text": "b", "kind": "secret"}]}, "memory 2 has kind 'secret'"),
+        ({"memories": [{"text": "b", "importance": 9}]}, "importance must be from 1 to 5"),
+        ({"memories": [{"text": "b", "days_ago": 1.5}]}, "days_ago must be a whole number"),
+        ({"memories": [{"text": "b", "private": "yes"}]}, "private must be true or false"),
+        ({"memories": ["a"] * 301}, "at most 300 memories"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            parse_exam_memory(bad, "exam.yaml")
+
+
+def test_the_test_memory_counts_its_dates_back_from_today():
+    memory = parse_exam_memory(
+        {
+            "household": {"people": ["Will"], "pets": ["Biscuit"]},
+            "memories": [
+                {"text": "Biscuit can't eat chicken.", "about": ["biscuit", "Chicken"], "importance": 5},
+                {"text": "The family went to the beach.", "kind": "digest", "days_ago": 1},
+                {"text": "Will has the dentist at 10:00.", "about": ["Will"], "kind": "commitment", "due_in_days": 3},
+            ],
+        },
+        "exam.yaml",
+    )
+    now = datetime(2026, 10, 31, 9, 30, tzinfo=VANCOUVER)
+    (pet, pet_subjects), (digest, digest_subjects), (dentist, dentist_subjects) = exam_seeds(memory, now=now)
+    assert pet_subjects == [("biscuit", "pet"), ("Chicken", "topic")] and pet.importance == 5
+    assert (pet.source, pet.occurred_at, pet.sensitivity, pet.source_ref) == ("import", now, "normal", None)
+    assert digest_subjects == [] and digest.source_ref == date(2026, 10, 30)
+    assert digest.occurred_at == now - timedelta(days=1)
+    assert dentist_subjects == [("Will", "person")] and dentist.due_at == datetime(2026, 11, 3, tzinfo=VANCOUVER)

@@ -1,10 +1,11 @@
-"""Memory wired into Home Assistant: options flow, agent turns, tools and turn logging.
+"""Memory wired into Home Assistant: options flow, agent turns, tools, turn logging and the memory exam.
 
 Uses pytest-homeassistant-custom-component (Linux only: Home Assistant's
 test harness doesn't run on Windows) and the test PostgreSQL server.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import timedelta
 import json
 import math
@@ -21,6 +22,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from homeassistant.components import conversation  # noqa: E402
 from homeassistant.core import Context, HomeAssistant  # noqa: E402
 from homeassistant.data_entry_flow import FlowResultType  # noqa: E402
+from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
 from homeassistant.util import dt as dt_util  # noqa: E402
 
@@ -38,9 +40,11 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     CONF_MEMORY_VAULT_PATH,
     CONF_SHARED_SECRET,
     DOMAIN,
+    MEMORY_EXAM_FILE,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
-from custom_components.hey_auri_client.memory import turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory import exam, turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory.db import EXAM_MEMORY_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory.runtime import MemoryRuntime, MemoryState  # noqa: E402
 from custom_components.hey_auri_client.memory.store import NewMemory  # noqa: E402
 from custom_components.hey_auri_client.saas_client import SaaSTurnResponse  # noqa: E402
@@ -794,3 +798,147 @@ async def test_exam_and_automation_turns(hass: HomeAssistant, memory_setup) -> N
     archived = _db(runtime, "SELECT conversation_id, kind FROM auri_memory.chat_messages WHERE role = 'user'")
     # The exam isn't archived; an automation's turn is, marked so the nightly job skips it.
     assert archived == [{"conversation_id": "a1", "kind": "automatic"}]
+
+
+# ── the memory exam ─────────────────────────────────────────────────────────
+
+
+@contextmanager
+def _exam_through(agent: ThinOpenAIAgent, config_dir, converse=None):
+    """Ask the exam's questions through this agent (or converse), reading its files from config_dir."""
+
+    async def through_agent(_hass, text, conversation_id, _context, **_kwargs):
+        return await agent.async_process(_input(text, conversation_id))
+
+    with (
+        patch.object(agent.hass.config, "config_dir", str(config_dir)),
+        patch.object(exam.conversation, "async_converse", converse or through_agent),
+    ):
+        yield
+
+
+def _graded(*grades: str) -> AsyncMock:
+    """The backend's /memory/grade, grading the answers in turn."""
+    return AsyncMock(return_value={"grades": [{"idx": idx, "grade": grade} for idx, grade in enumerate(grades)], "usage": {}})
+
+
+def _schema_exists(runtime: MemoryRuntime, schema: str) -> bool:
+    return bool(_db(runtime, f"SELECT count(*) AS n FROM pg_namespace WHERE nspname = '{schema}'")[0]["n"])
+
+
+async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeAssistant, memory_setup, tmp_path) -> None:
+    agent, runtime, client, _will = memory_setup
+    store = runtime.store
+
+    def seed() -> None:
+        will, mia = store.resolve_entities([("Will", "person"), ("Mia", "person")])
+        store.insert_memory(NewMemory(kind="fact", content="Mia has piano lessons every Thursday at 16:00.", source="chat",
+                                      importance=4, about_entity_ids=[mia]))
+        store.insert_memory(NewMemory(kind="fact", content="Will wants to buy a Volvo XC40.", source="chat",
+                                      about_entity_ids=[will]))
+
+    await hass.async_add_executor_job(seed)
+    await runtime.owner.async_refresh_entities()
+    await runtime.owner.async_backfill_embeddings()
+    (tmp_path / MEMORY_EXAM_FILE).write_text(
+        "- q: What day is Mia's piano lesson?\n  expected: Thursday.\n  memory: Mia piano Thursday\n  case: direct\n"
+        "- q: Which car is Will thinking of getting?\n  expected: A Volvo XC40.\n  memory: Volvo\n"
+        "- q: What's the Wi-Fi password?\n  expected: HomeNet.\n  memory: wifi password\n"
+        "- q: Is it raining?\n  expected: No.\n",
+        encoding="utf-8",
+    )
+    query = "car Will is thinking of getting"
+    client.responses = [
+        final("x", "Thursday."),
+        # The car isn't in the notes, so Auri looks it up.
+        tool_calls("x", [tool_call("recall_memory", {"query": query, "about": ["Will"]}, embed=query)]),
+        final("x", "A Volvo XC40."),
+        final("x", "I don't know it."),
+        final("x", "No."),
+    ]
+
+    with _exam_through(agent, tmp_path), patch.object(runtime.api, "grade", _graded("correct", "correct", "wrong", "correct")) as grade:
+        result = await runtime.async_run_exam()
+
+    found = [(item.get("memory_found_in"), item.get("memory_rank")) for item in result["grades"]]
+    assert found == [("notes", 1), ("recall_memory", 1), ("none", None), (None, None)]
+    assert result["memory"] == {
+        "questions": 3,
+        "found": 0.6667,
+        "mrr": 0.6667,
+        "found_in": {"profile": 0, "notes": 1, "recall_memory": 1, "none": 1},
+        "not_correct": {"memory_shown": 0, "memory_not_shown": 1},
+        "by_case": {"direct": {"questions": 1, "found": 1.0, "mrr": 1.0}},
+    }
+    assert "file" not in result and "test_memory" not in result
+    # Only the questions and answers are sent to be graded.
+    assert {key for item in grade.call_args.args[0] for key in item} == {"q", "expected", "answer"}
+    assert len(runtime.owner.recall_trace) == 0
+
+    # Other conversations are never traced.
+    client.responses = [final("n1", "Thursday.")]
+    await agent.async_process(_input("What day is Mia's piano lesson?", "n1"))
+    assert len(runtime.owner.recall_trace) == 0
+
+
+async def test_an_exam_can_bring_its_own_memories(hass: HomeAssistant, memory_setup, tmp_path) -> None:
+    agent, runtime, client, _will = memory_setup
+    store = runtime.store
+    # The household's real memory answers the same question differently, and the exam must never see it.
+    [mia] = await hass.async_add_executor_job(store.resolve_entities, [("Mia", "person")])
+    await hass.async_add_executor_job(
+        store.insert_memory,
+        NewMemory(kind="fact", content="Mia has piano every Tuesday.", source="chat", importance=4, about_entity_ids=[mia]),
+    )
+    await runtime.owner.async_refresh_entities()
+    real_memories = _db(runtime, "SELECT id, content, status FROM auri_memory.mem_memories ORDER BY id")
+    (tmp_path / "benchmark.yaml").write_text(
+        "household:\n  people: [Ana, Mia]\n  pets: [Pip]\n"
+        "memories:\n"
+        "  - text: Mia has piano every Thursday at 16:00.\n    about: [Mia]\n    importance: 4\n"
+        "  - text: Pip is allergic to chicken.\n    about: [Pip]\n"
+        "questions:\n"
+        "  - q: What day is Mia's piano lesson?\n    expected: Thursday.\n    memory: Mia piano Thursday\n"
+        "  - q: What can't our dog eat?\n    expected: Chicken.\n    memory: Pip chicken\n",
+        encoding="utf-8",
+    )
+    query = "what the dog can't eat"
+    client.responses = [
+        final("x", "Thursday."),
+        final("n1", "Tuesday."),
+        tool_calls("x", [tool_call("recall_memory", {"query": query, "about": ["Pip"]}, embed=query)]),
+        final("x", "Chicken."),
+    ]
+    normal: dict[str, Any] = {}
+
+    async def converse(_hass, text, conversation_id, _context, **_kwargs):
+        result = await agent.async_process(_input(text, conversation_id))
+        if not normal:
+            # Someone talks to Auri in the middle of the exam: that's the real memory.
+            await agent.async_process(_input("What day is Mia's piano lesson?", "n1"))
+            normal.update(client.payloads[-1]["context"]["memory"])
+        return result
+
+    with _exam_through(agent, tmp_path, converse), patch.object(runtime.api, "grade", _graded("correct", "correct")):
+        result = await runtime.async_run_exam("benchmark.yaml")
+
+    asked = client.payloads[0]["context"]["memory"]
+    assert "Thursday" in asked["notes"] and "Tuesday" not in asked["notes"]
+    assert asked["household"] == [
+        {"name": "Ana", "kind": "person"}, {"name": "Mia", "kind": "person"}, {"name": "Pip", "kind": "pet"}
+    ]
+    assert "Tuesday" in normal["notes"] and "Thursday" not in normal["notes"]
+    assert {"name": "Will", "kind": "person"} in normal["household"]
+    assert [(item["memory_found_in"], item["memory_rank"]) for item in result["grades"]] == [("notes", 1), ("recall_memory", 1)]
+    assert result["file"] == "benchmark.yaml" and result["test_memory"] is True
+    # The test memory is gone, and the real memory is as it was.
+    assert runtime.exam is None and not _schema_exists(runtime, EXAM_MEMORY_SCHEMA)
+    assert _db(runtime, "SELECT id, content, status FROM auri_memory.mem_memories ORDER BY id") == real_memories
+
+    # It's also gone when a question fails.
+    async def unplugged(*_args, **_kwargs):
+        raise HomeAssistantError("The satellite is unplugged")
+
+    with _exam_through(agent, tmp_path, unplugged), pytest.raises(HomeAssistantError, match="unplugged"):
+        await runtime.async_run_exam("benchmark.yaml")
+    assert runtime.exam is None and not _schema_exists(runtime, EXAM_MEMORY_SCHEMA)

@@ -22,7 +22,7 @@ from homeassistant.core import callback
 from homeassistant.util import dt as dt_util
 
 from ..bookings.guest_name import guest_name
-from ..const import CONF_GUEST_COUNT
+from ..const import CONF_GUEST_COUNT, MEMORY_EXAM_CONVERSATION_PREFIX
 from .api import MemoryApiError
 from .config import CONF_MEMORY_LOGIN_PEOPLE
 from .db import MemoryDbError
@@ -33,6 +33,7 @@ from .recall import (
     PROFILE_TOTAL_CHARS,
     TOOL_NOTES_TOTAL_CHARS,
     RecallRow,
+    RecallTrace,
     ShownNotesCache,
     SubjectEntity,
     adjacent_days,
@@ -97,6 +98,7 @@ class MemorySpace:
         self.stated_speakers = StatedSpeakerCache()
         self.asked_once = AskedOnceCache()
         self.shown_notes = ShownNotesCache()
+        self.recall_trace = RecallTrace()
         self._spool_key = spool_key
         self._entities: list[SubjectEntity] = []
         self._person_ids: dict[str, int] = {}
@@ -171,6 +173,7 @@ class MemorySpace:
         self.stated_speakers.clear()
         self.asked_once.clear()
         self.shown_notes.clear()
+        self.recall_trace.clear()
 
     def new_turn_logger(self) -> None:
         """A fresh logger after a shutdown (a stopped logger stays stopped)."""
@@ -379,8 +382,15 @@ class MemorySpace:
             note_rows, total_chars=AUTO_NOTES_TOTAL_CHARS, tz=tz, private_label=private_label
         )
         self.shown_notes.add(conversation_id, [*shown_profile, *shown_notes])
+        self._trace(conversation_id, "profile", shown_profile)
+        self._trace(conversation_id, "notes", shown_notes)
         self._touch_later([row for row in note_rows if not row.from_archive])
         return block
+
+    def _trace(self, conversation_id: str | None, source: str, rows: list[RecallRow]) -> None:
+        """For the memory exam: keep what its question was shown (nothing is kept for other conversations)."""
+        if conversation_id and conversation_id.startswith(MEMORY_EXAM_CONVERSATION_PREFIX):
+            self.recall_trace.add(conversation_id, source, rows)
 
     def _touch_later(self, rows: list[RecallRow]) -> None:
         """Count recalls in the background; losing a count is harmless."""
@@ -493,6 +503,7 @@ class MemorySpace:
             private_label=not self.shared,
         )
         self.shown_notes.add(conversation_id, shown)
+        self._trace(conversation_id, "recall_memory", shown)
         return ToolRecallResult(rows, text, shown)
 
     async def async_remember(
