@@ -17,14 +17,16 @@ run, devices included.
 
 A question's memory (words from the memory that answers it) also shows where
 that memory reached Auri: the memory profile, the notes matched to the
-question, a recall_memory search, or nowhere. A file that also lists
-memories is asked against them, in a test memory (exam_memory.py), instead
-of the household's real memory.
+question, a recall_memory search, or nowhere. Each question also records
+how long its turn took and how many times Auri searched. A file that also
+lists memories is asked against them, in a test memory (exam_memory.py),
+instead of the household's real memory.
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
 import re
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 import uuid
 
@@ -59,15 +61,16 @@ def parse_exam(data: Any, name: str = MEMORY_EXAM_FILE) -> list[dict[str, str]]:
     if not isinstance(data, list):
         raise ValueError(f"{name} must be a list of items with q and expected")
     questions: list[dict[str, str]] = []
-    for item in data:
+    for position, item in enumerate(data, start=1):
         if not isinstance(item, dict):
             continue
-        question = _clean(item.get("q") or item.get("question"), MAX_FIELD_CHARS)
-        expected = _clean(item.get("expected") or item.get("answer"), MAX_FIELD_CHARS)
+        where = f"{name}: question {position}"
+        question = _clean(_text(item, ("q", "question"), where), MAX_FIELD_CHARS)
+        expected = _clean(_text(item, ("expected", "answer"), where), MAX_FIELD_CHARS)
         if not (question and expected):
             continue
         entry = {"q": question, "expected": expected}
-        if memory_words(memory := _clean(item.get("memory"), _MAX_MEMORY_CHARS)):
+        if memory_words(memory := _clean(_text(item, ("memory",), where), _MAX_MEMORY_CHARS)):
             entry["memory"] = memory
         if case := _clean(item.get("case"), _MAX_CASE_CHARS):
             entry["case"] = case
@@ -75,6 +78,22 @@ def parse_exam(data: Any, name: str = MEMORY_EXAM_FILE) -> list[dict[str, str]]:
     if not questions:
         raise ValueError(f"{name} has no items with both q and expected")
     return questions[:MAX_QUESTIONS]
+
+
+def _text(item: dict[str, Any], keys: tuple[str, ...], where: str) -> str:
+    """The first of these fields that's given, which must be text.
+
+    Unquoted, YAML reads 20:00 as a number (1200) and no as false; graded
+    against those, a right answer would look wrong, so the file is refused.
+    """
+    for key in keys:
+        value = item.get(key)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"{where}: YAML read {key} as {value!r}, not text; put it in quotes")
+        return value
+    return ""
 
 
 def _clean(value: Any, max_chars: int) -> str:
@@ -133,12 +152,20 @@ def recall_summary(grades: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _recall_numbers(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """found: the share whose memory reached Auri; mrr: the mean of 1 / its place, 0 when not found."""
+    """found: the share whose memory reached Auri; mrr: the mean of 1 / its place, 0 when not found.
+
+    The profile is sent whole with every message, so its order isn't a search
+    result: a memory in it counts as first. seconds and searches are averages
+    per question.
+    """
     found = [item for item in items if item["memory_found_in"] != "none"]
+    places = [1 if item["memory_found_in"] == "profile" else item["memory_rank"] for item in found]
     return {
         "questions": len(items),
         "found": round(len(found) / len(items), 4),
-        "mrr": round(sum(1 / item["memory_rank"] for item in found) / len(items), 4),
+        "mrr": round(sum(1 / place for place in places) / len(items), 4),
+        "seconds": round(sum(item["seconds"] for item in items) / len(items), 1),
+        "searches": round(sum(item["searches"] for item in items) / len(items), 2),
     }
 
 
@@ -173,6 +200,7 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
             space.recall_trace.clear()
             for question in questions:
                 conversation_id = f"{MEMORY_EXAM_CONVERSATION_PREFIX}{uuid.uuid4().hex}"
+                started = monotonic()
                 result = await conversation.async_converse(
                     hass,
                     question["q"],
@@ -180,9 +208,15 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
                     Context(),
                     agent_id=runtime.entry.entry_id,
                 )
+                seconds = round(monotonic() - started, 1)
                 speech = (result.response.speech or {}).get("plain", {}).get("speech") or ""
-                item: dict[str, Any] = {**question, "answer": " ".join(str(speech).split())[:MAX_FIELD_CHARS]}
                 trace = space.recall_trace.pop(conversation_id)
+                item: dict[str, Any] = {
+                    **question,
+                    "answer": " ".join(str(speech).split())[:MAX_FIELD_CHARS],
+                    "seconds": seconds,
+                    "searches": sum(1 for source, _rows in trace if source == "recall_memory"),
+                }
                 if "memory" in question:
                     found = find_memory(memory_words(question["memory"]), trace)
                     item["memory_found_in"], item["memory_rank"] = found or ("none", None)

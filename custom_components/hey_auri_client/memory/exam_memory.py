@@ -85,7 +85,10 @@ def _seed(item: Any, where: str) -> SeedMemory:
         item = {"text": item}
     if not isinstance(item, dict):
         raise ValueError(f"{where} must be text, or a memory with text")
-    text = " ".join(str(item.get("text") or "").split())[:_MAX_TEXT_CHARS]
+    if (value := item.get("text")) is not None and not isinstance(value, str):
+        # Unquoted, YAML reads 20:00 as a number and no as false.
+        raise ValueError(f"{where}: YAML read its text as {value!r}; put it in quotes")
+    text = " ".join(str(value or "").split())[:_MAX_TEXT_CHARS]
     if not text:
         raise ValueError(f"{where} has no text")
     kind = str(item.get("kind") or "fact").strip().lower()

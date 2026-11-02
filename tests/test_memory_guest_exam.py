@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import re
 import zoneinfo
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 pytest.importorskip("homeassistant")
 
 from homeassistant.util import dt as dt_util  # noqa: E402
+from homeassistant.util.yaml import load_yaml  # noqa: E402
 
 import voluptuous as vol  # noqa: E402
 
@@ -173,6 +175,22 @@ def test_exam_questions_can_name_their_memory():
         parse_exam({"nothing": True}, "benchmark.yaml")
 
 
+def test_an_exam_file_with_values_yaml_reads_as_something_else_is_refused(tmp_path):
+    # Graded against 1200.0 or false, a right answer would look wrong.
+    exam = tmp_path / "exam.yaml"
+    for text, message in [
+        ("- q: When is bedtime?\n  expected: 20:00.\n", "exam.yaml: question 1: YAML read expected as 1200.0"),
+        ("- q: a\n  expected: b\n- q: Is it raining?\n  expected: no\n", "question 2: YAML read expected as False"),
+        ("- q: When is the dentist?\n  expected: 2026-11-04\n", "YAML read expected as datetime.date(2026, 11, 4)"),
+        ("- q: When is bedtime?\n  expected: At 20:00.\n  memory: 20:00\n", "YAML read memory as 1200"),
+    ]:
+        exam.write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError, match=re.escape(message)):
+            parse_exam(load_yaml(exam), "exam.yaml")
+    exam.write_text('- q: When is bedtime?\n  expected: "20:00."\n  memory: "20:00"\n', encoding="utf-8")
+    assert parse_exam(load_yaml(exam), "exam.yaml") == [{"q": "When is bedtime?", "expected": "20:00.", "memory": "20:00"}]
+
+
 def test_the_exam_file_is_named_inside_the_config_folder():
     assert RUN_MEMORY_EXAM_SCHEMA({}) == {}
     assert RUN_MEMORY_EXAM_SCHEMA({"file": "hey_auri_memory_benchmark.yaml"}) == {"file": "hey_auri_memory_benchmark.yaml"}
@@ -201,25 +219,29 @@ def test_where_an_answers_memory_reached_auri():
 
 
 def test_recall_and_mrr():
-    def graded(grade: str, found_in: str, rank: int | None = None, case: str | None = None) -> dict:
-        return {"grade": grade, "memory_found_in": found_in, "memory_rank": rank, **({"case": case} if case else {})}
+    def graded(grade: str, found_in: str, rank: int | None = None, case: str | None = None, *,
+               seconds: float = 1.0, searches: int = 0) -> dict:
+        return {"grade": grade, "memory_found_in": found_in, "memory_rank": rank, "seconds": seconds,
+                "searches": searches, **({"case": case} if case else {})}
 
     grades = [
-        graded("correct", "notes", 1, "direct"),
-        graded("wrong", "profile", 2, "direct"),
-        graded("partial", "none", case="paraphrase"),
-        graded("correct", "recall_memory", 4, "paraphrase"),
+        graded("correct", "notes", 1, "direct", seconds=2.0),
+        graded("wrong", "profile", 2, "direct"),  # the profile is sent whole: it counts as first
+        graded("partial", "none", case="paraphrase", seconds=3.0, searches=1),
+        graded("correct", "recall_memory", 4, "paraphrase", seconds=6.0, searches=2),
         {"grade": "wrong"},  # names no memory: left out
     ]
     assert recall_summary(grades) == {
         "questions": 4,
         "found": 0.75,
-        "mrr": 0.4375,  # (1 + 1/2 + 0 + 1/4) / 4
+        "mrr": 0.5625,  # (1 + 1 + 0 + 1/4) / 4
+        "seconds": 3.0,
+        "searches": 0.75,
         "found_in": {"profile": 1, "notes": 1, "recall_memory": 1, "none": 1},
         "not_correct": {"memory_shown": 1, "memory_not_shown": 1},
         "by_case": {
-            "direct": {"questions": 2, "found": 1.0, "mrr": 0.75},
-            "paraphrase": {"questions": 2, "found": 0.5, "mrr": 0.125},
+            "direct": {"questions": 2, "found": 1.0, "mrr": 1.0, "seconds": 1.5, "searches": 0.0},
+            "paraphrase": {"questions": 2, "found": 0.5, "mrr": 0.125, "seconds": 4.5, "searches": 1.5},
         },
     }
     assert "by_case" not in recall_summary([graded("correct", "notes", 1)])
@@ -250,6 +272,7 @@ def test_an_exam_file_can_bring_its_own_memories():
     for bad, message in [
         ({"memories": []}, "memories must be a list"),
         ({"memories": [{"about": ["Mia"]}]}, "exam.yaml: memory 1 has no text"),
+        ({"memories": [{"text": 1200}]}, "exam.yaml: memory 1: YAML read its text as 1200"),
         ({"memories": ["a", {"text": "b", "kind": "secret"}]}, "memory 2 has kind 'secret'"),
         ({"memories": [{"text": "b", "importance": 9}]}, "importance must be from 1 to 5"),
         ({"memories": [{"text": "b", "days_ago": 1.5}]}, "days_ago must be a whole number"),

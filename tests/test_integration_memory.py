@@ -862,13 +862,19 @@ async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeA
 
     found = [(item.get("memory_found_in"), item.get("memory_rank")) for item in result["grades"]]
     assert found == [("notes", 1), ("recall_memory", 1), ("none", None), (None, None)]
-    assert result["memory"] == {
+    assert [item["searches"] for item in result["grades"]] == [0, 1, 0, 0]
+    assert all(isinstance(item["seconds"], float) and item["seconds"] >= 0 for item in result["grades"])
+    memory = result["memory"]
+    seconds = (memory.pop("seconds"), memory["by_case"]["direct"].pop("seconds"))
+    assert all(value >= 0 for value in seconds)
+    assert memory == {
         "questions": 3,
         "found": 0.6667,
         "mrr": 0.6667,
+        "searches": 0.33,
         "found_in": {"profile": 0, "notes": 1, "recall_memory": 1, "none": 1},
         "not_correct": {"memory_shown": 0, "memory_not_shown": 1},
-        "by_case": {"direct": {"questions": 1, "found": 1.0, "mrr": 1.0}},
+        "by_case": {"direct": {"questions": 1, "found": 1.0, "mrr": 1.0, "searches": 0.0}},
     }
     assert "file" not in result and "test_memory" not in result
     # Only the questions and answers are sent to be graded.

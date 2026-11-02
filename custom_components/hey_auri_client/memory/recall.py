@@ -412,7 +412,8 @@ class RecallTrace:
 
     Each list is (source, rows): "profile" and "notes" from the memory block,
     then "recall_memory" once per tool call. The exam reads it to tell where
-    the memory behind each answer reached Auri.
+    the memory behind each answer reached Auri, and how often Auri searched
+    (an empty list is kept too, so a search that found nothing still counts).
     """
 
     def __init__(self, max_conversations: int = 60) -> None:
@@ -423,10 +424,9 @@ class RecallTrace:
         return len(self._entries)
 
     def add(self, conversation_id: str | None, source: str, rows: Iterable[RecallRow]) -> None:
-        shown = list(rows)
-        if not conversation_id or not shown:
+        if not conversation_id:
             return
-        self._entries.setdefault(conversation_id, []).append((source, shown))
+        self._entries.setdefault(conversation_id, []).append((source, list(rows)))
         self._entries.move_to_end(conversation_id)
         while len(self._entries) > self._max:
             self._entries.popitem(last=False)

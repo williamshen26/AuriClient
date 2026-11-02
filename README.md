@@ -275,7 +275,9 @@ To check how well memory works, create `hey_auri_memory_exam.yaml` in your confi
   expected: Portugal, in July.
 ```
 
-Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked in a new conversation, and the answers are graded. The result has a score from 0 to 1 and the grade for each question. Exam conversations aren't saved to memory. The questions run like real requests, so ask questions, not commands. They're asked without anyone signed in, as on a voice satellite.
+Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked in a new conversation, and the answers are graded. The result has a score from 0 to 1 and the grade for each question. Each question also shows `seconds`, how long Auri took to answer, and `searches`, how many times it searched its memory. Exam conversations aren't saved to memory. The questions run like real requests, so ask questions, not commands. They're asked without anyone signed in, as on a voice satellite.
+
+Put times, dates, yes or no, and plain numbers in quotes (`expected: "20:00"`). Without quotes, YAML reads `20:00` as the number 1200 and `no` as false, so the exam refuses the file and names the question.
 
 **Where an answer's memory came from.** `memory` is optional: a few words from the memory that answers the question. A memory matches when it has every word, and a word also matches its longer forms, so "lesson" matches "lessons". Each question then shows where that memory reached Auri, in `memory_found_in`:
 - `profile`: the short profile of important facts Auri gets with every message;
@@ -285,7 +287,8 @@ Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked i
 
 `memory_rank` is its place in that list (1 is first). The result's `memory` section adds them up, over the questions that name a memory:
 - **`found`:** the share whose memory reached Auri.
-- **`mrr`:** how high it came, from 0 to 1. It's the average of 1 divided by its place, counting 0 when it wasn't found.
+- **`mrr`:** how high it came, from 0 to 1. It's the average of 1 divided by its place, counting 0 when it wasn't found. A memory in the profile counts as first, because the whole profile is sent with every message.
+- **`seconds` and `searches`:** the averages per question. A case that needs Auri to search, such as an answer linked through a second memory, takes longer.
 - **`not_correct`:** the answers that weren't correct.
   - `memory_shown`: Auri had the memory and still got it wrong.
   - `memory_not_shown`: the memory never reached Auri, so the search is what needs work.
