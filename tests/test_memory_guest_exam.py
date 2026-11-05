@@ -17,15 +17,19 @@ import voluptuous as vol  # noqa: E402
 from custom_components.hey_auri_client.conversation.services import RUN_MEMORY_EXAM_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory import guest  # noqa: E402
 from custom_components.hey_auri_client.memory.db import GUEST_MEMORY_SCHEMA, MEMORY_SCHEMA  # noqa: E402
+from custom_components.hey_auri_client.memory.api import MemoryApiError  # noqa: E402
 from custom_components.hey_auri_client.memory.exam import (  # noqa: E402
+    async_embed_seconds,
     find_memory,
     memory_words,
     parse_exam,
     recall_summary,
     score,
+    search_details,
+    turn_summary,
 )
 from custom_components.hey_auri_client.memory.exam_memory import SeedMemory, exam_seeds, parse_exam_memory  # noqa: E402
-from custom_components.hey_auri_client.memory.recall import RecallRow  # noqa: E402
+from custom_components.hey_auri_client.memory.recall import RecallRow, TraceEntry  # noqa: E402
 from custom_components.hey_auri_client.memory.migrations import apply_migrations, drop_schema, reset_schema  # noqa: E402
 from custom_components.hey_auri_client.memory.store import GUEST_SCOPE, MemoryStore, NewMemory  # noqa: E402
 
@@ -206,9 +210,9 @@ def _row(memory_id: int, content: str) -> RecallRow:
 def test_where_an_answers_memory_reached_auri():
     lesson = _row(3, "Mia has PIANO lessons, every Thursday.")
     trace = [
-        ("profile", [_row(1, "The recycling goes out on Tuesdays.")]),
-        ("notes", [_row(2, "Will had piano lessons in 2024."), lesson]),
-        ("recall_memory", [lesson]),
+        TraceEntry("profile", [_row(1, "The recycling goes out on Tuesdays.")]),
+        TraceEntry("notes", [_row(2, "Will had piano lessons in 2024."), lesson]),
+        TraceEntry("recall_memory", [lesson], query="Mia piano", chars=80),
     ]
     assert memory_words("Mia's piano, 16:00") == ["mia's", "piano", "16", "00"]
     assert find_memory(memory_words("mia lesson thursday"), trace) == ("notes", 2)  # the first place it was shown
@@ -219,17 +223,22 @@ def test_where_an_answers_memory_reached_auri():
 
 
 def test_recall_and_mrr():
-    def graded(grade: str, found_in: str, rank: int | None = None, case: str | None = None, *,
-               seconds: float = 1.0, searches: int = 0) -> dict:
-        return {"grade": grade, "memory_found_in": found_in, "memory_rank": rank, "seconds": seconds,
-                "searches": searches, **({"case": case} if case else {})}
+    def graded(grade: str, found_in: str | None, rank: int | None = None, case: str | None = None, *,
+               seconds: float = 1.0, searched: tuple[tuple[int, int], ...] = (), embed: float | None = None) -> dict:
+        item = {"grade": grade, "seconds": seconds, "searches": len(searched), "embed_seconds": embed,
+                **({"memory_found_in": found_in, "memory_rank": rank} if found_in else {}),
+                **({"case": case} if case else {})}
+        if searched:
+            item["search_results"] = [{"query": "q", "results": results, "chars": chars, "memories": []}
+                                      for results, chars in searched]
+        return item
 
     grades = [
-        graded("correct", "notes", 1, "direct", seconds=2.0),
+        graded("correct", "notes", 1, "direct", seconds=2.0, embed=0.2),
         graded("wrong", "profile", 2, "direct"),  # the profile is sent whole: it counts as first
-        graded("partial", "none", case="paraphrase", seconds=3.0, searches=1),
-        graded("correct", "recall_memory", 4, "paraphrase", seconds=6.0, searches=2),
-        {"grade": "wrong"},  # names no memory: left out
+        graded("partial", "none", case="paraphrase", seconds=3.0, searched=((8, 4000),), embed=0.4),
+        graded("correct", "recall_memory", 4, "paraphrase", seconds=6.0, searched=((6, 3000), (2, 500)), embed=0.3),
+        graded("wrong", None),  # names no memory: left out, except from the turns
     ]
     assert recall_summary(grades) == {
         "questions": 4,
@@ -237,15 +246,69 @@ def test_recall_and_mrr():
         "mrr": 0.5625,  # (1 + 1 + 0 + 1/4) / 4
         "seconds": 3.0,
         "searches": 0.75,
+        "results_per_search": 5.3,  # (8 + 6 + 2) / 3 searches
+        "chars_per_search": 2500,
+        "embed_seconds": 0.3,  # over the questions whose call could be timed
         "found_in": {"profile": 1, "notes": 1, "recall_memory": 1, "none": 1},
         "not_correct": {"memory_shown": 1, "memory_not_shown": 1},
         "by_case": {
-            "direct": {"questions": 2, "found": 1.0, "mrr": 1.0, "seconds": 1.5, "searches": 0.0},
-            "paraphrase": {"questions": 2, "found": 0.5, "mrr": 0.125, "seconds": 4.5, "searches": 1.5},
+            # Nobody searched, so there's nothing per search.
+            "direct": {"questions": 2, "found": 1.0, "mrr": 1.0, "seconds": 1.5, "searches": 0.0, "embed_seconds": 0.2},
+            "paraphrase": {"questions": 2, "found": 0.5, "mrr": 0.125, "seconds": 4.5, "searches": 1.5,
+                           "results_per_search": 5.3, "chars_per_search": 2500, "embed_seconds": 0.35},
         },
     }
+    assert turn_summary(grades) == {
+        "questions": 5, "seconds": 2.6, "searches": 0.6, "results_per_search": 5.3, "chars_per_search": 2500,
+        "embed_seconds": 0.3,
+    }
     assert "by_case" not in recall_summary([graded("correct", "notes", 1)])
-    assert recall_summary([{"grade": "correct"}]) is None
+    assert recall_summary([graded("correct", None)]) is None
+
+
+def test_each_search_shows_what_it_returned():
+    summary = "## Summary\nThe family went to Kits Beach, and Leo found a crab. " + "More of the day. " * 10
+    found = RecallRow(id=7, kind="digest", content=summary, at=None, score=0.81234, sim=0.73115, kw=0.0504)
+    by_keyword = RecallRow(id=8, kind="fact", content="Leo likes crabs.", at=None, score=0.31)  # no embedding came
+    trace = [
+        TraceEntry("profile", [by_keyword]),
+        TraceEntry("recall_memory", [found, by_keyword], query="beach crab", chars=420),
+        TraceEntry("recall_memory", [], query="crab again", chars=0),  # a search that found nothing still counts
+    ]
+    assert search_details(trace) == [
+        {
+            "query": "beach crab",
+            "results": 2,
+            "chars": 420,
+            "memories": [
+                {"id": 7, "score": 0.812, "similarity": 0.731, "keyword": 0.05,
+                 "text": " ".join(summary.replace("## ", "").split())[:80]},
+                {"id": 8, "score": 0.31, "text": "Leo likes crabs."},
+            ],
+        },
+        {"query": "crab again", "results": 0, "chars": 0, "memories": []},
+    ]
+    assert search_details(trace[:1]) == []
+
+
+async def test_the_exam_times_one_embedding_call_per_question():
+    class Api:
+        def __init__(self, error: Exception | None = None) -> None:
+            self.error = error
+            self.calls: list[tuple[list[str], str]] = []
+
+        async def embed(self, texts: list[str], *, task_type: str):
+            self.calls.append((texts, task_type))
+            if self.error:
+                raise self.error
+            return [[0.0] * 768], "fake-embed@768"
+
+    api = Api()
+    seconds = await async_embed_seconds(api, "When is Mia's piano lesson?")
+    assert isinstance(seconds, float) and seconds >= 0
+    assert api.calls == [(["When is Mia's piano lesson?"], "RETRIEVAL_QUERY")]
+    # A call that fails is only a missing measurement, never a failed exam.
+    assert await async_embed_seconds(Api(MemoryApiError("Over budget", status_code=429)), "x") is None
 
 
 def test_an_exam_file_can_bring_its_own_memories():

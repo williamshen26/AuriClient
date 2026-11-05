@@ -275,6 +275,10 @@ class RecallRow:
     from_archive: bool = False
     # When a commitment is due (start of that day); None for everything else.
     due: datetime | None = None
+    # What score is made of, where the recall_memory search computed it:
+    # closeness in meaning (sim) and the keyword rank (kw).
+    sim: float | None = None
+    kw: float | None = None
 
 
 # Per-kind length caps for one note, and total caps for a block of notes.
@@ -407,31 +411,44 @@ class ShownNotesCache:
         self._entries.clear()
 
 
+@dataclass(frozen=True, slots=True)
+class TraceEntry:
+    """One list of memories Auri was shown; a search also keeps its words and the length of what it returned."""
+
+    source: str
+    rows: list[RecallRow]
+    query: str = ""
+    chars: int = 0
+
+
 class RecallTrace:
     """Per memory exam conversation, the lists of memories Auri was shown, in the order it saw them.
 
-    Each list is (source, rows): "profile" and "notes" from the memory block,
-    then "recall_memory" once per tool call. The exam reads it to tell where
-    the memory behind each answer reached Auri, and how often Auri searched
-    (an empty list is kept too, so a search that found nothing still counts).
+    "profile" and "notes" come from the memory block, then "recall_memory"
+    once per tool call. The exam reads it to tell where the memory behind
+    each answer reached Auri, how often Auri searched and what each search
+    returned (an empty list is kept too, so a search that found nothing
+    still counts).
     """
 
     def __init__(self, max_conversations: int = 60) -> None:
         self._max = max_conversations
-        self._entries: OrderedDict[str, list[tuple[str, list[RecallRow]]]] = OrderedDict()
+        self._entries: OrderedDict[str, list[TraceEntry]] = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._entries)
 
-    def add(self, conversation_id: str | None, source: str, rows: Iterable[RecallRow]) -> None:
+    def add(
+        self, conversation_id: str | None, source: str, rows: Iterable[RecallRow], *, query: str = "", chars: int = 0
+    ) -> None:
         if not conversation_id:
             return
-        self._entries.setdefault(conversation_id, []).append((source, list(rows)))
+        self._entries.setdefault(conversation_id, []).append(TraceEntry(source, list(rows), query, chars))
         self._entries.move_to_end(conversation_id)
         while len(self._entries) > self._max:
             self._entries.popitem(last=False)
 
-    def pop(self, conversation_id: str) -> list[tuple[str, list[RecallRow]]]:
+    def pop(self, conversation_id: str) -> list[TraceEntry]:
         return self._entries.pop(conversation_id, [])
 
     def clear(self) -> None:

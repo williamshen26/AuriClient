@@ -864,18 +864,43 @@ async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeA
     assert found == [("notes", 1), ("recall_memory", 1), ("none", None), (None, None)]
     assert [item["searches"] for item in result["grades"]] == [0, 1, 0, 0]
     assert all(isinstance(item["seconds"], float) and item["seconds"] >= 0 for item in result["grades"])
+    # One embedding call per question is timed; the fake backend answers it.
+    assert all(isinstance(item["embed_seconds"], float) and item["embed_seconds"] >= 0 for item in result["grades"])
+
+    # The question that searched shows what its search returned, after its grade.
+    [volvo] = _db(runtime, "SELECT id FROM auri_memory.mem_memories WHERE content LIKE 'Will wants%'")
+    car = result["grades"][1]
+    assert list(car)[-1] == "search_results"
+    [search] = car["search_results"]
+    [returned] = search["memories"]
+    assert (search["query"], search["results"], returned["id"]) == (query, 1, volvo["id"])
+    assert returned["text"] == "Will wants to buy a Volvo XC40." and search["chars"] > len(returned["text"])
+    assert all(isinstance(returned[key], float) for key in ("score", "similarity", "keyword"))
+    assert all("search_results" not in item for position, item in enumerate(result["grades"]) if position != 1)
+
     memory = result["memory"]
-    seconds = (memory.pop("seconds"), memory["by_case"]["direct"].pop("seconds"))
-    assert all(value >= 0 for value in seconds)
+    timings = (
+        memory.pop("seconds"), memory["by_case"]["direct"].pop("seconds"),
+        memory.pop("embed_seconds"), memory["by_case"]["direct"].pop("embed_seconds"),
+    )
+    assert all(value >= 0 for value in timings)
     assert memory == {
         "questions": 3,
         "found": 0.6667,
         "mrr": 0.6667,
         "searches": 0.33,
+        "results_per_search": 1.0,
+        "chars_per_search": search["chars"],
         "found_in": {"profile": 0, "notes": 1, "recall_memory": 1, "none": 1},
         "not_correct": {"memory_shown": 0, "memory_not_shown": 1},
         "by_case": {"direct": {"questions": 1, "found": 1.0, "mrr": 1.0, "searches": 0.0}},
     }
+    # The turns cover every question, also the one that names no memory.
+    turns = result["turns"]
+    assert {key: turns[key] for key in ("questions", "searches", "results_per_search", "chars_per_search")} == {
+        "questions": 4, "searches": 0.25, "results_per_search": 1.0, "chars_per_search": search["chars"],
+    }
+    assert turns["seconds"] >= 0 and turns["embed_seconds"] >= 0
     assert "file" not in result and "test_memory" not in result
     # Only the questions and answers are sent to be graded.
     assert {key for item in grade.call_args.args[0] for key in item} == {"q", "expected", "answer"}

@@ -832,7 +832,7 @@ class MemoryStore:
                                OR (COALESCE(m.occurred_at, m.recorded_at) >= CAST(:range_start AS timestamptz)
                                    AND COALESCE(m.occurred_at, m.recorded_at) < CAST(:range_end AS timestamptz))
                                OR (m.due_at >= CAST(:due_start AS timestamptz) AND m.due_at < CAST(:due_end AS timestamptz))))
-                    SELECT {_SCORED_COLUMNS},
+                    SELECT {_SCORED_COLUMNS}, sim, kw,
                            sim + LEAST(kw, 0.5) * 0.3 + CASE WHEN about_subject THEN 0.08 ELSE 0 END
                            + CASE WHEN on_day THEN 0.12 WHEN near_day THEN 0.08 ELSE 0 END
                            + (importance - 3) * 0.02 + 0.05 * exp(-GREATEST(age_days, 0) / 30.0) AS score
@@ -904,7 +904,7 @@ class MemoryStore:
                                           AND e.relation = 'about' AND e.to_entity = ANY (CAST(:subject_ids AS bigint[])))
                                OR m.source_ref = ANY (CAST(:hint_days AS date[]))
                                OR CAST(:range_start AS timestamptz) IS NOT NULL))
-                    SELECT {_SCORED_COLUMNS},
+                    SELECT {_SCORED_COLUMNS}, kw,
                            LEAST(kw, 0.5) * 0.6 + CASE WHEN about_subject THEN 0.15 ELSE 0 END
                            + CASE WHEN on_day THEN 0.12 WHEN near_day THEN 0.08 ELSE 0 END
                            + (importance - 3) * 0.02 + 0.05 * exp(-GREATEST(age_days, 0) / 30.0) AS score
@@ -1184,7 +1184,7 @@ AUTO_RECALL_MIN_KEYWORD_RANK = 0.03
 
 def _row(row: Any) -> RecallRow:
     values = row._mapping  # noqa: SLF001 (SQLAlchemy's public mapping view of a row)
-    score = values.get("score")
+    score, sim, kw = values.get("score"), values.get("sim"), values.get("kw")
     return RecallRow(
         id=int(values["id"]),
         kind=values["kind"],
@@ -1195,6 +1195,8 @@ def _row(row: Any) -> RecallRow:
         about=list(values["about"] or []),
         due=values.get("due_at"),
         score=float(score) if isinstance(score, (int, float)) else 0.0,
+        sim=float(sim) if isinstance(sim, (int, float)) else None,
+        kw=float(kw) if isinstance(kw, (int, float)) else None,
     )
 
 

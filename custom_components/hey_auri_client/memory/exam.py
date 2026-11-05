@@ -18,13 +18,17 @@ run, devices included.
 A question's memory (words from the memory that answers it) also shows where
 that memory reached Auri: the memory profile, the notes matched to the
 question, a recall_memory search, or nowhere. Each question also records
-how long its turn took and how many times Auri searched. A file that also
-lists memories is asked against them, in a test memory (exam_memory.py),
-instead of the household's real memory.
+how long its turn took, how many times Auri searched and what each search
+returned (its words, how many memories and how long, and their scores), and
+how long one /memory/embed call for the question takes: what embedding
+every message would add to a turn. A file that also lists memories is asked
+against them, in a test memory (exam_memory.py), instead of the household's
+real memory.
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
+import logging
 import re
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -38,16 +42,21 @@ from homeassistant.util.yaml import load_yaml
 
 from ..const import MEMORY_EXAM_CONVERSATION_PREFIX, MEMORY_EXAM_FILE
 from .exam_memory import parse_exam_memory
-from .recall import RecallRow
+from .recall import RecallRow, TraceEntry
 
 if TYPE_CHECKING:
+    from .api import MemoryApi
     from .runtime import MemoryRuntime
+
+_LOGGER = logging.getLogger(__name__)
 
 MAX_QUESTIONS = 50
 GRADE_BATCH = 25
 MAX_FIELD_CHARS = 2000
 _MAX_MEMORY_CHARS = 200
 _MAX_CASE_CHARS = 40
+# How much of each memory a search's details show.
+_MAX_RESULT_CHARS = 80
 GRADES = ("correct", "partial", "wrong", "missed")
 # Where an answer's memory can reach Auri, in the order Auri sees them.
 MEMORY_SOURCES = ("profile", "notes", "recall_memory")
@@ -112,19 +121,58 @@ def memory_words(text: str | None) -> list[str]:
     return _WORD.findall((text or "").casefold())
 
 
-def find_memory(words: Sequence[str], trace: Sequence[tuple[str, Sequence[RecallRow]]]) -> tuple[str, int] | None:
+def find_memory(words: Sequence[str], trace: Sequence[TraceEntry]) -> tuple[str, int] | None:
     """Where the memory with these words first reached Auri: (source, its place in that list), or None.
 
     A memory matches when every word starts one of its words, so "lesson" also matches "lessons".
     """
     if not words:
         return None
-    for source, rows in trace:
-        for rank, row in enumerate(rows, start=1):
+    for entry in trace:
+        for rank, row in enumerate(entry.rows, start=1):
             content = memory_words(row.content)
             if all(any(word.startswith(wanted) for word in content) for wanted in words):
-                return source, rank
+                return entry.source, rank
     return None
+
+
+def search_details(trace: Sequence[TraceEntry]) -> list[dict[str, Any]]:
+    """Each recall_memory search: its words, how many memories Auri got and how long they were, and their scores."""
+    return [
+        {
+            "query": entry.query,
+            "results": len(entry.rows),
+            "chars": entry.chars,
+            "memories": [_scored(row) for row in entry.rows],
+        }
+        for entry in trace
+        if entry.source == "recall_memory"
+    ]
+
+
+def _scored(row: RecallRow) -> dict[str, Any]:
+    """A search result: its score, what the score is made of (when known), and the start of the memory."""
+    scored: dict[str, Any] = {"id": row.id, "score": round(row.score, 3)}
+    if row.sim is not None:
+        scored["similarity"] = round(row.sim, 3)
+    if row.kw is not None:
+        scored["keyword"] = round(row.kw, 3)
+    scored["text"] = _clean(row.content.replace("## ", ""), _MAX_RESULT_CHARS)
+    return scored
+
+
+async def async_embed_seconds(api: "MemoryApi", text: str) -> float | None:
+    """How long one /memory/embed call for this text takes from here, or None when it fails.
+
+    It's what embedding every message would add to a turn; the vector isn't used.
+    """
+    started = monotonic()
+    try:
+        await api.embed([text], task_type="RETRIEVAL_QUERY")
+    except Exception as err:  # noqa: BLE001 (a measurement must never fail the exam)
+        _LOGGER.debug("Memory exam: timing an embedding call failed: %s", err)
+        return None
+    return round(monotonic() - started, 2)
 
 
 def recall_summary(grades: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
@@ -155,8 +203,7 @@ def _recall_numbers(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """found: the share whose memory reached Auri; mrr: the mean of 1 / its place, 0 when not found.
 
     The profile is sent whole with every message, so its order isn't a search
-    result: a memory in it counts as first. seconds and searches are averages
-    per question.
+    result: a memory in it counts as first.
     """
     found = [item for item in items if item["memory_found_in"] != "none"]
     places = [1 if item["memory_found_in"] == "profile" else item["memory_rank"] for item in found]
@@ -164,9 +211,33 @@ def _recall_numbers(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "questions": len(items),
         "found": round(len(found) / len(items), 4),
         "mrr": round(sum(1 / place for place in places) / len(items), 4),
+        **_turn_numbers(items),
+    }
+
+
+def turn_summary(grades: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The turn numbers over every question, whether or not it names its memory."""
+    return {"questions": len(grades), **_turn_numbers(grades)}
+
+
+def _turn_numbers(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Averages per question (seconds, searches, embed_seconds) and per search (results, chars).
+
+    The per-search ones are left out when nobody searched, and embed_seconds
+    when no embedding call could be timed.
+    """
+    numbers: dict[str, Any] = {
         "seconds": round(sum(item["seconds"] for item in items) / len(items), 1),
         "searches": round(sum(item["searches"] for item in items) / len(items), 2),
     }
+    searches = [search for item in items for search in item.get("search_results") or ()]
+    if searches:
+        numbers["results_per_search"] = round(sum(search["results"] for search in searches) / len(searches), 1)
+        numbers["chars_per_search"] = round(sum(search["chars"] for search in searches) / len(searches))
+    timed = [item["embed_seconds"] for item in items if item.get("embed_seconds") is not None]
+    if timed:
+        numbers["embed_seconds"] = round(sum(timed) / len(timed), 2)
+    return numbers
 
 
 async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None) -> dict[str, Any]:
@@ -211,15 +282,20 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
                 seconds = round(monotonic() - started, 1)
                 speech = (result.response.speech or {}).get("plain", {}).get("speech") or ""
                 trace = space.recall_trace.pop(conversation_id)
+                searched = search_details(trace)
                 item: dict[str, Any] = {
                     **question,
                     "answer": " ".join(str(speech).split())[:MAX_FIELD_CHARS],
                     "seconds": seconds,
-                    "searches": sum(1 for source, _rows in trace if source == "recall_memory"),
+                    "searches": len(searched),
+                    # Timed after the turn, so it never changes the turn's own seconds.
+                    "embed_seconds": await async_embed_seconds(runtime.api, question["q"]),
                 }
                 if "memory" in question:
                     found = find_memory(memory_words(question["memory"]), trace)
                     item["memory_found_in"], item["memory_rank"] = found or ("none", None)
+                if searched:
+                    item["search_results"] = searched
                 answered.append(item)
         finally:
             # The test memory only lives while its questions are asked.
@@ -235,11 +311,14 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
             by_idx = {grade.get("idx"): grade for grade in response.get("grades") or [] if isinstance(grade, dict)}
             for position, item in enumerate(batch):
                 grade = by_idx.get(position) or {}
+                # The long search details go last, after the grade.
+                details = item.pop("search_results", None)
                 grades.append(
                     {
                         **item,
                         "grade": grade.get("grade") if grade.get("grade") in GRADES else "missed",
                         "reason": str(grade.get("reason") or ""),
+                        **({"search_results": details} if details else {}),
                     }
                 )
 
@@ -249,6 +328,7 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
             summary["file"] = name
         if exam_memory:
             summary["test_memory"] = True
+        summary["turns"] = turn_summary(grades)
         if (recall := recall_summary(grades)) is not None:
             summary["memory"] = recall
         await hass.async_add_executor_job(

@@ -275,7 +275,13 @@ To check how well memory works, create `hey_auri_memory_exam.yaml` in your confi
   expected: Portugal, in July.
 ```
 
-Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked in a new conversation, and the answers are graded. The result has a score from 0 to 1 and the grade for each question. Each question also shows `seconds`, how long Auri took to answer, and `searches`, how many times it searched its memory. Exam conversations aren't saved to memory. The questions run like real requests, so ask questions, not commands. They're asked without anyone signed in, as on a voice satellite.
+Then call `hey_auri_client.run_memory_exam`. Each question (up to 50) is asked in a new conversation, and the answers are graded. The result has a score from 0 to 1 and the grade for each question. Each question also shows:
+- **`seconds`:** how long Auri took to answer.
+- **`searches`:** how many times it searched its memory.
+- **`search_results`,** when Auri searched: what each search returned. That's the words Auri searched for (`query`), how many memories came back (`results`) and how long they were (`chars`), and each memory's `score`. When the search computed them, the score's parts are shown too: `similarity`, how close the memory is in meaning, and `keyword`, how well its words match.
+- **`embed_seconds`:** how long one call to turn the question into an embedding takes from your Home Assistant. Auri doesn't do this for every message today; the exam measures what it would add to each answer.
+
+Exam conversations aren't saved to memory. The questions run like real requests, so ask questions, not commands. They're asked without anyone signed in, as on a voice satellite. The result's `turns` section averages these over every question, the same way the `memory` section below does. So an exam file of plain questions, run on your real memory, still shows how its searches went.
 
 Put times, dates, yes or no, and plain numbers in quotes (`expected: "20:00"`). Without quotes, YAML reads `20:00` as the number 1200 and `no` as false, so the exam refuses the file and names the question.
 
@@ -289,6 +295,8 @@ Put times, dates, yes or no, and plain numbers in quotes (`expected: "20:00"`). 
 - **`found`:** the share whose memory reached Auri.
 - **`mrr`:** how high it came, from 0 to 1. It's the average of 1 divided by its place, counting 0 when it wasn't found. A memory in the profile counts as first, because the whole profile is sent with every message.
 - **`seconds` and `searches`:** the averages per question. A case that needs Auri to search, such as an answer linked through a second memory, takes longer.
+- **`results_per_search` and `chars_per_search`:** the averages per search, left out when nobody searched. A search that keeps coming back full and long is returning memories that don't help.
+- **`embed_seconds`:** the average per question.
 - **`not_correct`:** the answers that weren't correct.
   - `memory_shown`: Auri had the memory and still got it wrong.
   - `memory_not_shown`: the memory never reached Auri, so the search is what needs work.

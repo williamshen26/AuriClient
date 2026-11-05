@@ -387,10 +387,12 @@ class MemorySpace:
         self._touch_later([row for row in note_rows if not row.from_archive])
         return block
 
-    def _trace(self, conversation_id: str | None, source: str, rows: list[RecallRow]) -> None:
+    def _trace(
+        self, conversation_id: str | None, source: str, rows: list[RecallRow], *, query: str = "", chars: int = 0
+    ) -> None:
         """For the memory exam: keep what its question was shown (nothing is kept for other conversations)."""
         if conversation_id and conversation_id.startswith(MEMORY_EXAM_CONVERSATION_PREFIX):
-            self.recall_trace.add(conversation_id, source, rows)
+            self.recall_trace.add(conversation_id, source, rows, query=query, chars=chars)
 
     def _touch_later(self, rows: list[RecallRow]) -> None:
         """Count recalls in the background; losing a count is harmless."""
@@ -503,7 +505,7 @@ class MemorySpace:
             private_label=not self.shared,
         )
         self.shown_notes.add(conversation_id, shown)
-        self._trace(conversation_id, "recall_memory", shown)
+        self._trace(conversation_id, "recall_memory", shown, query=query, chars=len(text))
         return ToolRecallResult(rows, text, shown)
 
     async def async_remember(
