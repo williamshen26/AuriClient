@@ -21,9 +21,11 @@ question, a recall_memory search, or nowhere. Each question also records
 how long its turn took, how many times Auri searched and what each search
 returned (its words, how many memories and how long, and their scores), and
 how long one /memory/embed call for the question takes: what embedding
-every message would add to a turn. A file that also lists memories is asked
-against them, in a test memory (exam_memory.py), instead of the household's
-real memory.
+every message would add to a turn. That call's vector then tries a search by
+meaning alone, recorded as meaning_notes: what embedding every message would
+add to the notes. Auri never sees it. A file that also lists memories is
+asked against them, in a test memory (exam_memory.py), instead of the
+household's real memory.
 """
 from __future__ import annotations
 
@@ -47,6 +49,7 @@ from .recall import RecallRow, TraceEntry
 if TYPE_CHECKING:
     from .api import MemoryApi
     from .runtime import MemoryRuntime
+    from .space import MemorySpace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +60,10 @@ _MAX_MEMORY_CHARS = 200
 _MAX_CASE_CHARS = 40
 # How much of each memory a search's details show.
 _MAX_RESULT_CHARS = 80
+# meaning_notes: how far down its search looks for the answer, and how many
+# memories it shows (as many as the automatic notes hold).
+_MEANING_SEARCH_LIMIT = 30
+_MEANING_NOTES_SHOWN = 6
 GRADES = ("correct", "partial", "wrong", "missed")
 # Where an answer's memory can reach Auri, in the order Auri sees them.
 MEMORY_SOURCES = ("profile", "notes", "recall_memory")
@@ -161,18 +168,65 @@ def _scored(row: RecallRow) -> dict[str, Any]:
     return scored
 
 
-async def async_embed_seconds(api: "MemoryApi", text: str) -> float | None:
-    """How long one /memory/embed call for this text takes from here, or None when it fails.
+def meaning_notes(
+    rows: Sequence[RecallRow], trace: Sequence[TraceEntry], words: Sequence[str], *, shared: bool
+) -> dict[str, Any]:
+    """What a search by meaning alone would add to the automatic notes, from that search's rows.
 
-    It's what embedding every message would add to a turn; the vector isn't used.
+    Like the notes, it leaves out what's already in the profile, and private
+    memories unless the household shares them (exam questions have no
+    speaker). With words, it also shows where that memory would land;
+    memory_rank is None when the search didn't reach it.
+    """
+    in_profile = {row.id for entry in trace if entry.source == "profile" for row in entry.rows}
+    rows = [row for row in rows if row.id not in in_profile and (shared or row.sensitivity == "normal")]
+    notes: dict[str, Any] = {}
+    if words:
+        found = find_memory(words, [TraceEntry("meaning_notes", rows)])
+        notes["memory_rank"] = found[1] if found else None
+        notes["memory_similarity"] = round(rows[found[1] - 1].sim or 0, 3) if found else None
+    notes["memories"] = [_scored(row) for row in rows[:_MEANING_NOTES_SHOWN]]
+    return notes
+
+
+async def async_meaning_notes(
+    space: "MemorySpace", vector: list[float], tag: str, trace: Sequence[TraceEntry], memory: str | None
+) -> dict[str, Any] | None:
+    """Try that search for one question, or None when it fails. Its results only go in the exam's result."""
+    store = space.store
+    try:
+        rows = await space.hass.async_add_executor_job(
+            lambda: store.semantic_recall(
+                query_vector=vector,
+                embedding_model=tag,
+                terms="",
+                subject_ids=[],
+                hint_days=[],
+                adjacent_days=[],
+                range_start=None,
+                range_end=None,
+                min_sim=0,
+                limit=_MEANING_SEARCH_LIMIT,
+            )
+        )
+    except Exception as err:  # noqa: BLE001 (a measurement must never fail the exam)
+        _LOGGER.debug("Memory exam: the search by meaning failed: %s", err)
+        return None
+    return meaning_notes(rows, trace, memory_words(memory), shared=space.shared)
+
+
+async def async_embed_question(api: "MemoryApi", text: str) -> tuple[float, list[float], str] | None:
+    """One /memory/embed call for this text: how long it took from here, its vector and its tag. None when it fails.
+
+    The time is what embedding every message would add to a turn.
     """
     started = monotonic()
     try:
-        await api.embed([text], task_type="RETRIEVAL_QUERY")
+        vectors, tag = await api.embed([text], task_type="RETRIEVAL_QUERY")
     except Exception as err:  # noqa: BLE001 (a measurement must never fail the exam)
         _LOGGER.debug("Memory exam: timing an embedding call failed: %s", err)
         return None
-    return round(monotonic() - started, 2)
+    return round(monotonic() - started, 2), vectors[0], tag
 
 
 def recall_summary(grades: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
@@ -283,17 +337,22 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
                 speech = (result.response.speech or {}).get("plain", {}).get("speech") or ""
                 trace = space.recall_trace.pop(conversation_id)
                 searched = search_details(trace)
+                # After the turn, so it never changes the turn's own seconds or what Auri saw.
+                embedded = await async_embed_question(runtime.api, question["q"])
                 item: dict[str, Any] = {
                     **question,
                     "answer": " ".join(str(speech).split())[:MAX_FIELD_CHARS],
                     "seconds": seconds,
                     "searches": len(searched),
-                    # Timed after the turn, so it never changes the turn's own seconds.
-                    "embed_seconds": await async_embed_seconds(runtime.api, question["q"]),
+                    "embed_seconds": embedded[0] if embedded else None,
                 }
                 if "memory" in question:
                     found = find_memory(memory_words(question["memory"]), trace)
                     item["memory_found_in"], item["memory_rank"] = found or ("none", None)
+                if embedded and (
+                    notes := await async_meaning_notes(space, embedded[1], embedded[2], trace, question.get("memory"))
+                ):
+                    item["meaning_notes"] = notes
                 if searched:
                     item["search_results"] = searched
                 answered.append(item)
@@ -311,14 +370,14 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
             by_idx = {grade.get("idx"): grade for grade in response.get("grades") or [] if isinstance(grade, dict)}
             for position, item in enumerate(batch):
                 grade = by_idx.get(position) or {}
-                # The long search details go last, after the grade.
-                details = item.pop("search_results", None)
+                # The long details go last, after the grade.
+                details = {key: item.pop(key) for key in ("meaning_notes", "search_results") if key in item}
                 grades.append(
                     {
                         **item,
                         "grade": grade.get("grade") if grade.get("grade") in GRADES else "missed",
                         "reason": str(grade.get("reason") or ""),
-                        **({"search_results": details} if details else {}),
+                        **details,
                     }
                 )
 

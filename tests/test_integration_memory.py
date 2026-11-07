@@ -989,6 +989,13 @@ async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeA
     [returned] = search["memories"]
     assert (search["query"], search["results"], returned["id"]) == (query, 1, volvo["id"])
     assert returned["text"] == "Will wants to buy a Volvo XC40." and search["chars"] > len(returned["text"])
+
+    # Each question also shows what a search by meaning would have added to the notes.
+    notes = car["meaning_notes"]
+    assert list(car)[-2:] == ["meaning_notes", "search_results"]
+    assert (notes["memory_rank"], notes["memories"][0]["id"]) == (1, volvo["id"]) and notes["memory_similarity"] > 0
+    assert result["grades"][2]["meaning_notes"]["memory_rank"] is None  # nothing about the Wi-Fi
+    assert list(result["grades"][3]["meaning_notes"]) == ["memories"]  # it names no memory
     assert all(isinstance(returned[key], float) for key in ("score", "similarity", "keyword"))
     assert all("search_results" not in item for position, item in enumerate(result["grades"]) if position != 1)
 
@@ -1075,6 +1082,9 @@ async def test_an_exam_can_bring_its_own_memories(hass: HomeAssistant, memory_se
     assert "Tuesday" in normal["notes"] and "Thursday" not in normal["notes"]
     assert {"name": "Will", "kind": "person"} in normal["household"]
     assert [(item["memory_found_in"], item["memory_rank"]) for item in result["grades"]] == [("notes", 1), ("recall_memory", 1)]
+    # The search by meaning looks in the test memory too.
+    shown = [memory["text"] for item in result["grades"] for memory in item["meaning_notes"]["memories"]]
+    assert "Pip is allergic to chicken." in shown and "Mia has piano every Tuesday." not in shown
     assert result["file"] == "benchmark.yaml" and result["test_memory"] is True
     # The test memory is gone, and the real memory is as it was.
     assert runtime.exam is None and not _schema_exists(runtime, EXAM_MEMORY_SCHEMA)

@@ -19,8 +19,9 @@ from custom_components.hey_auri_client.memory import guest  # noqa: E402
 from custom_components.hey_auri_client.memory.db import GUEST_MEMORY_SCHEMA, MEMORY_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApiError  # noqa: E402
 from custom_components.hey_auri_client.memory.exam import (  # noqa: E402
-    async_embed_seconds,
+    async_embed_question,
     find_memory,
+    meaning_notes,
     memory_words,
     parse_exam,
     recall_summary,
@@ -304,11 +305,42 @@ async def test_the_exam_times_one_embedding_call_per_question():
             return [[0.0] * 768], "fake-embed@768"
 
     api = Api()
-    seconds = await async_embed_seconds(api, "When is Mia's piano lesson?")
+    seconds, vector, tag = await async_embed_question(api, "When is Mia's piano lesson?")
     assert isinstance(seconds, float) and seconds >= 0
+    assert (vector, tag) == ([0.0] * 768, "fake-embed@768")
     assert api.calls == [(["When is Mia's piano lesson?"], "RETRIEVAL_QUERY")]
     # A call that fails is only a missing measurement, never a failed exam.
-    assert await async_embed_seconds(Api(MemoryApiError("Over budget", status_code=429)), "x") is None
+    assert await async_embed_question(Api(MemoryApiError("Over budget", status_code=429)), "x") is None
+
+
+def test_what_a_search_by_meaning_would_add_to_the_notes():
+    def found(memory_id: int, content: str, sim: float, **fields) -> RecallRow:
+        return RecallRow(id=memory_id, kind="fact", content=content, at=None, score=sim + 0.05, sim=sim, kw=0.0, **fields)
+
+    rows = [
+        found(1, "Mia has piano lessons.", 0.71),
+        found(2, "Will's blood type is O.", 0.68, sensitivity="private"),
+        found(3, "The Wi-Fi network is called MapleHouse.", 0.64),
+        found(4, "The spare key is in the flower pot.", 0.6),
+    ]
+    trace = [TraceEntry("profile", rows[:1]), TraceEntry("notes", [])]
+    wifi = memory_words("MapleHouse")
+
+    # What's in the profile is left out, and a private memory unless the household shares.
+    notes = meaning_notes(rows, trace, wifi, shared=False)
+    assert (notes["memory_rank"], notes["memory_similarity"]) == (1, 0.64)
+    assert [memory["id"] for memory in notes["memories"]] == [3, 4]
+    assert meaning_notes(rows, trace, wifi, shared=True)["memory_rank"] == 2
+
+    # A memory the search didn't reach, and a question that names none.
+    missing = meaning_notes(rows, trace, memory_words("bicycle"), shared=False)
+    assert (missing["memory_rank"], missing["memory_similarity"]) == (None, None)
+    assert list(meaning_notes(rows, trace, [], shared=False)) == ["memories"]
+
+    # It shows as many memories as the notes hold, and finds one further down.
+    many = [found(number, f"Memory number {number}.", 0.6) for number in range(10, 30)]
+    notes = meaning_notes(many, [], memory_words("number 25"), shared=False)
+    assert len(notes["memories"]) == 6 and notes["memory_rank"] == 16
 
 
 def test_an_exam_file_can_bring_its_own_memories():
