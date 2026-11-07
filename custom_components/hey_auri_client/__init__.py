@@ -10,6 +10,7 @@ from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
@@ -35,6 +36,7 @@ from .const import (
 from .conversation.services import async_setup_services
 from .frontend import async_register_frontend_resources
 from .memory.legacy import relocate_legacy_user_data
+from .memory.logins import async_delete_logins_issue, async_update_logins_issue
 from .memory.runtime import MemoryRuntime
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,6 +150,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await bookings.async_start()
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
+    async def _async_check_logins(hass: HomeAssistant) -> None:
+        await async_update_logins_issue(hass, entry)
+
+    # Once the persons are loaded: a Repairs notice for logins that look like a service's.
+    entry.async_on_unload(async_at_started(hass, _async_check_logins))
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     ha_conversation.async_set_agent(hass, entry, agent)
     return True
@@ -162,6 +170,8 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     bookings: BookingSync | None = data.get(DATA_BOOKINGS)
     if bookings is not None:
         await bookings.async_options_updated(dict(entry.options))
+    # Answering Who uses each login, or turning memory off, removes the notice.
+    await async_update_logins_issue(hass, entry)
 
 
 async def _async_relocate_legacy_user_data(hass: HomeAssistant) -> None:
@@ -198,3 +208,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if memory is not None:
         await memory.async_shutdown()
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the integration's Repairs notice with it."""
+    async_delete_logins_issue(hass, entry.entry_id)

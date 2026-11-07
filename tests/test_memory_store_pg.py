@@ -249,6 +249,15 @@ def test_auto_recall_by_keyword_subject_and_day(store):
     assert recall("weather or forecast") == []
     assert digest_id
 
+    # Only a message about that day gets the day's digest in full.
+    def digest_for(**kwargs):
+        args = {"terms": "", "subject_ids": [], "hint_days": [], "adjacent_days": [], "speaker_entity_id": None, **kwargs}
+        return store.auto_recall(**args)[0]
+
+    assert digest_for(hint_days=[yesterday]).for_day
+    assert digest_for(terms="lisbon", adjacent_days=[yesterday]).for_day
+    assert not digest_for(terms="lisbon").for_day
+
 
 def test_semantic_recall_finds_meaning_and_respects_filters(store):
     milk = _unit(1)
@@ -303,6 +312,7 @@ def test_date_ranges_find_commitments_by_their_due_day(store):
             range_start=start + timedelta(hours=4), range_end=start + timedelta(days=1, hours=4),
             due_start=start, due_end=start + timedelta(days=1),
         )
+        assert all(row.for_day for row in rows)  # a date range asks about those days
         return {row.content for row in rows}
 
     for vector in (_unit(99), None):  # the meaning search and the keyword fallback

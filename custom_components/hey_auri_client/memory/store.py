@@ -361,7 +361,10 @@ class MemoryStore:
         return [row[0] for row in rows]
 
     def todays_exchanges(self, *, since: datetime, limit: int = 6) -> list[RecallRow]:
-        """Recent turns not yet processed by the nightly job, as exchange notes (newest first)."""
+        """Recent turns not yet processed by the nightly job, as exchange notes (newest first).
+
+        Only fetched for a message about today, so they're shown in full (for_day).
+        """
         with self._engine.connect() as conn:
             rows = conn.execute(
                 self._sql(
@@ -375,7 +378,10 @@ class MemoryStore:
                 ),
                 {"scope": self.scope, "since": since, "limit": limit},
             ).all()
-        return [RecallRow(id=row[0], kind="exchange", content=row[2], at=row[3], from_archive=True) for row in rows]
+        return [
+            RecallRow(id=row[0], kind="exchange", content=row[2], at=row[3], from_archive=True, for_day=True)
+            for row in rows
+        ]
 
     # ── memories ────────────────────────────────────────────────────────────
 
@@ -722,7 +728,7 @@ class MemoryStore:
                           AND (:shared OR m.sensitivity = 'normal'
                                OR EXISTS (SELECT 1 FROM {_S}.mem_edges e WHERE e.from_memory = m.id
                                           AND e.relation = 'about' AND e.to_entity = CAST(:speaker AS bigint))))
-                    SELECT {_SCORED_COLUMNS},
+                    SELECT {_SCORED_COLUMNS}, (on_day OR near_day) AS for_day,
                            LEAST(kw, 0.5) * 0.6 + CASE WHEN about_subject THEN 0.15 ELSE 0 END
                            + CASE WHEN on_day THEN 0.12 WHEN near_day THEN 0.08 ELSE 0 END
                            + (importance - 3) * 0.02 + 0.05 * exp(-GREATEST(age_days, 0) / 30.0) AS score
@@ -832,7 +838,7 @@ class MemoryStore:
                                OR (COALESCE(m.occurred_at, m.recorded_at) >= CAST(:range_start AS timestamptz)
                                    AND COALESCE(m.occurred_at, m.recorded_at) < CAST(:range_end AS timestamptz))
                                OR (m.due_at >= CAST(:due_start AS timestamptz) AND m.due_at < CAST(:due_end AS timestamptz))))
-                    SELECT {_SCORED_COLUMNS}, sim, kw,
+                    SELECT {_SCORED_COLUMNS}, sim, kw, (on_day OR near_day OR in_range) AS for_day,
                            sim + LEAST(kw, 0.5) * 0.3 + CASE WHEN about_subject THEN 0.08 ELSE 0 END
                            + CASE WHEN on_day THEN 0.12 WHEN near_day THEN 0.08 ELSE 0 END
                            + (importance - 3) * 0.02 + 0.05 * exp(-GREATEST(age_days, 0) / 30.0) AS score
@@ -904,7 +910,7 @@ class MemoryStore:
                                           AND e.relation = 'about' AND e.to_entity = ANY (CAST(:subject_ids AS bigint[])))
                                OR m.source_ref = ANY (CAST(:hint_days AS date[]))
                                OR CAST(:range_start AS timestamptz) IS NOT NULL))
-                    SELECT {_SCORED_COLUMNS}, kw,
+                    SELECT {_SCORED_COLUMNS}, kw, (on_day OR near_day OR in_range) AS for_day,
                            LEAST(kw, 0.5) * 0.6 + CASE WHEN about_subject THEN 0.15 ELSE 0 END
                            + CASE WHEN on_day THEN 0.12 WHEN near_day THEN 0.08 ELSE 0 END
                            + (importance - 3) * 0.02 + 0.05 * exp(-GREATEST(age_days, 0) / 30.0) AS score
@@ -1197,6 +1203,7 @@ def _row(row: Any) -> RecallRow:
         score=float(score) if isinstance(score, (int, float)) else 0.0,
         sim=float(sim) if isinstance(sim, (int, float)) else None,
         kw=float(kw) if isinstance(kw, (int, float)) else None,
+        for_day=bool(values.get("for_day")),
     )
 
 

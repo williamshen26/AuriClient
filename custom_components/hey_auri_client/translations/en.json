@@ -130,7 +130,7 @@
       },
       "logins": {
         "title": "Who uses each login",
-        "description": "When someone uses Assist signed in to Home Assistant, Auri uses the memories of the person their login is linked to. Choose someone else if another person uses a login (for example, you sign in as admin). Choose Shared for a login the household shares, like a wall tablet: Auri then treats the speaker as unknown, as on a voice satellite. Choose Not a person for a login a service uses, like Zigbee2MQTT's MQTT login: its person isn't counted as a household member. Nothing changes in Home Assistant."
+        "description": "When someone uses Assist signed in to Home Assistant, Auri uses the memories of the person their login is linked to. Choose someone else if another person uses a login (for example, you sign in as admin). Choose Shared for a login the household shares, like a wall tablet: Auri then treats the speaker as unknown, as on a voice satellite. Choose Not a person for a login a service uses, like Zigbee2MQTT's MQTT login: its person isn't counted as a household member. Nothing changes in Home Assistant.{preselected}"
       },
       "metrics": {
         "title": "Metrics settings",
@@ -144,6 +144,23 @@
           "metrics_password": "InfluxDB password",
           "metrics_measurement": "InfluxDB measurement",
           "metrics_ssl": "Use SSL for InfluxDB"
+        }
+      }
+    }
+  },
+  "issues": {
+    "service_logins": {
+      "title": "Some logins look like services, not people",
+      "fix_flow": {
+        "step": {
+          "logins": {
+            "title": "Who uses each login",
+            "description": "Auri counts the person of each Home Assistant login as a household member, so a login that a service or a device uses, like Zigbee2MQTT's MQTT login, should be Not a person.\n\n**Set to Not a person, because the name looks like a service's or a device's:** {logins}. If one is someone's own login, choose their person instead. Choose Shared for a login the household shares, like a wall tablet. Nothing changes in Home Assistant."
+          }
+        },
+        "abort": {
+          "not_set_up": "Hey Auri Client isn't set up anymore.",
+          "answered": "Who uses each login has been answered already."
         }
       }
     }

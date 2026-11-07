@@ -112,10 +112,24 @@ def test_format_note_and_caps():
         '(replaced: "Mia prefers almond milk in her coffee.", 2026-08-03)'
     )
 
-    digest = RecallRow(id=1, kind="digest", content="## Summary\n" + "word " * 400, at=None)
-    line = recall.format_note(digest)
-    assert line.startswith("• [#1 · undated · daily digest] Summary word")
+    day = (
+        "## Summary\nWill planned the spring trip to Lisbon with Sofia.\n"
+        "## Decisions\n" + "- Will decided to book the flights to Lisbon on Friday.\n" * 30
+    )
+    # The day asked about: the whole digest, up to its cap.
+    line = recall.format_note(RecallRow(id=1, kind="digest", content=day, at=None, for_day=True))
+    assert line.startswith("• [#1 · undated · daily digest] Summary Will planned the spring trip") and "Decisions" in line
     assert len(line) < 960 and line.endswith("…")
+    # Another day: only its Summary section, with "…" for the rest.
+    assert recall.format_note(RecallRow(id=2, kind="digest", content=day, at=None)) == (
+        "• [#2 · undated · daily digest] Summary Will planned the spring trip to Lisbon with Sofia. …"
+    )
+    long_summary = recall.format_note(RecallRow(id=3, kind="digest", content="## Summary\n" + "word " * 400, at=None))
+    assert len(long_summary) < 450 and long_summary.endswith("…")
+    # An earlier conversation from another day is cut shorter too.
+    talk = "Will: What should I pack for Lisbon? / Assistant: " + "Light layers and good shoes. " * 40
+    assert 700 < len(recall.format_note(RecallRow(id=4, kind="exchange", content=talk, at=None, for_day=True))) < 760
+    assert len(recall.format_note(RecallRow(id=4, kind="exchange", content=talk, at=None))) < 450
 
     rows = [RecallRow(id=i, kind="fact", content="x" * 300, at=None) for i in range(30)]
     block = recall.format_notes(rows, total_chars=recall.AUTO_NOTES_TOTAL_CHARS)

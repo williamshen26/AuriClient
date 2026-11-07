@@ -18,9 +18,13 @@ CONF_MEMORY_VAULT_INCLUDE_PRIVATE = "memory_vault_include_private"
 CONF_MEMORY_DAY_BOUNDARY_HOUR = "memory_day_boundary_hour"
 CONF_MEMORY_ARCHIVE_RETENTION_DAYS = "memory_archive_retention_days"
 CONF_MEMORY_SHARE_HOUSEHOLD = "memory_share_household"
-# Who uses each Home Assistant login: {user id: person entity id, or "shared"}.
-# Read on every turn, so changing it doesn't restart memory.
+# Who uses each Home Assistant login: {user id: person entity id, "shared" or
+# "not_a_person"}, for logins that aren't used by their own person. Read on
+# every turn, so changing it doesn't restart memory.
 CONF_MEMORY_LOGIN_PEOPLE = "memory_login_people"
+# The logins (user ids) the household has answered that question for, so it's
+# asked only once (memory/logins.py). Hidden.
+CONF_MEMORY_LOGINS_ASKED = "memory_logins_asked"
 # Guest Settings: memory for guests in guest mode, and when the host last asked
 # to start it again (a timestamp; the checkbox itself isn't stored).
 CONF_GUEST_MEMORY_ENABLED = "guest_memory_enabled"

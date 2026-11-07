@@ -149,6 +149,10 @@ Go to **Settings → Devices & services → Hey Auri Client → Configure**.
 
 Connects Auri's long-term memory to your PostgreSQL database. See [Memory](#memory) for the options.
 
+**Who uses each login** (with memory)
+
+Who uses each Home Assistant login: its own person, someone else, Shared, or Not a person. See [Who is speaking](#who-is-speaking).
+
 **Metrics** (optional)
 
 Sends the response time of each request to the Auri cloud to your own InfluxDB 1.x server. Fill in the host, port (default 8086), database, username, password, measurement name (default `saas_request_latency`), and whether to use SSL.
@@ -192,13 +196,13 @@ Go to **Settings → Devices & services → Hey Auri Client → Configure → Me
 | Keep the conversation archive for (days) | 365 by default; 0 keeps it forever. |
 | Share memories within the household | Off by default. See [Who is speaking](#who-is-speaking). |
 
-Saving tests the connection without changing anything, and tells you what's wrong if it can't be used: wrong password, no pgvector, a user without the rights to enable pgvector or create the schema, and so on. The **Auri Memory** sensor (`sensor.auri_memory`) then shows `enabled`.
+Saving tests the connection without changing anything, and tells you what's wrong if it can't be used: wrong password, no pgvector, a user without the rights to enable pgvector or create the schema, and so on. With more than one Home Assistant login, the first save then asks who uses each one (see [Who is speaking](#who-is-speaking)). The **Auri Memory** sensor (`sensor.auri_memory`) then shows `enabled`.
 
 The password is stored in Home Assistant's configuration, like the passwords of other integrations.
 
 ### How Auri learns
 
-- **During a conversation**, Auri gets a short profile of important facts about the speaker and the household, plus notes that match what was said. It can also look further back. These lookups happen in Home Assistant, in a fraction of a second.
+- **During a conversation**, Auri gets a short profile of important facts about the speaker and the household, plus notes that match what was said. It can also look further back. These lookups happen in Home Assistant, in a fraction of a second. A day's summary or conversation is shown in full when you ask about that day ("what did we do yesterday?"). Otherwise Auri gets only the start, such as the summary's first few sentences, because what that day decided or planned is also kept as memories of their own.
 - **When you ask** ("remember that…", "Mia doesn't eat pork anymore"), Auri saves it right away. A correction ("Mia's piano lesson moved to Thursday") replaces the old memory right away too; the old version is kept as history.
 - **Every night**, about 15 to 25 minutes after the day ends, the day's conversations are sent to the Auri cloud to be summarized. Auri keeps:
   - a summary of the day;
@@ -223,6 +227,12 @@ When you use Assist while signed in to Home Assistant, Auri knows who you are. V
 People and pets don't have to be in Home Assistant to be remembered: "remember Lillian likes candy" is saved about Lillian, and Auri learns your pets from what you say. Say who someone is the first time ("my girlfriend Lillian likes candy", "our dog Biscuit is allergic to chicken"), so Auri can also answer questions that don't use their name. A pet added to Home Assistant as a person (for example to track its collar) is treated as a person.
 
 When you're signed in, Auri takes you to be the person your login is linked to in Home Assistant. If someone else uses a login (you test with the admin account, say), or the household shares one, like a wall tablet, set that in the integration's options under **Who uses each login**. A shared login is treated like a voice satellite. Mark a login a service uses, such as Zigbee2MQTT's MQTT login, as **Not a person**, so its person isn't listed as a household member. You don't need to delete it in Home Assistant: deleting a person there also deletes its login.
+
+Auri asks about this once:
+- **When you turn memory on** with more than one login in Home Assistant, the **Who uses each login** question comes right after the memory settings, and both are saved together.
+- **If memory was already on,** a notice under **Settings → Repairs** asks instead, when a login looks like a service's. A login added later that looks like one brings the notice back.
+
+Logins whose name looks like a service's or a device's (admin, MQTT, Node-RED, Frigate, a kiosk or wall tablet, and so on) start as **Not a person**. If one of them is someone's own login, choose their person before you save.
 
 Memories about health, money, contact details and birthdays are marked **private**: Auri uses them only for the person they're about.
 
@@ -429,6 +439,8 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | The QR code opens the Auri home page | Press **Refresh Session**. |
 | Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
+| **Settings → Repairs** says some logins look like services, not people | Open the notice and check who uses each login. Auri counts each login's person as a household member, so a login that a service or a device uses should be **Not a person**. |
+| Auri counts a service, like MQTT-user, as a household member | Set its login to **Not a person** under **Configure → Who uses each login**. |
 | `sensor.auri_memory` is `unavailable` | Home Assistant can't reach the database. Auri keeps working without memory, holds on to the latest conversation (up to 1,000 messages), and saves it when the database is back. |
 | `sensor.auri_memory` is `error` | Its `error` attribute names the problem, for example `pgvector_missing`, `insufficient_privilege` or `schema_too_new` (the database was set up by a newer version of this integration: update it). |
 | Auri uses the wrong name for the guests | A name typed in **Guest name** is always used. Otherwise it's the one the guests gave Auri, shown at the top of the Guest options: type the right one in **Guest name**. |

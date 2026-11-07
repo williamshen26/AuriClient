@@ -279,10 +279,18 @@ class RecallRow:
     # closeness in meaning (sim) and the keyword rank (kw).
     sim: float | None = None
     kw: float | None = None
+    # True when the message or search asked about this memory's day (or the day
+    # next to it, or a date range that holds it): a digest or an earlier
+    # conversation is then shown in full.
+    for_day: bool = False
 
 
 # Per-kind length caps for one note, and total caps for a block of notes.
 NOTE_CHAR_LIMITS = {"exchange": 700, "digest": 900}
+# A digest or an earlier conversation from a day nobody asked about is mostly
+# there for a word or a meaning it shares, so it's cut shorter: a digest to its
+# Summary section (its decisions, plans and facts are kept as memories of their own).
+BRIEF_CHAR_LIMITS = {"exchange": 400, "digest": 400}
 DEFAULT_NOTE_CHARS = 500
 AUTO_NOTES_TOTAL_CHARS = 3500
 TOOL_NOTES_TOTAL_CHARS = 7000
@@ -294,6 +302,17 @@ def _condense(text: str, max_chars: int) -> str:
     if len(flat) <= max_chars:
         return flat
     return flat[: max_chars - 1].rstrip() + "…"
+
+
+_SUMMARY_SECTION = re.compile(r"\s*## Summary\b.*?(?=\n## |\Z)", re.DOTALL)
+
+
+def _brief(row: RecallRow) -> str:
+    """A digest's Summary section, ending in "…" when more follows; other kinds as they are."""
+    if row.kind != "digest" or not (match := _SUMMARY_SECTION.match(row.content or "")):
+        return row.content
+    summary = match.group(0).rstrip()
+    return summary if len(summary) >= len(row.content.rstrip()) else summary + " …"
 
 
 def _local(at: datetime | None, tz: tzinfo | None) -> datetime | None:
@@ -325,7 +344,8 @@ def format_note(
     """• [#812 · 2026-10-12 18:04 · preference · about Mia · private] text (replaced: "...", 2026-08-03)
 
     Commitments also show their due date: [#58 · 2026-10-13 08:02 · commitment · due Thu 2026-10-15 (past)].
-    private_label=False leaves "private" out, for a household that shares its memories.
+    private_label=False leaves "private" out, for a household that shares its memories. A digest or an
+    earlier conversation from a day nobody asked about (for_day) is cut to BRIEF_CHAR_LIMITS.
     """
     local = _local(row.at, tz)
     labels = [local.strftime("%Y-%m-%d %H:%M") if local else "undated", KIND_LABELS.get(row.kind, row.kind)]
@@ -337,8 +357,10 @@ def format_note(
         labels.append("about " + ", ".join(row.about))
     if private_label and row.sensitivity == "private":
         labels.append("private")
-    limit = max_chars or NOTE_CHAR_LIMITS.get(row.kind, DEFAULT_NOTE_CHARS)
-    line = f"• [{' · '.join(labels)}] {_condense(row.content, limit)}"
+    content, limit = row.content, max_chars or NOTE_CHAR_LIMITS.get(row.kind, DEFAULT_NOTE_CHARS)
+    if max_chars is None and not row.for_day and row.kind in BRIEF_CHAR_LIMITS:
+        content, limit = _brief(row), BRIEF_CHAR_LIMITS[row.kind]
+    line = f"• [{' · '.join(labels)}] {_condense(content, limit)}"
     if row.replaced:
         history = []
         for content, at in row.replaced[:2]:

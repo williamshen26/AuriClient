@@ -47,7 +47,6 @@ from .const import (
     CONF_MEMORY_DB_SSLMODE,
     CONF_MEMORY_DB_USER,
     CONF_MEMORY_ENABLED,
-    CONF_MEMORY_LOGIN_PEOPLE,
     CONF_MEMORY_SHARE_HOUSEHOLD,
     CONF_MEMORY_VAULT_INCLUDE_PRIVATE,
     CONF_MEMORY_VAULT_PATH,
@@ -88,14 +87,12 @@ from .const import (
 )
 from .memory.config import MemoryConfig
 from .memory.db import MemoryDbError, test_connection
-from .memory.identity import LOGIN_NOT_A_PERSON, LOGIN_SHARED, household_persons
+from .memory.logins import answers, async_logins, logins_form, names_text, unanswered
 from .memory.obsidian import validate_vault
 
 _LOGGER = logging.getLogger(__name__)
 # Memory text fields an empty input clears (rather than keeping the old value).
 _MEMORY_TEXT_FIELDS = (CONF_MEMORY_DB_HOST, CONF_MEMORY_DB_NAME, CONF_MEMORY_DB_USER, CONF_MEMORY_VAULT_PATH)
-# "Who uses each login" default: the person Home Assistant links the login to (not saved).
-_LOGIN_LINKED = "linked"
 # Guest Settings checkbox: erase guest memory and start it again from the guest details.
 _RESET_GUEST_MEMORY = "reset_guest_memory"
 _PHONE_NANP_10_PATTERN = re.compile(r"[2-9]\d{9}")
@@ -109,6 +106,16 @@ def _optional_with_value(key: str, value: Any) -> vol.Optional:
     """
     text = str(value or "").strip()
     return vol.Optional(key, default=text) if text else vol.Optional(key)
+
+
+def _preselected_text(labels: list[str]) -> str:
+    """For Who uses each login's description: the logins it starts as Not a person, if any."""
+    if not labels:
+        return ""
+    return (
+        f"\n\n**Set to Not a person, because the name looks like a service's or a device's:** {names_text(labels)}."
+        " If one is someone's own login, choose their person instead."
+    )
 
 # Display names for the STT language dropdown only — SUPPORTED_LANGUAGES
 # itself stays plain ISO 639-1 codes for everything else (Cartesia's API,
@@ -278,6 +285,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class OptionsFlow(config_entries.OptionsFlow):
     """Handle options for the thin frontend integration."""
+
+    # Memory settings waiting for the Who uses each login answers (async_step_memory).
+    _options: dict[str, Any] | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -605,6 +615,10 @@ class OptionsFlow(config_entries.OptionsFlow):
 
             errors = await self._async_validate_memory(MemoryConfig.from_options(data))
             if not errors:
+                if await self._async_ask_logins_first(data):
+                    # Saved together with the answers, so memory never lists a service as a household member.
+                    self._options = data
+                    return await self.async_step_logins()
                 return self.async_create_entry(title="", data=data)
 
         values = {**self.config_entry.options, **(user_input or {})}
@@ -665,6 +679,13 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(step_id="memory", data_schema=schema, errors=errors)
 
+    async def _async_ask_logins_first(self, options: dict[str, Any]) -> bool:
+        """Whether turning memory on asks Who uses each login first: once, and only with more than one login."""
+        if not options.get(CONF_MEMORY_ENABLED) or self.config_entry.options.get(CONF_MEMORY_ENABLED):
+            return False
+        logins = await async_logins(self.hass)
+        return len(logins) > 1 and bool(unanswered(logins, options))
+
     async def _async_validate_memory(self, cfg: MemoryConfig) -> dict[str, str]:
         """Dry-run the database setup and check the vault folder; changes nothing."""
         if not cfg.enabled:
@@ -695,57 +716,17 @@ class OptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Say who uses each Home Assistant login, so memory knows who is speaking."""
-        logins = await self._async_logins()
+        options = self._options if self._options is not None else dict(self.config_entry.options)
+        logins = await async_logins(self.hass)
         if user_input is not None:
-            used_by = {
-                user_id: str(user_input[label])
-                for label, user_id in logins
-                if user_input.get(label) not in (None, "", _LOGIN_LINKED)
-            }
-            data = dict(self.config_entry.options)
-            data[CONF_MEMORY_LOGIN_PEOPLE] = used_by
-            return self.async_create_entry(title="", data=data)
+            return self.async_create_entry(title="", data=answers(logins, user_input, options))
 
-        saved = self.config_entry.options.get(CONF_MEMORY_LOGIN_PEOPLE) or {}
-        persons = household_persons(self.hass)
-        people = household_persons(self.hass, saved)  # without logins marked "not a person"
-        fields: dict[Any, Any] = {}
-        for label, user_id in logins:
-            linked = next((p["name"] for p in persons if p.get("user_id") == user_id), None)
-            options = [
-                selector.SelectOptionDict(
-                    value=_LOGIN_LINKED,
-                    label=f"{linked} (its person in Home Assistant)" if linked else "Nobody (no person in Home Assistant)",
-                ),
-                *(
-                    selector.SelectOptionDict(value=p["entity_id"], label=p["name"])
-                    for p in people
-                    if p.get("user_id") != user_id
-                ),
-                selector.SelectOptionDict(value=LOGIN_SHARED, label="Shared: nobody in particular, as on a voice satellite"),
-                selector.SelectOptionDict(
-                    value=LOGIN_NOT_A_PERSON, label="Not a person: a service uses it (like MQTT), not a household member"
-                ),
-            ]
-            current = saved.get(user_id, _LOGIN_LINKED)
-            if current not in {option["value"] for option in options}:
-                current = _LOGIN_LINKED  # the person was removed from Home Assistant
-            fields[vol.Optional(label, default=current)] = selector.SelectSelector(
-                selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.DROPDOWN)
-            )
-        return self.async_show_form(step_id="logins", data_schema=vol.Schema(fields))
-
-    async def _async_logins(self) -> list[tuple[str, str]]:
-        """(field label, user id) for each login people use, labelled with its name."""
-        users = sorted(
-            (user for user in await self.hass.auth.async_get_users() if user.is_active and not user.system_generated),
-            key=lambda user: (user.name or "").lower(),
+        schema, preselected = logins_form(self.hass, logins, options)
+        return self.async_show_form(
+            step_id="logins",
+            data_schema=schema,
+            description_placeholders={"preselected": _preselected_text(preselected)},
         )
-        names = [user.name or "Unnamed login" for user in users]
-        return [
-            (name if names.count(name) == 1 else f"{name} ({user.id[:6]})", user.id)
-            for name, user in zip(names, users)
-        ]
 
     async def async_step_metrics(
         self, user_input: dict[str, Any] | None = None

@@ -17,12 +17,13 @@ import pytest
 
 pytest.importorskip("pytest_homeassistant_custom_component.common")
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed  # noqa: E402
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser, async_fire_time_changed  # noqa: E402
 
 from homeassistant.components import conversation  # noqa: E402
 from homeassistant.core import Context, HomeAssistant  # noqa: E402
 from homeassistant.data_entry_flow import FlowResultType  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
+from homeassistant.helpers import issue_registry as ir  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
 from homeassistant.util import dt as dt_util  # noqa: E402
 
@@ -36,6 +37,7 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     CONF_MEMORY_DB_USER,
     CONF_MEMORY_ENABLED,
     CONF_MEMORY_LOGIN_PEOPLE,
+    CONF_MEMORY_LOGINS_ASKED,
     CONF_MEMORY_SHARE_HOUSEHOLD,
     CONF_MEMORY_VAULT_PATH,
     CONF_SHARED_SECRET,
@@ -43,7 +45,7 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     MEMORY_EXAM_FILE,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
-from custom_components.hey_auri_client.memory import exam, turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory import exam, logins, turn_log  # noqa: E402
 from custom_components.hey_auri_client.memory.db import EXAM_MEMORY_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory.runtime import MemoryRuntime, MemoryState  # noqa: E402
 from custom_components.hey_auri_client.memory.store import NewMemory  # noqa: E402
@@ -168,10 +170,122 @@ async def test_who_uses_each_login(hass: HomeAssistant) -> None:
         will.id: "shared",
         mqtt.id: "not_a_person",
     }
+    assert {admin.id, will.id, mqtt.id} <= set(entry.options[CONF_MEMORY_LOGINS_ASKED])
 
     # A login that isn't a person's: its person is no longer offered for the others.
     _result, fields = await open_form()
     assert "person.mqtt_user" not in {option["value"] for option in fields["Admin"].config["options"]}
+
+
+def test_names_that_look_like_a_service():
+    for name in ("Admin", "HA admin", "Administrator", "MQTT-user", "mqttuser", "Zigbee2MQTT", "Node-RED", "nodered",
+                 "Frigate", "ESPHome", "Kitchen tablet", "Wall panel", "Kiosk", "Guest", "Test"):
+        assert logins.looks_like_a_service(name), name
+    for name in ("Will", "Sofia", "Lillian", "Grandma Rose", "Admir", "Tessa", "Tabitha", "Dashiell", None):
+        assert not logins.looks_like_a_service(name), name
+    assert [logins.names_text(labels) for labels in ([], ["Admin"], ["Admin", "MQTT"], ["Admin", "Frigate", "MQTT"])] == [
+        "", "Admin", "Admin and MQTT", "Admin, Frigate and MQTT",
+    ]
+
+
+def _people(hass: HomeAssistant, *users) -> None:
+    """A person for each login, as Home Assistant makes one with every login."""
+    for user in users:
+        hass.states.async_set(
+            f"person.{user.name.lower().replace('-', '_')}", "unknown", {"friendly_name": user.name, "user_id": user.id}
+        )
+
+
+async def test_setting_up_memory_asks_who_uses_each_login(hass: HomeAssistant, memory_options) -> None:
+    will = await hass.auth.async_create_user("Will")
+    admin = await hass.auth.async_create_user("Admin")
+    mqtt = await hass.auth.async_create_user("MQTT-user")
+    _people(hass, will, admin, mqtt)
+    entry = _entry()
+    entry.add_to_hass(hass)
+
+    result = await _open_memory_step(hass, entry)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], memory_options)
+    # Turning memory on asks one more question, and nothing is saved before it's answered.
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "logins"
+    assert CONF_MEMORY_ENABLED not in entry.options
+    defaults = {str(field): field.default() for field in result["data_schema"].schema}
+    assert (defaults["Admin"], defaults["MQTT-user"], defaults["Will"]) == ("not_a_person", "not_a_person", "linked")
+    assert "Not a person, because the name looks like a service's or a device's:** Admin and MQTT-user." in (
+        result["description_placeholders"]["preselected"]
+    )
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_MEMORY_ENABLED] is True
+    assert entry.options[CONF_MEMORY_DB_PASSWORD] == memory_options[CONF_MEMORY_DB_PASSWORD]
+    assert entry.options[CONF_MEMORY_LOGIN_PEOPLE] == {admin.id: "not_a_person", mqtt.id: "not_a_person"}
+
+    # Asked once: saving the memory settings again goes straight through.
+    result = await _open_memory_step(hass, entry)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], memory_options)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_a_repairs_notice_asks_about_logins_that_look_like_a_service(hass: HomeAssistant, hass_client) -> None:
+    will = await hass.auth.async_create_user("Will")
+    admin = await hass.auth.async_create_user("Admin")
+    mqtt = await hass.auth.async_create_user("MQTT-user")
+    _people(hass, will, admin, mqtt)
+    # Memory was on before the question was asked at setup.
+    entry = _entry({CONF_MEMORY_ENABLED: True})
+    entry.add_to_hass(hass)
+    issue_id = f"service_logins_{entry.entry_id}"
+    issues = ir.async_get(hass)
+
+    await logins.async_update_logins_issue(hass, entry)
+    issue = issues.async_get_issue(DOMAIN, issue_id)
+    assert issue.is_fixable and issue.translation_placeholders == {"logins": "Admin and MQTT-user"}
+
+    # Its fix is the question, with those two set to Not a person.
+    assert await async_setup_component(hass, "repairs", {})
+    hass.config.components.add(DOMAIN)  # Repairs only uses the fixes of integrations that are loaded
+    client = await hass_client()
+    response = await client.post("/api/repairs/issues/fix", json={"handler": DOMAIN, "issue_id": issue_id})
+    flow = await response.json()
+    assert flow["step_id"] == "logins" and flow["description_placeholders"] == {"logins": "Admin and MQTT-user"}
+    defaults = {field["name"]: field.get("default") for field in flow["data_schema"]}
+    assert (defaults["Admin"], defaults["MQTT-user"], defaults["Will"]) == ("not_a_person", "not_a_person", "linked")
+    response = await client.post(f"/api/repairs/issues/fix/{flow['flow_id']}", json={})
+    assert (await response.json())["type"] == "create_entry"
+    assert entry.options[CONF_MEMORY_LOGIN_PEOPLE] == {admin.id: "not_a_person", mqtt.id: "not_a_person"}
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+
+    # Asked once: a login set back to its own person afterwards stays that way.
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_MEMORY_LOGIN_PEOPLE: {mqtt.id: "not_a_person"}}
+    )
+    await logins.async_update_logins_issue(hass, entry)
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+
+    # A login added later that looks like a service's brings the notice back, for that one.
+    frigate = await hass.auth.async_create_user("Frigate")
+    _people(hass, frigate)
+    await logins.async_update_logins_issue(hass, entry)
+    assert issues.async_get_issue(DOMAIN, issue_id).translation_placeholders == {"logins": "Frigate"}
+
+    # With memory off, nothing lists the household: no notice.
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MEMORY_ENABLED: False})
+    await logins.async_update_logins_issue(hass, entry)
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+
+
+async def test_the_owners_own_login_is_kept_when_every_login_looks_like_a_service(hass: HomeAssistant) -> None:
+    # Whoever set up Home Assistant called their own login Admin; the MQTT broker uses the other one.
+    admin = MockUser(name="Admin", is_owner=True).add_to_hass(hass)
+    mqtt = await hass.auth.async_create_user("MQTT-user")
+    _people(hass, admin, mqtt)
+    entry = _entry({CONF_MEMORY_ENABLED: True})
+    entry.add_to_hass(hass)
+
+    await logins.async_update_logins_issue(hass, entry)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"service_logins_{entry.entry_id}")
+    assert issue.translation_placeholders == {"logins": "MQTT-user"}
 
 
 # ── agent turns ─────────────────────────────────────────────────────────────
