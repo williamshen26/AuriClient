@@ -22,7 +22,7 @@ from homeassistant.core import callback
 from homeassistant.util import dt as dt_util
 
 from ..bookings.guest_name import guest_name
-from ..const import CONF_GUEST_COUNT, MEMORY_EXAM_CONVERSATION_PREFIX
+from ..const import CONF_GUEST_COUNT, CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, MEMORY_EXAM_CONVERSATION_PREFIX
 from .api import MemoryApiError
 from .config import CONF_MEMORY_LOGIN_PEOPLE
 from .db import MemoryDbError
@@ -41,7 +41,9 @@ from .recall import (
     format_notes_with_rows,
     match_subjects,
     mentions_self,
+    notes_with_meaning,
     parse_date_hints,
+    reads_as_english,
     should_auto_recall,
     websearch_query,
 )
@@ -56,6 +58,15 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 TURN_CONTEXT_BUDGET_SECONDS = 0.3
+# Notes by meaning, for a message the keyword search can't read. The embedding takes about
+# 0.4 s from the hub, so a call this slow isn't worth a longer wait.
+MEANING_NOTES_BUDGET_SECONDS = 0.8
+# On the memory exam, the answers in the top 6 sat at 0.61 or closer, and nothing was closer
+# than 0.52 to a question no memory answers.
+MEANING_NOTES_MIN_SIMILARITY = 0.6
+# Enough for the notes after leaving out what's in the profile, which holds 12.
+_MEANING_SEARCH_LIMIT = 18
+_MEANING_SEARCH_TIMEOUT_MS = 500
 _PROFILE_CACHE_SECONDS = 300
 # How close in meaning a digest or exchange must be to something forgotten
 # before it is retracted along with it.
@@ -347,7 +358,10 @@ class MemorySpace:
     # ── per-turn memory block ───────────────────────────────────────────────
 
     async def async_turn_context(self, text: str, speaker: Speaker, conversation_id: str | None) -> dict[str, Any]:
-        """The context.memory block for a turn in this space. Never raises; at most ~300 ms of recall."""
+        """The context.memory block for a turn in this space. Never raises.
+
+        At most ~300 ms of recall, or ~800 ms for a message that isn't in English.
+        """
         block: dict[str, Any] = {"v": 1, "status": self.context_status, "scope": self.mode}
         if not self.enabled:
             return block
@@ -364,20 +378,18 @@ class MemorySpace:
         speaker_subject = self._person_subject(who.name, who.person_entity_id) if who else None
         if speaker_subject is None and self.is_guest and (only_guest := self._only_guest()):
             speaker_subject = self._person_subject(only_guest, None)
-        try:
-            async with asyncio.timeout(TURN_CONTEXT_BUDGET_SECONDS):
-                profile_rows, note_rows = await self.hass.async_add_executor_job(
-                    self._turn_recall_blocking, text, speaker_subject.id if speaker_subject else None, self._member_ids()
-                )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Memory recall skipped this turn: %s", err)
-            profile_rows, note_rows = [], []
+        speaker_entity_id = speaker_subject.id if speaker_subject else None
+        (profile_rows, note_rows), by_meaning = await asyncio.gather(
+            self._async_keyword_recall(text, speaker_entity_id), self._async_meaning_recall(text, speaker_entity_id)
+        )
 
         tz = dt_util.get_default_time_zone()
         private_label = not self.shared
         block["profile"], shown_profile = format_notes_with_rows(
             profile_rows, total_chars=PROFILE_TOTAL_CHARS, tz=tz, private_label=private_label
         )
+        # Only what the profile shows: an important memory it had no room for can still be a note.
+        note_rows = notes_with_meaning(by_meaning, note_rows, shown_profile)
         block["notes"], shown_notes = format_notes_with_rows(
             note_rows, total_chars=AUTO_NOTES_TOTAL_CHARS, tz=tz, private_label=private_label
         )
@@ -407,6 +419,53 @@ class MemorySpace:
                 _LOGGER.debug("Couldn't record memory access: %s", err)
 
         self.entry.async_create_background_task(self.hass, _touch(), "hey_auri_client memory touch")
+
+    async def _async_keyword_recall(
+        self, text: str, speaker_entity_id: int | None
+    ) -> tuple[list[RecallRow], list[RecallRow]]:
+        """The profile and the keyword notes, or nothing if they take too long."""
+        try:
+            async with asyncio.timeout(TURN_CONTEXT_BUDGET_SECONDS):
+                return await self.hass.async_add_executor_job(
+                    self._turn_recall_blocking, text, speaker_entity_id, self._member_ids()
+                )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Memory recall skipped this turn: %s", err)
+            return [], []
+
+    async def _async_meaning_recall(self, text: str, speaker_entity_id: int | None) -> list[RecallRow]:
+        """Memories close in meaning to a message the keyword search can't read.
+
+        Memories are written in English, so in another language the keyword notes only work
+        through names. Nothing on a timeout or an error: the turn goes on with the keyword notes.
+        """
+        store = self.store
+        language = str(self.entry.options.get(CONF_STT_LANGUAGE) or DEFAULT_STT_LANGUAGE)
+        if store is None or not should_auto_recall(text) or reads_as_english(text, language):
+            return []
+        try:
+            async with asyncio.timeout(MEANING_NOTES_BUDGET_SECONDS):
+                vectors, tag = await self.api.embed([text], task_type="RETRIEVAL_QUERY", scope=self.mode)
+                return await self.hass.async_add_executor_job(
+                    lambda: store.semantic_recall(
+                        query_vector=vectors[0],
+                        embedding_model=tag,
+                        terms="",
+                        subject_ids=[],
+                        hint_days=[],
+                        adjacent_days=[],
+                        range_start=None,
+                        range_end=None,
+                        min_sim=MEANING_NOTES_MIN_SIMILARITY,
+                        limit=_MEANING_SEARCH_LIMIT,
+                        shared=self.shared,
+                        speaker_entity_id=speaker_entity_id,
+                        timeout_ms=_MEANING_SEARCH_TIMEOUT_MS,
+                    )
+                )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Memory recall by meaning skipped this turn: %s", err)
+            return []
 
     def _turn_recall_blocking(
         self, text: str, speaker_entity_id: int | None, member_ids: list[int]
@@ -450,8 +509,7 @@ class MemorySpace:
             # tonight; include the latest (after midnight that day began yesterday).
             boundary = self.config.day_boundary_hour
             note_rows += store.todays_exchanges(since=local_day_start(current_day(dt_util.now(), boundary), boundary))
-        profile_ids = {row.id for row in profile_rows}
-        return profile_rows, [row for row in note_rows if row.id not in profile_ids]
+        return profile_rows, note_rows
 
     # ── tools ───────────────────────────────────────────────────────────────
 

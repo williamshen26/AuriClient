@@ -11,6 +11,7 @@ import hashlib
 import re
 from time import monotonic
 from typing import Iterable, Sequence
+import unicodedata
 
 STOPWORDS = frozenset(
     """
@@ -39,7 +40,20 @@ _SHORT_REPLIES = frozenset(
     }
 )
 
-_WORD = re.compile(r"[a-z0-9][a-z0-9'’-]*")
+# What the keyword search can use: Latin letters with their accents, and digits.
+# Memories are written in English, so words in other scripts could only dilute its rank.
+_WORD_CHARS = "a-z0-9ß-öø-ɏḀ-ỿ"
+_WORD = re.compile(f"[{_WORD_CHARS}][{_WORD_CHARS}'’-]*")
+_WORD_JOINERS = "'’-"
+# Scripts written without spaces between words, where a character says less than a word does.
+_SCRIPTS_WITHOUT_SPACES = frozenset({"CJK", "HIRAGANA", "KATAKANA", "THAI", "LAO", "KHMER", "MYANMAR"})
+_WORDS_PER_CHARACTER = 0.75
+# Scripts where a name sits right against the words or endings around it, so it can't be a whole word.
+_SCRIPTS_WITH_ATTACHED_NAMES = _SCRIPTS_WITHOUT_SPACES | {"HANGUL"}
+# The small words English can't do without: what the keyword search drops, without the assistant's names.
+_ENGLISH_FUNCTION_WORDS = STOPWORDS - {"hey", "auri", "tovi", "glen", "brigg"}
+_ENGLISH_WORD_SHARE = 0.3
+_LETTER_WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
 _FIRST_PERSON = re.compile(r"\b(?:i|me|my|mine|myself|i'm|i've|i'd|i'll)\b", re.IGNORECASE)
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
@@ -69,15 +83,57 @@ KIND_LABELS = {
 
 
 def word_list(text: str) -> list[str]:
-    return _WORD.findall((text or "").lower().replace("’", "'"))
+    return _WORD.findall(unicodedata.normalize("NFC", text or "").lower().replace("’", "'"))
+
+
+def _script(char: str) -> str:
+    """The first word of a character's Unicode name: LATIN, CYRILLIC, CJK, ARABIC..."""
+    return unicodedata.name(char, "").split(" ", 1)[0]
+
+
+def _tokens(text: str) -> list[str]:
+    """Runs of letters, digits and their marks, in any script (a regex's \\w leaves out the marks)."""
+    tokens: list[str] = []
+    current = ""
+    for char in unicodedata.normalize("NFC", text or ""):
+        if unicodedata.category(char)[0] in "LMN" or char in _WORD_JOINERS:
+            current += char
+        else:
+            tokens.append(current)
+            current = ""
+    tokens.append(current)
+    return [token for token in tokens if token.strip(_WORD_JOINERS)]
 
 
 def should_auto_recall(text: str) -> bool:
-    """Skip recall for very short messages and confirmations (they only recall noise)."""
-    words = word_list(text)
-    if len(words) < 3:
+    """Skip recall for very short messages and confirmations (they only recall noise).
+
+    Short is under 3 words, in any script. Where words have no spaces between them, 4 characters count as 3 words.
+    """
+    words = 0.0
+    for token in _tokens(text):
+        without_spaces = sum(_script(char) in _SCRIPTS_WITHOUT_SPACES for char in token)
+        words += without_spaces * _WORDS_PER_CHARACTER + (1 if without_spaces < len(token) else 0)
+    if words < 3:
         return False
-    return " ".join(words) not in _SHORT_REPLIES
+    return " ".join(word_list(text)) not in _SHORT_REPLIES
+
+
+def reads_as_english(text: str, hub_language: str) -> bool:
+    """Whether a message is in English, so the keyword search can read it (memories are written in English).
+
+    Home Assistant can't say: the language it passes is the voice pipeline's setting, whatever was
+    said. So this goes by the text, with no word list per language. A letter from another script
+    means it isn't. With Latin letters only, it is on a hub set to English, so those households
+    don't wait on short commands like "Open the garage door". On other hubs, it is when at least
+    30% of its words are English function words. A mistake only costs a wait, or today's notes.
+    """
+    if any(char.isalpha() and _script(char) != "LATIN" for char in text or ""):
+        return False
+    if hub_language.lower().split("-")[0] == "en":
+        return True
+    words = _LETTER_WORD.findall((text or "").casefold().replace("’", "'"))
+    return not words or sum(word in _ENGLISH_FUNCTION_WORDS for word in words) / len(words) >= _ENGLISH_WORD_SHARE
 
 
 def extract_terms(text: str, max_terms: int = 8) -> list[str]:
@@ -211,16 +267,47 @@ class SubjectEntity:
     aliases: tuple[str, ...] = ()
 
 
+def _fold(text: str) -> str:
+    """Lower case, without the accents on Latin letters: speech-to-text can write "Sofía" for Sofia."""
+    folded = []
+    for char in unicodedata.normalize("NFC", text).casefold().replace("’", "'"):
+        base = unicodedata.normalize("NFD", char)[0]
+        folded.append(base if base.isascii() else char)
+    return "".join(folded)
+
+
+def _continues_word(neighbor: str, edge: str) -> bool:
+    """True when the character beside a name makes it part of a longer word.
+
+    Only a letter of the name's own script does: in "Mia的", the Chinese letter ends the name.
+    """
+    if not neighbor or not (neighbor.isalnum() or neighbor == "_"):
+        return False
+    return neighbor == "_" or neighbor.isdigit() or edge.isdigit() or _script(neighbor) == _script(edge)
+
+
+def _names(text: str, name: str) -> bool:
+    """True when folded text holds this folded name, as a whole word where its script has them."""
+    attached = _script(name[0]) in _SCRIPTS_WITH_ATTACHED_NAMES
+    if len(name) < (2 if attached else 3):
+        return False
+    start = text.find(name)
+    while start >= 0:
+        end = start + len(name)
+        if attached or not (_continues_word(text[start - 1 : start], name[0]) or _continues_word(text[end : end + 1], name[-1])):
+            return True
+        start = text.find(name, start + 1)
+    return False
+
+
 def match_subjects(text: str, entities: Iterable[SubjectEntity]) -> list[int]:
-    """Ids of entities named in text by name or alias (whole words, names of 3+ characters)."""
-    lower = (text or "").lower().replace("’", "'")
+    """Ids of entities named in text by name or alias (names of 3+ letters, or 2+ where names sit against other words)."""
+    folded = _fold(text or "")
     matched: list[int] = []
     for entity in entities:
         for name in (entity.name, *entity.aliases):
-            needle = name.strip().lower()
-            if len(needle) < 3:
-                continue
-            if re.search(r"(?<![\w])" + re.escape(needle) + r"(?:'s)?(?![\w])", lower):
+            needle = _fold(name.strip())
+            if needle and _names(folded, needle):
                 matched.append(entity.id)
                 break
     return matched
@@ -292,6 +379,7 @@ NOTE_CHAR_LIMITS = {"exchange": 700, "digest": 900}
 # Summary section (its decisions, plans and facts are kept as memories of their own).
 BRIEF_CHAR_LIMITS = {"exchange": 400, "digest": 400}
 DEFAULT_NOTE_CHARS = 500
+AUTO_NOTES_LIMIT = 6
 AUTO_NOTES_TOTAL_CHARS = 3500
 TOOL_NOTES_TOTAL_CHARS = 7000
 PROFILE_TOTAL_CHARS = 1200
@@ -398,6 +486,22 @@ def format_notes_with_rows(
         shown.append(row)
         used += len(line) + 1
     return "\n".join(lines), shown
+
+
+def notes_with_meaning(
+    by_meaning: Sequence[RecallRow], by_keyword: list[RecallRow], shown_profile: Iterable[RecallRow]
+) -> list[RecallRow]:
+    """A turn's notes: the memories closest in meaning first, then the keyword notes.
+
+    Meaning goes first because a name alone brings in the important memories about that person,
+    which could otherwise fill the notes. Nothing the profile shows, and nothing twice.
+    """
+    shown_ids = {row.id for row in shown_profile}
+    closest = [row for row in by_meaning if row.id not in shown_ids][:AUTO_NOTES_LIMIT]
+    by_keyword = [row for row in by_keyword if row.from_archive or row.id not in shown_ids]
+    ids = {row.id for row in closest}
+    others = [row for row in by_keyword if row.from_archive or row.id not in ids]
+    return [*closest, *others][: max(AUTO_NOTES_LIMIT, len(by_keyword))]
 
 
 class ShownNotesCache:

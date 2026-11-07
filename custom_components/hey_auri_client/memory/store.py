@@ -17,7 +17,7 @@ from typing import Any, Iterable, Sequence
 import uuid
 
 from .db import MEMORY_SCHEMA, SCHEMA_TOKEN
-from .recall import RecallRow, SubjectEntity, content_hash
+from .recall import AUTO_NOTES_LIMIT, RecallRow, SubjectEntity, content_hash
 
 _LOGGER = logging.getLogger(__name__)
 # SQL below names the schema with SCHEMA_TOKEN; MemoryStore._sql fills in its own.
@@ -689,7 +689,7 @@ class MemoryStore:
         adjacent_days: Sequence[date],
         speaker_entity_id: int | None,
         shared: bool = False,
-        limit: int = 6,
+        limit: int = AUTO_NOTES_LIMIT,
         timeout_ms: int = 250,
     ) -> list[RecallRow]:
         """Keyword + subject + date recall on every message (no embedding needed, so no cloud call).
@@ -767,14 +767,18 @@ class MemoryStore:
         kinds: Sequence[str] = ALL_KINDS,
         min_sim: float = 0.55,
         limit: int = 8,
+        shared: bool = True,
+        speaker_entity_id: int | None = None,
+        timeout_ms: int = 2000,
     ) -> list[RecallRow]:
-        """Hybrid recall for the recall_memory tool: meaning + keywords + subjects + days.
+        """Hybrid recall for the recall_memory tool and the notes by meaning: meaning + keywords + subjects + days.
 
         With a date range, a memory matches when it was said in
         [range_start, range_end) (memory days, which start at the day
         boundary) or, for commitments, is due in [due_start, due_end)
         (calendar days). Private memories are returned flagged; the model is
-        told they only help the person they are about.
+        told they only help the person they are about. shared=False leaves
+        out those about others, as the automatic notes do.
         """
         if query_vector is None:
             return self._keyword_tool_recall(
@@ -791,7 +795,7 @@ class MemoryStore:
             )
         text = self._sql
         with self._engine.begin() as conn:
-            conn.execute(text("SET LOCAL statement_timeout = 2000"))
+            conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_ms)}"))
             if self._iterative_scan:
                 conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
                 conn.execute(text("SET LOCAL hnsw.ef_search = 100"))
@@ -834,6 +838,9 @@ class MemoryStore:
                         FROM {_S}.mem_memories m JOIN cand USING (id) CROSS JOIN q
                         WHERE m.scope = :scope AND m.status = 'current' AND m.sensitivity <> 'secret'
                           AND (m.expires_at IS NULL OR m.expires_at > now())
+                          AND (:shared OR m.sensitivity = 'normal'
+                               OR EXISTS (SELECT 1 FROM {_S}.mem_edges e WHERE e.from_memory = m.id
+                                          AND e.relation = 'about' AND e.to_entity = CAST(:speaker AS bigint)))
                           AND (CAST(:range_start AS timestamptz) IS NULL
                                OR (COALESCE(m.occurred_at, m.recorded_at) >= CAST(:range_start AS timestamptz)
                                    AND COALESCE(m.occurred_at, m.recorded_at) < CAST(:range_end AS timestamptz))
@@ -862,6 +869,8 @@ class MemoryStore:
                     "due_end": due_end,
                     "kinds": list(kinds),
                     "min_sim": min_sim,
+                    "shared": shared,
+                    "speaker": speaker_entity_id,
                     "limit": limit,
                 },
             ).all()

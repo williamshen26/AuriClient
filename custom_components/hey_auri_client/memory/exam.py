@@ -25,7 +25,8 @@ every message would add to a turn. That call's vector then tries a search by
 meaning alone, recorded as meaning_notes: what embedding every message would
 add to the notes. Auri never sees it. A file that also lists memories is
 asked against them, in a test memory (exam_memory.py), instead of the
-household's real memory.
+household's real memory. A question that changes the household's language
+has it put back at once, and shows what it changed it to as language_set.
 """
 from __future__ import annotations
 
@@ -42,7 +43,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from homeassistant.util.yaml import load_yaml
 
-from ..const import MEMORY_EXAM_CONVERSATION_PREFIX, MEMORY_EXAM_FILE
+from ..const import CONF_STT_LANGUAGE, MEMORY_EXAM_CONVERSATION_PREFIX, MEMORY_EXAM_FILE
 from .exam_memory import parse_exam_memory
 from .recall import RecallRow, TraceEntry
 
@@ -171,7 +172,7 @@ def _scored(row: RecallRow) -> dict[str, Any]:
 def meaning_notes(
     rows: Sequence[RecallRow], trace: Sequence[TraceEntry], words: Sequence[str], *, shared: bool
 ) -> dict[str, Any]:
-    """What a search by meaning alone would add to the automatic notes, from that search's rows.
+    """What a search by meaning alone finds, from that search's rows, however close they are.
 
     Like the notes, it leaves out what's already in the profile, and private
     memories unless the household shares them (exam questions have no
@@ -218,7 +219,7 @@ async def async_meaning_notes(
 async def async_embed_question(api: "MemoryApi", text: str) -> tuple[float, list[float], str] | None:
     """One /memory/embed call for this text: how long it took from here, its vector and its tag. None when it fails.
 
-    The time is what embedding every message would add to a turn.
+    The time is what a message that isn't in English waits before its turn.
     """
     started = monotonic()
     try:
@@ -294,6 +295,23 @@ def _turn_numbers(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return numbers
 
 
+def put_language_back(runtime: "MemoryRuntime", language: str | None) -> str | None:
+    """Undo a change of language made during a question, and return what it was changed to.
+
+    Auri's reply language and speech-to-text's language are one option, and set_language changes
+    it for the whole household, so a question must not leave it changed.
+    """
+    entry = runtime.entry
+    changed_to = entry.options.get(CONF_STT_LANGUAGE)
+    if changed_to == language:
+        return None
+    options = {key: value for key, value in entry.options.items() if key != CONF_STT_LANGUAGE}
+    if language is not None:
+        options[CONF_STT_LANGUAGE] = language
+    runtime.hass.config_entries.async_update_entry(entry, options=options)
+    return changed_to
+
+
 async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None) -> dict[str, Any]:
     """Ask every question, grade the answers, store and return the result."""
     hass = runtime.hass
@@ -318,6 +336,7 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
         raise HomeAssistantError("A memory exam is already running")
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    language = runtime.entry.options.get(CONF_STT_LANGUAGE)
     try:
         answered: list[dict[str, Any]] = []
         try:
@@ -346,6 +365,8 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
                     "searches": len(searched),
                     "embed_seconds": embedded[0] if embedded else None,
                 }
+                if language_set := put_language_back(runtime, language):
+                    item["language_set"] = language_set
                 if "memory" in question:
                     found = find_memory(memory_words(question["memory"]), trace)
                     item["memory_found_in"], item["memory_rank"] = found or ("none", None)
@@ -357,6 +378,7 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
                     item["search_results"] = searched
                 answered.append(item)
         finally:
+            put_language_back(runtime, language)
             # The test memory only lives while its questions are asked.
             if exam_memory:
                 await runtime.async_close_exam_memory()

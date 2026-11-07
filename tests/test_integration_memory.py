@@ -5,7 +5,9 @@ test harness doesn't run on Windows) and the test PostgreSQL server.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
+import dataclasses
 from datetime import timedelta
 import json
 import math
@@ -45,8 +47,10 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     MEMORY_EXAM_FILE,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
-from custom_components.hey_auri_client.memory import exam, logins, turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory import exam, logins, space as memory_space, turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory.api import MemoryApiError  # noqa: E402
 from custom_components.hey_auri_client.memory.db import EXAM_MEMORY_SCHEMA  # noqa: E402
+from custom_components.hey_auri_client.memory.identity import Speaker  # noqa: E402
 from custom_components.hey_auri_client.memory.runtime import MemoryRuntime, MemoryState  # noqa: E402
 from custom_components.hey_auri_client.memory.store import NewMemory  # noqa: E402
 from custom_components.hey_auri_client.saas_client import SaaSTurnResponse  # noqa: E402
@@ -375,6 +379,153 @@ def _db(runtime: MemoryRuntime, sql: str) -> list[dict[str, Any]]:
 
 async def _settle(hass: HomeAssistant) -> None:
     await hass.async_block_till_done(wait_background_tasks=True)
+
+
+# ── notes by meaning ────────────────────────────────────────────────────────
+
+_OFFICE_LIGHT = "The office light is usually set to 30% brightness."
+_RECYCLING = "The recycling goes out on Tuesday nights."
+_LAPTOP_QUESTION = "怎么让笔记本电脑上网？"
+
+
+async def _seed_for_meaning(hass: HomeAssistant, runtime: MemoryRuntime, *memories: NewMemory) -> None:
+    await hass.async_add_executor_job(lambda: [runtime.store.insert_memory(memory) for memory in memories])
+    await runtime.owner.async_refresh_entities()
+    await runtime.owner.async_backfill_embeddings()
+
+
+def _embeds_as(text: str) -> AsyncMock:
+    """An embedding call that comes back as close as can be to this text."""
+    return AsyncMock(return_value=([fake_vector(text)], "fake-embed@768"))
+
+
+async def test_a_message_in_another_language_gets_notes_by_meaning(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    await _seed_for_meaning(
+        hass,
+        runtime,
+        NewMemory(kind="preference", content=_OFFICE_LIGHT, source="chat"),
+        NewMemory(kind="fact", content=_RECYCLING, source="chat"),
+    )
+
+    embed = _embeds_as(_OFFICE_LIGHT)
+    with patch.object(runtime.api, "embed", embed):
+        block = await runtime.owner.async_turn_context("把灯调到我喜欢的亮度。", Speaker(), "m1")
+    embed.assert_awaited_once_with(["把灯调到我喜欢的亮度。"], task_type="RETRIEVAL_QUERY", scope="owner")
+    assert _OFFICE_LIGHT in block["notes"]
+    assert _RECYCLING not in block["notes"]  # below the floor
+
+    # Nothing close means no notes, not the closest there is.
+    with patch.object(runtime.api, "embed", _embeds_as("completely different words about nothing here")):
+        block = await runtime.owner.async_turn_context(_LAPTOP_QUESTION, Speaker(), "m2")
+    assert block["notes"] == ""
+
+
+async def test_notes_by_meaning_are_only_for_messages_that_need_them(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    embed = _embeds_as(_OFFICE_LIGHT)
+    with patch.object(runtime.api, "embed", embed):
+        # On a hub set to English: Latin letters are English, and a short reply needs nothing.
+        for text in ("What time is the dentist?", "Open the garage door", "Apaga las luces", "好的"):
+            await runtime.owner.async_turn_context(text, Speaker(), "m3")
+        embed.assert_not_awaited()
+
+        # On a hub set to another language, English still needs no search, but the words have to show it.
+        hass.config_entries.async_update_entry(runtime.entry, options={**runtime.entry.options, "stt_language": "zh"})
+        await runtime.owner.async_turn_context("What time is the dentist?", Speaker(), "m3")
+        embed.assert_not_awaited()
+        await runtime.owner.async_turn_context("Apaga las luces de la sala", Speaker(), "m3")
+        embed.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", ["slow", "error", "over_budget"])
+async def test_a_turn_goes_on_without_notes_by_meaning(hass: HomeAssistant, memory_setup, monkeypatch, failure) -> None:
+    _agent, runtime, _client, _will = memory_setup
+
+    def seed() -> None:
+        mia = runtime.store.resolve_entities([("Mia", "person")])[0]
+        runtime.store.insert_memory(NewMemory(kind="fact", content="Mia has piano on Thursdays.", source="chat",
+                                              importance=4, about_entity_ids=[mia]))
+
+    await hass.async_add_executor_job(seed)
+    await runtime.owner.async_refresh_entities()
+    monkeypatch.setattr(memory_space, "MEANING_NOTES_BUDGET_SECONDS", 0.05)
+
+    async def slow(*_args, **_kwargs):
+        await asyncio.sleep(30)
+
+    embed = {
+        "slow": AsyncMock(side_effect=slow),
+        "error": AsyncMock(side_effect=MemoryApiError("The cloud is down", status_code=502)),
+        "over_budget": AsyncMock(side_effect=MemoryApiError("Over budget", status_code=429)),
+    }[failure]
+    with patch.object(runtime.api, "embed", embed):
+        async with asyncio.timeout(5):
+            block = await runtime.owner.async_turn_context("Mia的钢琴课是星期几？", Speaker(), "m4")
+    embed.assert_awaited_once()
+    # Today's notes are still there: the name was enough to find this one.
+    assert "Mia has piano on Thursdays." in block["notes"]
+
+
+async def test_notes_by_meaning_keep_private_memories_private(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    private = "Mia is seeing a counsellor at school."
+
+    def seed() -> int:
+        mia = runtime.store.resolve_entities([("Mia", "person")])[0]
+        runtime.store.insert_memory(NewMemory(kind="fact", content=private, source="chat", sensitivity="private",
+                                              about_entity_ids=[mia]))
+        return mia
+
+    mia = await hass.async_add_executor_job(seed)
+    await runtime.owner.async_refresh_entities()
+    await runtime.owner.async_backfill_embeddings()
+    question = "学校里最近有什么事吗？"
+
+    with patch.object(runtime.api, "embed", _embeds_as(private)):
+        block = await runtime.owner.async_turn_context(question, Speaker(), "m5")
+        assert private not in block["notes"]
+
+        rows = await runtime.owner._async_meaning_recall(question, mia)
+        assert [row.content for row in rows] == [private]  # the person it's about gets it
+
+        runtime.config = dataclasses.replace(runtime.config, share_household=True)
+        block = await runtime.owner.async_turn_context(question, Speaker(), "m5")
+        assert private in block["notes"]
+
+
+async def test_notes_by_meaning_leave_out_what_the_profile_holds(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    allergy = "The household keeps no peanuts at home because of an allergy."
+    await _seed_for_meaning(hass, runtime, NewMemory(kind="fact", content=allergy, source="chat", importance=5))
+
+    with patch.object(runtime.api, "embed", _embeds_as(allergy)):
+        block = await runtime.owner.async_turn_context("家里有什么不能吃的吗？", Speaker(), "m6")
+    assert allergy in block["profile"]
+    assert allergy not in block["notes"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["我们出门一般用什么交通方式？", "Do we usually prefer driving a car when leaving the house?"],
+    ids=["by_meaning", "by_keyword"],
+)
+async def test_a_memory_the_profile_has_no_room_for_can_be_a_note(hass: HomeAssistant, memory_setup, message) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    driving = "When leaving the house, the household prefers driving a car unless it is a short walk."
+    # The profile fetches 12 memories, most important and newest first, and shows what fits in its characters.
+    longer = [
+        NewMemory(kind="fact", source="chat", importance=5,
+                  content=f"Memory {number} is long enough to use up its share of the profile, the way real ones do.")
+        for number in range(11)
+    ]
+    await _seed_for_meaning(hass, runtime, *longer, NewMemory(kind="fact", content=driving, source="chat", importance=4))
+
+    with patch.object(runtime.api, "embed", _embeds_as(driving)):
+        block = await runtime.owner.async_turn_context(message, Speaker(), "m7")
+    assert longer[-1].content in block["profile"]
+    assert driving not in block["profile"]
+    assert driving in block["notes"]
 
 
 async def test_owner_turn_remembers_recalls_and_is_archived(hass: HomeAssistant, memory_setup) -> None:
@@ -1097,3 +1248,42 @@ async def test_an_exam_can_bring_its_own_memories(hass: HomeAssistant, memory_se
     with _exam_through(agent, tmp_path, unplugged), pytest.raises(HomeAssistantError, match="unplugged"):
         await runtime.async_run_exam("benchmark.yaml")
     assert runtime.exam is None and not _schema_exists(runtime, EXAM_MEMORY_SCHEMA)
+
+
+async def test_the_exam_puts_the_households_language_back(hass: HomeAssistant, memory_setup, tmp_path) -> None:
+    agent, runtime, client, _will = memory_setup
+    hass.config_entries.async_update_entry(runtime.entry, options={**runtime.entry.options, "stt_language": "zh"})
+    (tmp_path / MEMORY_EXAM_FILE).write_text(
+        "- q: ¿Cuál es la capital de Francia?\n  expected: Paris.\n- q: 法国的首都是哪里？\n  expected: Paris.\n",
+        encoding="utf-8",
+    )
+    client.responses = [
+        tool_calls("x", [tool_call("set_language", {"language": "es"})]),
+        final("x", "París."),
+        final("x", "巴黎。"),
+    ]
+    languages_heard: list[str] = []
+
+    async def through_agent(_hass, text, conversation_id, _context, **_kwargs):
+        languages_heard.append(runtime.entry.options["stt_language"])
+        return await agent.async_process(_input(text, conversation_id))
+
+    with _exam_through(agent, tmp_path, through_agent), patch.object(runtime.api, "grade", _graded("correct", "correct")):
+        result = await runtime.async_run_exam()
+
+    # It shows which question changed it, and the next question is asked in the household's language.
+    assert [item.get("language_set") for item in result["grades"]] == ["es", None]
+    assert languages_heard == ["zh", "zh"]
+    assert runtime.entry.options["stt_language"] == "zh"
+
+    # Also when a question fails halfway, or the language was never chosen.
+    options = {key: value for key, value in runtime.entry.options.items() if key != "stt_language"}
+    hass.config_entries.async_update_entry(runtime.entry, options=options)
+
+    async def changed_it_and_failed(*_args, **_kwargs):
+        hass.config_entries.async_update_entry(runtime.entry, options={**options, "stt_language": "es"})
+        raise HomeAssistantError("The satellite is unplugged")
+
+    with _exam_through(agent, tmp_path, changed_it_and_failed), pytest.raises(HomeAssistantError, match="unplugged"):
+        await runtime.async_run_exam()
+    assert "stt_language" not in runtime.entry.options

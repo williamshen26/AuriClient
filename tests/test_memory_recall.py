@@ -27,6 +27,94 @@ def test_should_auto_recall(text, expected):
     assert recall.should_auto_recall(text) is expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("我们昨天做了什么？", True),
+        ("把灯调亮", True),
+        ("Mia几岁了", True),
+        ("把 living room 的灯关掉", True),
+        ("リビングの電気を消して", True),
+        ("ปิดไฟในห้องนั่งเล่น", True),
+        ("거실 불 꺼 줘", True),
+        ("Выключи свет в гостиной", True),
+        ("लिविंग रूम की लाइट बंद करो", True),
+        ("¿Cómo toma Sofía el café?", True),
+        ("好的", False),
+        ("知道了", False),
+        ("はい", False),
+        ("Да, спасибо", False),
+        ("sí, gracias", False),
+    ],
+)
+def test_should_auto_recall_counts_words_in_any_script(text, expected):
+    assert recall.should_auto_recall(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "hub_language", "expected"),
+    [
+        # Another script is never English, whatever the hub is set to.
+        ("我们昨天做了什么？", "en", False),
+        ("What does 小明 like?", "en", False),
+        ("Выключи свет в гостиной", "en", False),
+        # A hub set to English takes Latin letters as English, without counting words.
+        ("Open the garage door", "en", True),
+        ("Open the garage door", "en-US", True),
+        ("Stop", "en", True),
+        # Other hubs count the English function words.
+        ("How does Sofia take her coffee?", "zh", True),
+        ("What is the name of the dog?", "es", True),
+        ("Open the garage door", "zh", False),
+        ("Apaga las luces", "es", False),
+        ("Ajusta la luz a mi gusto", "zh", False),
+        ("¿Cómo toma Sofía el café?", "es", False),
+        ("Comment je connecte mon ordinateur portable à internet ?", "fr", False),
+        ("Hoe krijg ik mijn laptop online?", "nl", False),
+        # Nothing to read.
+        ("", "zh", True),
+        ("12 + 30", "zh", True),
+    ],
+)
+def test_reads_as_english(text, hub_language, expected):
+    assert recall.reads_as_english(text, hub_language) is expected
+
+
+def _rows(*ids: int, from_archive: bool = False) -> list[RecallRow]:
+    return [RecallRow(id=row_id, kind="fact", content=f"Memory {row_id}", at=None, from_archive=from_archive) for row_id in ids]
+
+
+def _ids(rows: list[RecallRow]) -> list[int]:
+    return [row.id for row in rows]
+
+
+def test_notes_with_meaning():
+    # Closest in meaning first, then the keyword notes; nothing twice or already shown in the profile.
+    assert _ids(recall.notes_with_meaning(_rows(1, 2, 3), _rows(3, 4), _rows(2))) == [1, 3, 4]
+    # A name's memories can't push out what's close in meaning.
+    assert _ids(recall.notes_with_meaning(_rows(1, 2), _rows(11, 12, 13, 14, 15, 16), [])) == [1, 2, 11, 12, 13, 14]
+    assert _ids(recall.notes_with_meaning(_rows(*range(1, 19)), [], [])) == [1, 2, 3, 4, 5, 6]
+    # An archive row's id isn't a memory's, so it doesn't count as the same memory.
+    assert _ids(recall.notes_with_meaning(_rows(1), _rows(1, from_archive=True), [])) == [1, 1]
+    assert _ids(recall.notes_with_meaning([], _rows(1, from_archive=True), _rows(1))) == [1]
+
+
+def test_notes_with_meaning_keeps_every_keyword_note_without_any():
+    keyword = _rows(*range(1, 9))  # today's conversations can take these past the usual 6
+    assert _ids(recall.notes_with_meaning([], keyword, [])) == _ids(keyword)
+    assert _ids(recall.notes_with_meaning(_rows(3), keyword, _rows(3))) == [1, 2, 4, 5, 6, 7, 8]
+
+
+def test_extract_terms_keeps_accents_and_leaves_out_other_scripts():
+    assert recall.extract_terms("¿Cómo toma Sofía el café?") == ["cómo", "toma", "sofía", "café"]
+    assert recall.extract_terms("Tắt đèn phòng khách") == ["tắt", "đèn", "phòng", "khách"]
+    assert recall.extract_terms("add jalapeños to the list") == ["add", "jalapeños", "list"]
+    assert recall.extract_terms("把 living room 的灯关掉") == ["living", "room"]
+    assert recall.extract_terms("我们昨天做了什么？") == []
+    # Speech-to-text may write an accent as two characters; it's still one word.
+    assert recall.extract_terms("Sofía") == ["sofía"]
+
+
 def test_extract_terms_drops_stopwords_and_possessives():
     assert recall.extract_terms("What's Mia's favourite ice cream flavour again?") == [
         "mia", "favourite", "ice", "cream", "flavour",
@@ -84,6 +172,32 @@ def test_match_subjects_by_name_and_alias():
     assert recall.match_subjects("Alan is here", entities) == []  # short names never match
     assert recall.match_subjects("we went to grandma's house", entities) == [4]
     assert recall.match_subjects("Lunatic", entities) == []
+
+
+def test_match_subjects_in_other_languages():
+    entities = [
+        SubjectEntity(1, "person", "Mia"),
+        SubjectEntity(2, "person", "Sofia"),
+        SubjectEntity(3, "person", "José"),
+        SubjectEntity(4, "person", "小明"),
+        SubjectEntity(5, "person", "민수"),
+        SubjectEntity(6, "person", "Мия"),
+        SubjectEntity(7, "pet", "青"),
+    ]
+    # Right against another script's letters.
+    assert recall.match_subjects("Mia的钢琴课是星期几？", entities) == [1]
+    assert recall.match_subjects("明天Mia要上课吗", entities) == [1]
+    # Accents on either side.
+    assert recall.match_subjects("¿Cómo toma Sofía el café?", entities) == [2]
+    assert recall.match_subjects("jose vive aquí", entities) == [3]
+    # A name in a script with no spaces, or with endings attached.
+    assert recall.match_subjects("小明的狗叫什么", entities) == [4]
+    assert recall.match_subjects("민수의 학교가 어디야", entities) == [5]
+    # Its own script's letters still make it a longer word.
+    assert recall.match_subjects("Miami 的天气", entities) == []
+    assert recall.match_subjects("Мияч", entities) == []
+    # One character is too short to tell apart.
+    assert recall.match_subjects("青色的灯", entities) == []
 
 
 def test_mentions_self():
