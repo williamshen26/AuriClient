@@ -109,5 +109,8 @@ class MemoryApi:
     async def reconcile(self, **fields: Any) -> dict[str, Any]:
         return await self._post("reconcile", fields)
 
+    async def rate(self, **fields: Any) -> dict[str, Any]:
+        return await self._post("rate", fields)
+
     async def grade(self, items: list[dict[str, str]]) -> dict[str, Any]:
         return await self._post("grade", {"items": items})

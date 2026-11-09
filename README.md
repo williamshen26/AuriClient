@@ -351,6 +351,8 @@ A test memory holds up to 300 memories. To keep more than one exam file, give th
 
 Earlier versions saved preferences in `www/user_data`, a folder Home Assistant serves without a login. This version moves those files to `.storage/hey_auri_client_legacy_user_data` on startup and shows a notification. Once memory is set up, each file is imported as preferences of the person it belongs to. A file whose name doesn't match exactly one Home Assistant user is left out, and the notification lists it.
 
+The old tool could rate a preference at most important (4 of 5), and never private. So the nightly run rates each imported preference once, by the rules it uses for what it learns: an allergy or a health fact can become critical (5), and health facts, birthdays and contact details become private. A rating only goes up, and a preference only becomes private, never the reverse. To do it at once, run `hey_auri_client.run_memory_job` without a date.
+
 ## Session QR code
 
 The session QR code gives guests (or you) a page on their phone that lists the links Auri shares, such as Uber ride links and map locations.
@@ -398,7 +400,7 @@ actions:
 | `hey_auri_client.get_auri_sticky_notes` | Returns all notes. |
 | `hey_auri_client.assign_mac` | Adds MAC addresses to a media player for Wake-on-LAN. Use it when a device has more than one network interface and Home Assistant only knows one of them. |
 | `hey_auri_client.sync_bookings` | Reads the booking calendar now, rather than waiting for the next 30-minute check, and returns what it found: the number of bookings, the next booking, and whether the Guest options changed. |
-| `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. |
+| `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. Without `date`, it also rates imported preferences not rated yet (`rated_imports`: how many were rated, raised and made private; see [Old saved preferences](#old-saved-preferences)). |
 | `hey_auri_client.run_memory_exam` | Asks the questions in `hey_auri_memory_exam.yaml` (or the file named in `file`) and returns the score and where each answer's memory came from (see [Testing what Auri remembers](#testing-what-auri-remembers)). |
 
 ## Events
@@ -424,6 +426,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
 - **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):
   - with each request: the speaker's name, the names of the household's people and pets, and the memory notes and profile Home Assistant picked for that message;
   - the text of memories that need a search key (an embedding), such as preferences imported from an earlier version, so the cloud can compute it;
+  - once, the text of preferences imported from an earlier version, so the cloud can rate how important and how private each one is;
   - for a message that isn't in English: its text, also to compute a search key, so Home Assistant can look for memories by meaning;
   - every night: the day's conversations (with passwords, card numbers and similar removed), the names of the people, pets and subjects Auri knows, and, for each new fact, the few stored memories most like it, so the cloud can summarize the day and tell what's new. The cloud returns the summary and the facts and keeps none of it.
 

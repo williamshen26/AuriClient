@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util  # noqa: E402
 from custom_components.hey_auri_client.const import EVENT_MEMORY_RUN_FINISHED  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApiError, embedding_tag  # noqa: E402
 from custom_components.hey_auri_client.memory.identity import household_persons  # noqa: E402
-from custom_components.hey_auri_client.memory.nightly import NightlyJob, parse_speaker  # noqa: E402
+from custom_components.hey_auri_client.memory.nightly import NightlyJob, parse_speaker, raised_rating  # noqa: E402
 from custom_components.hey_auri_client.memory.recall import normalize_statement  # noqa: E402
 from custom_components.hey_auri_client.memory.db import GUEST_MEMORY_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory.migrations import apply_migrations  # noqa: E402
@@ -66,6 +66,9 @@ class FakeApi:
         # What every request said it was for, and the transcripts the digest saw.
         self.scopes: set[str] = set()
         self.transcripts: list[str] = []
+        # /memory/rate's answer by statement: (importance, sensitivity); others aren't rated.
+        self.ratings: dict[str, tuple[int, str]] = {}
+        self.on_rate = None  # runs while a rating is "in the cloud"
 
     def _maybe_fail(self, stage: str) -> None:
         if stage in self.fail:
@@ -114,6 +117,19 @@ class FakeApi:
             "usage": {"prompt_tokens": 30, "completion_tokens": 5},
         }
 
+    async def rate(self, **fields):
+        self.calls.append(("rate", [item["statement"] for item in fields["items"]]))
+        self.scopes.add(fields.get("scope"))
+        self._maybe_fail("rate")
+        if self.on_rate:
+            self.on_rate()
+        ratings = [
+            {"idx": item["idx"], "importance": self.ratings[item["statement"]][0], "sensitivity": self.ratings[item["statement"]][1]}
+            for item in fields["items"]
+            if item["statement"] in self.ratings
+        ]
+        return {"ratings": ratings, "usage": {"prompt_tokens": 20, "completion_tokens": 5}}
+
 
 class FakeHass:
     def __init__(self, config_dir: str) -> None:
@@ -147,6 +163,10 @@ class FakeRuntime:
         self.embedding_tag = TAG
         self.entities = store.list_entities()
         self.backfills = 0
+        self.invalidations = 0
+
+    def invalidate(self) -> None:
+        self.invalidations += 1
 
     def household_roster(self):
         return [{"name": "Mia", "kind": "person"}, {"name": "Will", "kind": "person"}]
@@ -252,6 +272,15 @@ def test_parse_speaker():
     assert parse_speaker("Unknown speaker (Kitchen)") == (None, False)
     assert parse_speaker("Assistant") == (None, False)
     assert parse_speaker("") == (None, False)
+
+
+def test_raised_rating_only_raises():
+    row = {"importance": 3, "sensitivity": "normal"}
+    assert raised_rating(row, {"importance": 9, "sensitivity": "private"}) == (5, "private")
+    assert raised_rating(row, {"importance": 2, "sensitivity": "normal"}) == (3, "normal")
+    assert raised_rating(row, {"importance": True, "sensitivity": "secret"}) == (3, "normal")
+    assert raised_rating({"importance": 4, "sensitivity": "private"}, {"importance": 4, "sensitivity": "normal"}) == (4, "private")
+    assert raised_rating({"importance": 4, "sensitivity": "secret"}, {"importance": 5, "sensitivity": "private"}) == (5, "secret")
 
 
 def test_day_becomes_digest_exchanges_and_facts(store, make_job):
@@ -566,6 +595,112 @@ def test_catch_up_stops_when_over_budget(store, make_job):
     assert result["stopped"] == "over_budget"
     assert len(result["days"]) == 1
     assert "scrubbed_digests" not in result
+    assert "rated_imports" not in result
+
+
+def _imported(store: MemoryStore, content: str, importance: int, sensitivity: str = "normal") -> int:
+    memory_id, _ = store.insert_memory(
+        NewMemory(kind="preference", content=content, source="import", importance=importance, sensitivity=sensitivity)
+    )
+    return memory_id
+
+
+def _rating(store: MemoryStore, memory_id: int) -> tuple[int, str]:
+    [row] = rows(store, f"SELECT importance, sensitivity FROM {store.schema}.mem_memories WHERE id = :id", id=memory_id)
+    return row["importance"], row["sensitivity"]
+
+
+def test_imported_memories_are_rated_once_and_only_upwards(store, make_job):
+    allergy = _imported(store, "Mia's allergy: peanuts.", 4)
+    color = _imported(store, "Will's favorite color: green.", 4)
+    birthday = _imported(store, "Mia's birthday: 2018-04-02.", 3)
+    doctor = _imported(store, "Will's doctor: Dr. Lee.", 3, "private")
+    shoes = _imported(store, "Will's shoe size: 44.", 2)
+    store.retract([_imported(store, "Mia's school: Elm Street.", 3)], reason="forget")
+    chat, _ = store.insert_memory(NewMemory(kind="fact", content="Leo likes trains.", source="chat", importance=2))
+    job, runtime, api, _ = make_job()
+    api.ratings = {
+        "Mia's allergy: peanuts.": (5, "private"),
+        "Will's favorite color: green.": (3, "normal"),  # lower: it stays at 4
+        "Mia's birthday: 2018-04-02.": (4, "private"),
+        "Will's doctor: Dr. Lee.": (3, "normal"),  # a private memory never goes back to normal
+        "Leo likes trains.": (5, "private"),  # not an import, so never sent
+    }
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    # The shoe size wasn't rated, so it keeps its rating; the forgotten school isn't sent.
+    assert result["days"] == {}
+    assert result["rated_imports"] == {"rated": 5, "raised": 2, "made_private": 2}
+    assert [call for call in api.calls if call[0] == "rate"] == [(
+        "rate",
+        ["Mia's allergy: peanuts.", "Will's favorite color: green.", "Mia's birthday: 2018-04-02.",
+         "Will's doctor: Dr. Lee.", "Will's shoe size: 44."],
+    )]
+    assert api.scopes == {"owner"}
+    assert [_rating(store, memory_id) for memory_id in (allergy, color, birthday, doctor, shoes, chat)] == [
+        (5, "private"), (4, "normal"), (4, "private"), (3, "private"), (2, "normal"), (2, "normal"),
+    ]
+    assert runtime.invalidations == 1
+
+    # Each import is rated once.
+    assert asyncio.run(job.async_catch_up(days_back=7))["rated_imports"] == {"rated": 0, "raised": 0, "made_private": 0}
+    assert len([call for call in api.calls if call[0] == "rate"]) == 1
+
+    # One a later import brings in is rated on the next run.
+    later = _imported(store, "Leo's allergy: shellfish.", 4)
+    api.ratings["Leo's allergy: shellfish."] = (5, "private")
+    assert asyncio.run(job.async_catch_up(days_back=7))["rated_imports"] == {"rated": 1, "raised": 1, "made_private": 1}
+    assert [call for call in api.calls if call[0] == "rate"][-1] == ("rate", ["Leo's allergy: shellfish."])
+    assert _rating(store, later) == (5, "private")
+
+
+def test_rating_imports_waits_for_the_next_run_when_the_call_fails(store, make_job):
+    allergy = _imported(store, "Mia's allergy: peanuts.", 4)
+    job, _, api, _ = make_job()
+    api.ratings = {"Mia's allergy: peanuts.": (5, "private")}
+    api.fail["rate"] = MemoryApiError("limit", status_code=429)
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    assert result["rated_imports"] == {"rated": 0, "raised": 0, "made_private": 0, "postponed": "over_budget"}
+    assert _rating(store, allergy) == (4, "normal")
+    assert store.get_meta("imports_rated") is None
+
+    del api.fail["rate"]
+    assert asyncio.run(job.async_catch_up(days_back=7))["rated_imports"]["raised"] == 1
+    assert _rating(store, allergy) == (5, "private")
+
+
+def test_a_memory_forgotten_while_it_is_rated_stays_as_it_was(store, make_job):
+    allergy = _imported(store, "Mia's allergy: peanuts.", 4)
+    job, _, api, _ = make_job()
+    api.ratings = {"Mia's allergy: peanuts.": (5, "private")}
+    api.on_rate = lambda: store.retract([allergy], reason="forget")
+
+    asyncio.run(job.async_catch_up(days_back=7))
+
+    [row] = rows(store, "SELECT status, importance, sensitivity FROM auri_memory.mem_memories WHERE id = :id", id=allergy)
+    assert (row["status"], row["importance"], row["sensitivity"]) == ("retracted", 4, "normal")
+
+
+def test_a_guest_stays_memories_keep_their_ratings(store, pg_engine, pg_config, tmp_path):
+    # The stay's details are stored as imports too, rated by the code that writes them.
+    apply_migrations(pg_engine, app_version="test", schema=GUEST_MEMORY_SCHEMA)
+    guests = MemoryStore(pg_engine, schema=GUEST_MEMORY_SCHEMA, scope=GUEST_SCOPE)
+    guests.ensure_household()
+    seed, _ = guests.insert_memory(NewMemory(kind="fact", content="Sam booked this stay.", source="import", importance=4))
+    hass = FakeHass(str(tmp_path / "config"))
+    os.makedirs(hass.config.config_dir, exist_ok=True)
+    api = FakeApi([])
+    api.ratings = {"Sam booked this stay.": (5, "private")}
+
+    result = asyncio.run(NightlyJob(FakeRuntime(hass, guests, pg_config(vault_path=""), api, mode="guest")).async_catch_up(days_back=7))
+
+    assert "rated_imports" not in result
+    assert not [call for call in api.calls if call[0] == "rate"]
+    [row] = rows(guests, f"SELECT importance, sensitivity FROM {GUEST_MEMORY_SCHEMA}.mem_memories WHERE id = :id", id=seed)
+    assert (row["importance"], row["sensitivity"]) == (4, "normal")
 
 
 def test_long_days_are_split_to_fit_each_request(store, make_job):

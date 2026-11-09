@@ -1034,6 +1034,34 @@ class MemoryStore:
             {"id": digest_id},
         )
 
+    # ── imported memories ───────────────────────────────────────────────────
+
+    def current_imports(self) -> list[dict[str, Any]]:
+        """Current memories an import brought in, oldest first, with their ratings."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                self._sql(
+                    f"""SELECT id, content, importance, sensitivity FROM {_S}.mem_memories
+                        WHERE scope = :scope AND source = 'import' AND status = 'current' ORDER BY id"""
+                ),
+                {"scope": self.scope},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def set_ratings(self, ratings: Sequence[tuple[int, int, str]]) -> None:
+        """Set (id, importance, sensitivity) on memories; one retracted or replaced since is left alone."""
+        if not ratings:
+            return
+        with self._engine.begin() as conn:
+            for memory_id, importance, sensitivity in ratings:
+                conn.execute(
+                    self._sql(
+                        f"""UPDATE {_S}.mem_memories SET importance = :importance, sensitivity = :sensitivity
+                            WHERE scope = :scope AND id = :id AND status = 'current'"""
+                    ),
+                    {"scope": self.scope, "id": int(memory_id), "importance": int(importance), "sensitivity": sensitivity},
+                )
+
     # ── embeddings ──────────────────────────────────────────────────────────
 
     def missing_embeddings(self, embedding_model: str, *, limit: int = 100) -> list[tuple[int, str]]:

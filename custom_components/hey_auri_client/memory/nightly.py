@@ -12,6 +12,9 @@ For each finished local day (days end at the configured boundary hour):
      supersede links and the run row), so a failure leaves nothing partial;
   8. write the Obsidian copy and fire hey_auri_client.memory_run_finished.
 Every cloud call happens before the write, so a retry starts clean.
+
+After the days, a catch-up also rewrites digests a forget took out of
+service and, in the owner's memory, rates what an import brought in, once.
 """
 from __future__ import annotations
 
@@ -45,6 +48,7 @@ MAX_PARTIAL_CHARS = 6000
 MAX_DRAFT_CHARS = 12_000
 MAX_FORGOTTEN = 50
 RECONCILE_BATCH = 25
+RATE_BATCH = 25  # the server takes 50; smaller keeps each call well inside its time limit
 # Halve a chunk at most this many times when a stage says it was too big or too slow.
 MAX_SPLIT_DEPTH = 3
 
@@ -57,6 +61,8 @@ FORGOTTEN_MATCH_SIM = 0.9
 _STOP_REASONS = frozenset({"over_budget", "memory_disabled"})
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _NOT_A_PERSON = frozenset({"assistant", "a household member", "household member", "someone"})
+# Meta key: ids of imported memories already rated.
+_IMPORTS_RATED = "imports_rated"
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -78,6 +84,18 @@ def _response_tag(response: dict[str, Any]) -> str:
 def _subjects(candidate: dict[str, Any]) -> list[tuple[str, str]]:
     """(name, kind) of who or what a candidate is about."""
     return [(s["name"], s.get("kind") or "topic") for s in candidate.get("subjects") or [] if s.get("name")]
+
+
+def raised_rating(row: dict[str, Any], rating: dict[str, Any]) -> tuple[int, str]:
+    """(importance, sensitivity) after a rating that can only raise: importance never drops, and only normal becomes private."""
+    importance = int(row["importance"])
+    rated = rating.get("importance")
+    if isinstance(rated, int):
+        importance = max(importance, min(rated, 5))
+    sensitivity = row["sensitivity"]
+    if rating.get("sensitivity") == "private" and sensitivity == "normal":
+        sensitivity = "private"
+    return importance, sensitivity
 
 
 def parse_speaker(label: Any) -> tuple[str | None, bool]:
@@ -165,6 +183,8 @@ class NightlyJob:
             results["stopped"] = stopped
         else:
             results["scrubbed_digests"] = await self._async_scrub_digests()
+            if not self._space.is_guest:
+                results["rated_imports"] = await self._async_rate_imports()
         results["housekeeping"] = await self._run(
             lambda: store.housekeeping(archive_retention_days=config.archive_retention_days)
         )
@@ -696,6 +716,57 @@ class NightlyJob:
                     conn,
                 )
             store.mark_digest_scrubbed(conn, old_id)
+
+    # ── imported memories ───────────────────────────────────────────────────
+
+    async def _async_rate_imports(self) -> dict[str, Any]:
+        """Rate what the import from the old preference tool brought in, by the rules new memories get.
+
+        The import could rate nothing above 4 (the old tool's "high") and
+        marked nothing private, so an allergy could fall out of the profile.
+        Each import is rated once; a rating only goes up, and a memory only
+        becomes private, never the reverse. A failed call leaves the rest for
+        the next run.
+        """
+        store = self._store
+        done = {int(memory_id) for memory_id in await self._run(store.get_meta, _IMPORTS_RATED) or []}
+        rows = [row for row in await self._run(store.current_imports) if row["id"] not in done]
+        result: dict[str, Any] = {"rated": 0, "raised": 0, "made_private": 0}
+        changes: list[tuple[int, int, str]] = []
+        for start in range(0, len(rows), RATE_BATCH):
+            batch = rows[start:start + RATE_BATCH]
+            try:
+                response = await self._space.api.rate(
+                    scope=self._space.mode,
+                    household=self._space.household_roster(),
+                    items=[{"idx": index, "statement": row["content"]} for index, row in enumerate(batch)],
+                )
+            except MemoryApiError as err:
+                _LOGGER.debug("Rating imported memories postponed: %s", err)
+                result["postponed"] = "over_budget" if err.over_budget else "memory_disabled" if err.disabled else "cloud_error"
+                break
+            ratings: dict[int, dict[str, Any]] = {}
+            for rating in response.get("ratings") or []:
+                idx = rating.get("idx") if isinstance(rating, dict) else None
+                if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(batch):
+                    ratings.setdefault(idx, rating)
+            # A memory the model didn't rate keeps its rating.
+            for idx, rating in ratings.items():
+                row = batch[idx]
+                importance, sensitivity = raised_rating(row, rating)
+                if (importance, sensitivity) == (row["importance"], row["sensitivity"]):
+                    continue
+                result["raised"] += importance != row["importance"]
+                result["made_private"] += sensitivity != row["sensitivity"]
+                changes.append((row["id"], importance, sensitivity))
+            done.update(row["id"] for row in batch)
+            result["rated"] += len(batch)
+        if result["rated"]:
+            await self._run(store.set_ratings, changes)
+            await self._run(store.set_meta, _IMPORTS_RATED, sorted(done))
+            if changes:
+                self._space.invalidate()
+        return result
 
     # ── Obsidian copy ───────────────────────────────────────────────────────
 
