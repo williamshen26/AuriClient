@@ -78,7 +78,12 @@ def limited_config(pg_config, pg_engine):
 
     def run(statement: str) -> None:
         with pg_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            conn.execute(sqlalchemy.text(statement))
+            # DROP DATABASE can wait longer than the statement timeout on a busy server.
+            conn.execute(sqlalchemy.text("SET statement_timeout = 0"))
+            try:
+                conn.execute(sqlalchemy.text(statement))
+            finally:
+                conn.execute(sqlalchemy.text("RESET statement_timeout"))
 
     run("DROP DATABASE IF EXISTS auri_limited")
     run("DROP ROLE IF EXISTS auri_limited")
@@ -126,6 +131,91 @@ def test_supersede_keeps_history_and_subjects(store):
     assert [row.id for row in rows] == [new]
     assert rows[0].about == ["Mia"]
     assert rows[0].replaced[0][0] == "Mia prefers almond milk in her coffee."
+
+
+def _ratings(store: MemoryStore, ids: list[int]) -> dict[int, tuple[int, str]]:
+    import sqlalchemy
+
+    with store.engine.connect() as conn:
+        rows = conn.execute(
+            sqlalchemy.text("SELECT id, importance, sensitivity FROM auri_memory.mem_memories WHERE id = ANY (:ids)"),
+            {"ids": ids},
+        ).all()
+    return {row[0]: (row[1], row[2]) for row in rows}
+
+
+def test_a_replacement_keeps_the_highest_rating_and_the_strictest_privacy(store):
+    allergy = _remember(store, "Mia is allergic to peanuts.", importance=5, sensitivity="private")
+    epipen = _remember(store, "Mia carries an EpiPen.", importance=3)
+    with store.engine.begin() as conn:
+        merged, _ = store.insert_memory(
+            NewMemory(kind="fact", content="Mia is allergic to peanuts and carries an EpiPen.", source="nightly", importance=4), conn
+        )
+        store.supersede(conn, [allergy, epipen], merged)
+        trivia = _remember(store, "Leo's favorite dinosaur is the stegosaurus.", importance=2)
+        corrected, _ = store.insert_memory(
+            NewMemory(kind="fact", content="Leo's favorite dinosaur is the triceratops.", source="chat", importance=3, sensitivity="private"), conn
+        )
+        store.supersede(conn, [trivia], corrected)
+
+    # Never lower than what was replaced, and never lowered by it either.
+    assert _ratings(store, [merged, corrected]) == {merged: (5, "private"), corrected: (3, "private")}
+
+
+def test_raise_rating_only_goes_up(store):
+    dentist = _remember(store, "Mia's dentist is Dr. Park.", importance=3, sensitivity="private")
+    forgotten = _remember(store, "Mia's dentist was Dr. Lee.", importance=2)
+    store.retract([forgotten], reason="forget")
+    with store.engine.begin() as conn:
+        store.raise_rating(conn, [dentist, forgotten], importance=1, sensitivity="normal")
+    assert _ratings(store, [dentist, forgotten]) == {dentist: (3, "private"), forgotten: (2, "normal")}
+    with store.engine.begin() as conn:
+        store.raise_rating(conn, [dentist, forgotten], importance=5, sensitivity="normal")
+    # A forgotten memory is left as it is.
+    assert _ratings(store, [dentist, forgotten]) == {dentist: (5, "private"), forgotten: (2, "normal")}
+
+
+def test_two_spellings_become_one_subject_that_keeps_both(store):
+    import sqlalchemy
+
+    zoey, zoe = store.resolve_entities([("Zoey", "pet"), ("Zoe", "pet")])
+    grey = _remember(store, "Zoey is the family's grey cat.", about_entity_ids=[zoey])
+    age = _remember(store, "Zoe is 12 years old.", about_entity_ids=[zoe])
+    both = _remember(store, "Zoey and Zoe sleep on the sofa.", about_entity_ids=[zoey, zoe])
+    with store.engine.begin() as conn:
+        assert store.merge_entities(conn, zoey, zoe)
+        assert not store.merge_entities(conn, zoey, zoe)  # Zoe is gone
+    assert [(e.id, e.name, e.aliases) for e in store.list_entities() if e.kind == "pet"] == [(zoey, "Zoey", ("Zoe",))]
+    with store.engine.connect() as conn:
+        edges = conn.execute(
+            sqlalchemy.text("SELECT from_memory, to_entity FROM auri_memory.mem_edges WHERE relation = 'about' ORDER BY from_memory")
+        ).all()
+    # Every memory is about Zoey now, once.
+    assert [tuple(edge) for edge in edges] == [(grey, zoey), (age, zoey), (both, zoey)]
+    # And a memory that names Zoe later is about Zoey too.
+    assert store.resolve_entities([("Zoe", "pet")]) == [zoey]
+
+
+def test_a_home_assistant_person_is_never_merged_away(store):
+    lillian = store.sync_persons([{"entity_id": "person.lillian", "name": "Lillian"}])["person.lillian"]
+    [lilian] = store.resolve_entities([("Lilian", "person")])
+    with store.engine.begin() as conn:
+        assert not store.merge_entities(conn, lilian, lillian)
+        # Nor renamed: the name comes from Home Assistant.
+        assert store.merge_entities(conn, lillian, lilian, name="Lilian")
+    [person] = [e for e in store.list_entities() if e.kind == "person"]
+    assert (person.id, person.name, person.aliases) == (lillian, "Lillian", ("Lilian",))
+
+
+def test_a_pet_can_take_the_spelling_of_the_topic_it_was_saved_as(store):
+    # "Cleo is our pet dog", saved in conversation before Auri knew Cleo, made Cleo a topic.
+    clio, cleo = store.resolve_entities([("Clio", "pet"), ("Cleo", "topic")])
+    dog = _remember(store, "Cleo is our pet dog.", about_entity_ids=[cleo])
+    with store.engine.begin() as conn:
+        assert store.merge_entities(conn, clio, cleo, name="Cleo")
+    [entity] = [e for e in store.list_entities() if e.kind != "household"]
+    assert (entity.id, entity.kind, entity.name, entity.aliases) == (clio, "pet", "Cleo", ("Clio",))
+    assert store.resolve_entities([("Clio", "pet")]) == [clio] and dog > 0
 
 
 def test_supersede_only_retires_facts(store):

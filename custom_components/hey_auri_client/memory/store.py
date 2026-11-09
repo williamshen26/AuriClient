@@ -26,6 +26,8 @@ _S = SCHEMA_TOKEN
 OWNER_SCOPE = "owner"
 GUEST_SCOPE = "guest"
 FACT_KINDS: tuple[str, ...] = ("fact", "preference", "decision", "commitment", "about_assistant")
+# Least to most strict: a memory that replaces or repeats another never becomes less private.
+SENSITIVITY_LEVELS: tuple[str, ...] = ("normal", "private", "secret")
 ALL_KINDS: tuple[str, ...] = (*FACT_KINDS, "digest", "exchange")
 HOUSEHOLD_NAME = "household"
 EXCHANGE_TTL = timedelta(days=7)
@@ -255,6 +257,69 @@ class MemoryStore:
                 ids.append(int(entity_pk))
         return ids
 
+    def merge_entities(self, conn, keep_id: int, drop_id: int, *, name: str | None = None) -> bool:
+        """Make drop_id one subject with keep_id: its memories become about keep_id, and its names stay as other spellings.
+
+        drop_id is removed. name renames keep_id (its old name stays as another
+        spelling), unless it's a Home Assistant person, whose name comes from
+        Home Assistant, or another subject of its kind has that name. A Home
+        Assistant person is never the one dropped; False when either isn't
+        there, or drop_id is one.
+        """
+        params = {"scope": self.scope, "keep": int(keep_id), "drop": int(drop_id)}
+        rows = {
+            int(row[0]): row
+            for row in conn.execute(
+                self._sql(
+                    f"""SELECT id, name, aliases, ha_person_entity_id, kind FROM {_S}.mem_entities
+                        WHERE scope = :scope AND id IN (:keep, :drop) AND kind <> 'household'"""
+                ),
+                params,
+            ).all()
+        }
+        kept, dropped = rows.get(int(keep_id)), rows.get(int(drop_id))
+        if kept is None or dropped is None or keep_id == drop_id or dropped[3]:
+            return False
+        new_name = " ".join(str(name or "").split())[:60] or kept[1]
+        if new_name.lower() != kept[1].lower() and (
+            kept[3]
+            or conn.execute(
+                self._sql(
+                    f"""SELECT 1 FROM {_S}.mem_entities WHERE scope = :scope AND kind = :kind
+                        AND lower(name) = lower(:name) AND id NOT IN (:keep, :drop)"""
+                ),
+                {**params, "kind": kept[4], "name": new_name},
+            ).first()
+        ):
+            new_name = kept[1]
+        text = self._sql
+        # Edges a memory already has to keep_id would be duplicates: those are dropped instead.
+        conn.execute(
+            text(
+                f"""UPDATE {_S}.mem_edges e SET to_entity = :keep
+                    WHERE e.to_entity = :drop AND NOT EXISTS (
+                        SELECT 1 FROM {_S}.mem_edges k
+                        WHERE k.from_memory = e.from_memory AND k.relation = e.relation AND k.to_entity = :keep)"""
+            ),
+            params,
+        )
+        conn.execute(text(f"DELETE FROM {_S}.mem_edges WHERE to_entity = :drop"), params)
+        conn.execute(text(f"UPDATE {_S}.mem_entities SET parent_id = :keep WHERE scope = :scope AND parent_id = :drop"), params)
+        aliases: list[str] = []
+        for spelling in (kept[1], *(kept[2] or ()), dropped[1], *(dropped[2] or ())):
+            if spelling and spelling.lower() != new_name.lower() and spelling.lower() not in (a.lower() for a in aliases):
+                aliases.append(spelling)
+        # Dropped first: it may have the name keep_id takes, in another kind (a topic).
+        conn.execute(text(f"DELETE FROM {_S}.mem_entities WHERE scope = :scope AND id = :drop"), params)
+        conn.execute(
+            text(
+                f"""UPDATE {_S}.mem_entities SET name = :name, aliases = CAST(:aliases AS text[]), updated_at = now()
+                    WHERE id = :keep"""
+            ),
+            {**params, "name": new_name, "aliases": aliases},
+        )
+        return True
+
     def learn_kinds(self, conn, subjects: Iterable[tuple[str, str]]) -> None:
         """Known topics become the person or pet they're given as; no entity is created."""
         for name, kind in subjects:
@@ -456,20 +521,49 @@ class MemoryStore:
                 {"memory_id": memory_id, "entity_id": int(entity_pk)},
             )
 
+    def raise_rating(self, conn, ids: Sequence[int], *, importance: int, sensitivity: str) -> None:
+        """Rate current memories at least this high: importance never drops, and privacy only gets stricter."""
+        if not ids:
+            return
+        conn.execute(
+            self._sql(
+                f"""UPDATE {_S}.mem_memories
+                    SET importance = GREATEST(importance, :importance),
+                        sensitivity = (CAST(:levels AS text[]))[GREATEST(
+                            array_position(CAST(:levels AS text[]), sensitivity),
+                            array_position(CAST(:levels AS text[]), CAST(:sensitivity AS text)))]
+                    WHERE scope = :scope AND status = 'current' AND id = ANY (CAST(:ids AS bigint[]))"""
+            ),
+            {
+                "scope": self.scope,
+                "ids": [int(i) for i in ids],
+                "importance": min(max(int(importance), 1), 5),
+                "sensitivity": sensitivity,
+                "levels": list(SENSITIVITY_LEVELS),
+            },
+        )
+
     def supersede(
-        self, conn, old_ids: Sequence[int], new_id: int, *, kinds: Sequence[str] = FACT_KINDS
+        self, conn, old_ids: Sequence[int], new_id: int, *, kinds: Sequence[str] = FACT_KINDS, reason: str = "updated"
     ) -> list[int]:
-        """Mark current memories of the given kinds superseded by new_id, link them, and carry over their subjects."""
+        """Mark current memories of the given kinds superseded by new_id, link them, and carry over their subjects.
+
+        new_id also takes the highest importance and the strictest privacy
+        among them, so a correction can't make a fact less important or less
+        private than what it replaces.
+        """
         if not old_ids:
             return []
         text = self._sql
-        params = {"scope": self.scope, "old": [int(i) for i in old_ids], "new_id": new_id, "kinds": list(kinds)}
+        params = {
+            "scope": self.scope, "old": [int(i) for i in old_ids], "new_id": new_id, "kinds": list(kinds), "reason": reason,
+        }
         replaced = [
             int(row[0])
             for row in conn.execute(
                 text(
                     f"""UPDATE {_S}.mem_memories SET status = 'superseded', superseded_by = :new_id,
-                            status_changed_at = now(), status_reason = 'updated'
+                            status_changed_at = now(), status_reason = :reason
                         WHERE scope = :scope AND status = 'current' AND id = ANY (CAST(:old AS bigint[]))
                           AND id <> :new_id AND kind = ANY (CAST(:kinds AS text[]))
                         RETURNING id"""
@@ -495,6 +589,19 @@ class MemoryStore:
                         ON CONFLICT DO NOTHING"""
                 ),
                 params,
+            )
+            conn.execute(
+                text(
+                    f"""UPDATE {_S}.mem_memories n
+                        SET importance = GREATEST(n.importance, o.importance),
+                            sensitivity = (CAST(:levels AS text[]))[GREATEST(
+                                array_position(CAST(:levels AS text[]), n.sensitivity), o.level)]
+                        FROM (SELECT max(importance) AS importance,
+                                     max(array_position(CAST(:levels AS text[]), sensitivity)) AS level
+                              FROM {_S}.mem_memories WHERE id = ANY (CAST(:old AS bigint[]))) o
+                        WHERE n.id = :new_id"""
+                ),
+                {**params, "levels": list(SENSITIVITY_LEVELS)},
             )
         return replaced
 
@@ -998,6 +1105,61 @@ class MemoryStore:
                  "kinds": list(FACT_KINDS), "limit": limit},
             ).mappings().all()
         return [dict(row) for row in rows]
+
+    def saved_without_comparison(self, after_id: int) -> list[dict[str, Any]]:
+        """Current facts an import or a conversation saved with an id above after_id, oldest first.
+
+        The nightly run compares what it learns with its nearest memories; these
+        were saved without that (a conversation save only checks for a copy word
+        for word). has_vector says whether it's embedded, which comparing needs.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                self._sql(
+                    f"""SELECT id, kind, content, speaker_name, COALESCE(occurred_at, recorded_at) AS at,
+                               embedding IS NOT NULL AS has_vector
+                        FROM {_S}.mem_memories
+                        WHERE scope = :scope AND status = 'current' AND source IN ('import', 'chat')
+                          AND kind = ANY (CAST(:kinds AS text[])) AND id > :after
+                        ORDER BY id"""
+                ),
+                {"scope": self.scope, "kinds": list(FACT_KINDS), "after": int(after_id)},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def neighbors_of(self, memory_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
+        """Nearest current facts to a stored memory, leaving it out; the same rows as neighbors()."""
+        text = self._sql
+        with self._engine.begin() as conn:
+            if self._iterative_scan:
+                conn.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+            rows = conn.execute(
+                text(
+                    f"""SELECT m.id, m.kind, m.content, COALESCE(m.occurred_at, m.recorded_at) AS at,
+                               1 - (m.embedding <=> s.embedding) AS sim
+                        FROM {_S}.mem_memories s
+                        JOIN {_S}.mem_memories m ON m.scope = s.scope AND m.id <> s.id
+                        WHERE s.id = :id AND s.scope = :scope AND s.embedding IS NOT NULL
+                          AND m.status = 'current' AND m.embedding IS NOT NULL AND m.embedding_model = s.embedding_model
+                          AND m.kind = ANY (CAST(:kinds AS text[]))
+                        ORDER BY m.embedding <=> s.embedding LIMIT :limit"""
+                ),
+                {"scope": self.scope, "id": int(memory_id), "kinds": list(FACT_KINDS), "limit": limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def current_ids(self, conn, ids: Sequence[int]) -> set[int]:
+        """Which of these memories are still current."""
+        if not ids:
+            return set()
+        rows = conn.execute(
+            self._sql(
+                f"""SELECT id FROM {_S}.mem_memories
+                    WHERE scope = :scope AND status = 'current' AND id = ANY (CAST(:ids AS bigint[]))"""
+            ),
+            {"scope": self.scope, "ids": [int(i) for i in ids]},
+        ).all()
+        return {int(row[0]) for row in rows}
 
     def retracted_neighbors(self, vector: Sequence[float], embedding_model: str, *, min_sim: float) -> list[dict[str, Any]]:
         """Retracted facts close to a candidate: the household asked to forget them."""

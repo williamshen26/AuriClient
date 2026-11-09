@@ -8,6 +8,7 @@ import os
 import re
 from types import SimpleNamespace
 from typing import Any
+import zlib
 import zoneinfo
 
 import pytest
@@ -32,10 +33,13 @@ _WORD = re.compile(r"[a-z0-9']+")
 
 
 def fake_vector(text: str) -> list[float]:
-    """Bag-of-words vector: statements sharing words are close, like a real embedding."""
+    """Bag-of-words vector: statements sharing words are close, like a real embedding.
+
+    crc32, not hash(): Python seeds hash() per run, so which words collide would change between runs.
+    """
     vector = [0.0] * 768
     for word in _WORD.findall(text.lower()):
-        vector[hash(word) % 768] += 1.0
+        vector[zlib.crc32(word.encode()) % 768] += 1.0
     norm = math.sqrt(sum(v * v for v in vector)) or 1.0
     return [v / norm for v in vector]
 
@@ -69,6 +73,7 @@ class FakeApi:
         # /memory/rate's answer by statement: (importance, sensitivity); others aren't rated.
         self.ratings: dict[str, tuple[int, str]] = {}
         self.on_rate = None  # runs while a rating is "in the cloud"
+        self.embed_updates: list[Any] = []  # what each reconcile asked for
 
     def _maybe_fail(self, stage: str) -> None:
         if stage in self.fail:
@@ -109,6 +114,7 @@ class FakeApi:
 
     async def reconcile(self, **fields):
         self.calls.append(("reconcile", len(fields["items"])))
+        self.embed_updates.append(fields.get("embed_updates"))
         self._maybe_fail("reconcile")
         return {
             "decisions": [self.decide(item) for item in fields["items"]],
@@ -409,6 +415,94 @@ def test_an_update_matching_a_stored_sentence_still_retires_the_old_one(store, m
     assert len(facts) == 2  # no third copy
 
 
+def _known(store: MemoryStore, content: str, importance: int, sensitivity: str = "normal", source: str = "import") -> int:
+    [mia] = store.resolve_entities([("Mia", "person")])
+    memory_id, _ = store.insert_memory(
+        NewMemory(kind="fact", content=content, source=source, importance=importance, sensitivity=sensitivity,
+                  about_entity_ids=[mia], embedding=fake_vector(content), embedding_model=TAG)
+    )
+    return memory_id
+
+
+def _add_everything(item):
+    return {"idx": item["idx"], "action": "add", "replaces": [], "statement": item["statement"]}
+
+
+def _skip_naming_nothing(item):
+    return {"idx": item["idx"], "action": "skip", "replaces": [], "statement": ""}
+
+
+def test_a_fact_told_again_keeps_the_higher_rating(store, make_job):
+    """The import said peanuts at 4 and normal; tonight's telling is rated 5 and private."""
+    day = yesterday()
+    seed_day(store, day, DAY_TURNS[:1])
+    known = _known(store, "Mia is allergic to peanuts.", 4)
+    job, _, _, _ = make_job(CANDIDATES[:1])
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert (result["facts_confirmed"], result["facts_added"]) == (1, 0)
+    assert _rating(store, known) == (5, "private")
+
+
+def test_a_fact_already_stored_word_for_word_keeps_the_higher_rating(store, make_job):
+    day = yesterday()
+    seed_day(store, day, DAY_TURNS[:1])
+    known = _known(store, "Mia is allergic to peanuts.", 3, source="chat")
+    job, _, _, _ = make_job(CANDIDATES[:1], decide=_add_everything)
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert (result["facts_confirmed"], result["facts_added"]) == (1, 0)
+    assert _rating(store, known) == (5, "private")
+
+
+def test_a_skip_that_names_no_memory_changes_no_rating(store, make_job):
+    # The nearest memory isn't necessarily one that says it.
+    day = yesterday()
+    seed_day(store, day, DAY_TURNS[:1])
+    nearest = _known(store, "Mia is allergic to cats.", 3)
+    job, _, _, _ = make_job(CANDIDATES[:1], decide=_skip_naming_nothing)
+
+    asyncio.run(job.async_run_day(day))
+
+    assert _rating(store, nearest) == (3, "normal")
+    assert rows(store, "SELECT confirmed_count FROM auri_memory.mem_memories WHERE id = :id", id=nearest)[0]["confirmed_count"] == 1
+
+
+def test_an_update_keeps_the_higher_rating_and_the_stricter_privacy(store, make_job):
+    day = yesterday()
+    seed_day(store, day, DAY_TURNS[:1])
+    old = _known(store, "Mia is allergic to peanuts.", 5, "private", source="chat")
+    job, _, _, _ = make_job([{"statement": "Mia is now allergic to peanuts and tree nuts.", "type": "fact",
+                              "subjects": [{"name": "Mia", "kind": "person"}], "speaker": "Will",
+                              "importance": 4, "sensitivity": "normal"}])
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert result["facts_updated"] == 1
+    [new] = rows(store, "SELECT id, importance, sensitivity FROM auri_memory.mem_memories "
+                        "WHERE kind = 'fact' AND status = 'current'")
+    assert new["id"] != old and (new["importance"], new["sensitivity"]) == (5, "private")
+
+
+def test_said_again_in_conversation_keeps_the_higher_rating(store):
+    from custom_components.hey_auri_client.memory.space import MemorySpace
+
+    known = _known(store, "Mia is allergic to peanuts.", 4)
+    old = _known(store, "Mia is allergic to cats.", 5, "private", source="chat")
+
+    memory_id, duplicate, _ = MemorySpace._remember_blocking(
+        store, NewMemory(kind="fact", content="mia is allergic to peanuts", source="chat", importance=5, sensitivity="private"), []
+    )
+    assert (memory_id, duplicate) == (known, True) and _rating(store, known) == (5, "private")
+
+    new_id, _, replaced = MemorySpace._remember_blocking(
+        store, NewMemory(kind="fact", content="Mia is no longer allergic to cats.", source="chat", importance=4), [old]
+    )
+    assert replaced == {old: "Mia is allergic to cats."} and _rating(store, new_id) == (5, "private")
+
+
 def test_a_routine_is_never_stored_as_a_commitment(store, make_job):
     day = yesterday()
     seed_day(store, day, [("I have piano lessons every Thursday at 4 now", "Got it.")])
@@ -684,6 +778,139 @@ def test_a_memory_forgotten_while_it_is_rated_stays_as_it_was(store, make_job):
     assert (row["status"], row["importance"], row["sensitivity"]) == ("retracted", 4, "normal")
 
 
+def _says_the_birthday(seen: list[str]):
+    """Reconcile like the model: a NEW birthday is already said by an EXISTING birthday; anything else is new."""
+
+    def decide(item):
+        seen.append(item["statement"])
+        said = [e["id"] for e in item["existing"] if "birthday" in e["statement"] and "birthday" in item["statement"]]
+        if said:
+            return {"idx": item["idx"], "action": "skip", "replaces": said, "statement": ""}
+        return {"idx": item["idx"], "action": "add", "replaces": [], "statement": item["statement"]}
+
+    return decide
+
+
+def test_a_fact_saved_twice_in_other_words_is_kept_once(store, make_job):
+    imported = _known(store, "Mia's birthday: March 3.", 4, "private")
+    said = _known(store, "Mia's birthday is on March 3.", 4, source="chat")
+    _known(store, "Mia likes pizza.", 3, source="chat")  # nothing close to it
+    _known(store, "Mia plays soccer.", 4, source="nightly")  # compared when it was learned
+    seen: list[str] = []
+    job, _, api, _ = make_job([], decide=_says_the_birthday(seen))
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    # Both birthdays went through the comparison; the first one retired, as said by the other, which stays.
+    assert result["compared_saves"] == {
+        "compared": 3,
+        "decisions": {"add": 0, "update": 0, "skip": 2},
+        "retired": [{"id": imported, "text": "Mia's birthday: March 3.",
+                     "said_by": {"id": said, "text": "Mia's birthday is on March 3."}}],
+    }
+    assert seen == ["Mia's birthday: March 3.", "Mia's birthday is on March 3."]
+    assert api.embed_updates == [False]  # nothing is rewritten, so no merged sentence needs embedding
+    [old] = rows(store, "SELECT status, superseded_by, status_reason FROM auri_memory.mem_memories WHERE id = :id", id=imported)
+    assert (old["status"], old["superseded_by"], old["status_reason"]) == ("superseded", said, "duplicate")
+    # The one that stays keeps the stricter privacy, and counts as said again.
+    assert _rating(store, said) == (4, "private")
+    assert rows(store, "SELECT confirmed_count FROM auri_memory.mem_memories WHERE id = :id", id=said)[0]["confirmed_count"] == 1
+
+    # Each is compared once.
+    assert asyncio.run(job.async_catch_up(days_back=7))["compared_saves"] == {
+        "compared": 0, "decisions": {"add": 0, "update": 0, "skip": 0}, "retired": [],
+    }
+    assert len(seen) == 2
+    # One saved later is compared on the next run.
+    later = _known(store, "Mia's birthday is March 3.", 4, source="chat")
+    assert [item["id"] for item in asyncio.run(job.async_catch_up(days_back=7))["compared_saves"]["retired"]] == [later]
+
+
+def test_only_a_memory_another_already_says_is_retired(store, make_job):
+    # "update" would rewrite them into one sentence: that stays the nightly run's to do, from what's said.
+    old = _known(store, "Mia's piano lesson is on Tuesdays.", 4)
+    new = _known(store, "Mia's piano lesson is now on Thursdays.", 4, source="chat")
+    seen: list[str] = []
+
+    def decide(item):
+        seen.append(default_decision(item)["action"])
+        return default_decision(item)
+
+    job, _, api, _ = make_job([], decide=decide)
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    assert result["compared_saves"] == {"compared": 2, "decisions": {"add": 1, "update": 1, "skip": 0}, "retired": []}
+    assert seen == ["add", "update"]
+    assert {row["status"] for row in rows(store, "SELECT status FROM auri_memory.mem_memories WHERE id IN (:a, :b)",
+                                          a=old, b=new)} == {"current"}
+
+
+def test_a_memory_is_only_retired_as_said_by_one_it_was_shown_that_still_stands(store, make_job):
+    birthday = _known(store, "Mia's birthday: March 3.", 4)
+    _known(store, "Mia's birthday is on March 3.", 4, source="chat")
+    pizza = _known(store, "Mia likes pizza.", 3, source="chat")  # never close enough to be shown
+    dentist = _known(store, "Mia's dentist is Dr. Park.", 4)
+    dentist_again = _known(store, "Mia's dentist: Dr. Park.", 4, source="chat")
+
+    def decide(item):
+        if item["statement"] == "Mia's birthday: March 3.":
+            return {"idx": item["idx"], "action": "skip", "replaces": [pizza], "statement": ""}  # never shown
+        if item["statement"] == "Mia's dentist: Dr. Park.":
+            store.retract([dentist], reason="forget")  # forgotten while the comparison runs
+            return {"idx": item["idx"], "action": "skip", "replaces": [dentist], "statement": ""}
+        return {"idx": item["idx"], "action": "add", "replaces": [], "statement": item["statement"]}
+
+    job, _, _, _ = make_job([], decide=decide)
+
+    assert asyncio.run(job.async_catch_up(days_back=7))["compared_saves"] == {
+        "compared": 5, "decisions": {"add": 2, "update": 0, "skip": 2}, "retired": [],
+    }
+    statuses = rows(store, "SELECT status FROM auri_memory.mem_memories WHERE id IN (:a, :b)", a=birthday, b=dentist_again)
+    assert [row["status"] for row in statuses] == ["current", "current"]
+
+
+def test_a_skip_that_names_nothing_retires_only_a_near_copy(store, make_job):
+    # The model doesn't always name what already says it: the nearest counts when it's all but the same text.
+    old = _known(store, "Mia's birthday is on March third.", 4)
+    copy = _known(store, "Mia's birthday is on March third, 2018.", 4, source="chat")
+    pizza = _known(store, "Mia likes pizza and pasta and salad.", 3, source="chat")
+    _known(store, "Mia likes pizza and pasta.", 3, source="chat")  # close, but not that close
+    job, _, _, _ = make_job([], decide=_skip_naming_nothing)
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    assert [(item["id"], item["said_by"]["id"]) for item in result["compared_saves"]["retired"]] == [(old, copy)]
+    assert rows(store, "SELECT status FROM auri_memory.mem_memories WHERE id = :id", id=pizza)[0]["status"] == "current"
+
+
+def test_a_skip_that_names_nothing_raises_a_near_copy(store, make_job):
+    day = yesterday()
+    seed_day(store, day, DAY_TURNS[:1])
+    known = _known(store, "Mia is allergic to peanuts!", 4)  # the same words as tonight's fact
+    job, _, _, _ = make_job(CANDIDATES[:1], decide=_skip_naming_nothing)
+
+    asyncio.run(job.async_run_day(day))
+
+    assert _rating(store, known) == (5, "private")
+
+
+def test_comparing_saved_memories_waits_for_the_next_run_when_the_call_fails(store, make_job):
+    imported = _known(store, "Mia's birthday: March 3.", 4)
+    _known(store, "Mia's birthday is on March 3.", 4, source="chat")
+    job, _, api, _ = make_job([], decide=_says_the_birthday([]))
+    api.fail["reconcile"] = MemoryApiError("limit", status_code=429)
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    assert result["compared_saves"] == {
+        "compared": 0, "decisions": {"add": 0, "update": 0, "skip": 0}, "retired": [], "postponed": "over_budget",
+    }
+    assert (store.get_meta("saves_compared_up_to") or 0) < imported
+    del api.fail["reconcile"]
+    assert [item["id"] for item in asyncio.run(job.async_catch_up(days_back=7))["compared_saves"]["retired"]] == [imported]
+
+
 def test_a_guest_stays_memories_keep_their_ratings(store, pg_engine, pg_config, tmp_path):
     # The stay's details are stored as imports too, rated by the code that writes them.
     apply_migrations(pg_engine, app_version="test", schema=GUEST_MEMORY_SCHEMA)
@@ -697,8 +924,8 @@ def test_a_guest_stays_memories_keep_their_ratings(store, pg_engine, pg_config, 
 
     result = asyncio.run(NightlyJob(FakeRuntime(hass, guests, pg_config(vault_path=""), api, mode="guest")).async_catch_up(days_back=7))
 
-    assert "rated_imports" not in result
-    assert not [call for call in api.calls if call[0] == "rate"]
+    assert "rated_imports" not in result and "compared_saves" not in result
+    assert not [call for call in api.calls if call[0] in ("rate", "reconcile")]
     [row] = rows(guests, f"SELECT importance, sensitivity FROM {GUEST_MEMORY_SCHEMA}.mem_memories WHERE id = :id", id=seed)
     assert (row["importance"], row["sensitivity"]) == (4, "normal")
 

@@ -590,6 +590,9 @@ class MemorySpace:
     def _remember_blocking(store: MemoryStore, memory: NewMemory, replaces: list[int]) -> tuple[int, bool, dict[int, str]]:
         with store.engine.begin() as conn:
             memory_id, duplicate = store.insert_memory(memory, conn)
+            if duplicate:
+                # Said again, it's rated at least as highly as this time.
+                store.raise_rating(conn, [memory_id], importance=memory.importance, sensitivity=memory.sensitivity)
             replaced_ids = store.supersede(conn, replaces, memory_id) if replaces else []
         contents = store.get_contents(replaced_ids)
         return memory_id, duplicate, {i: contents[i] for i in replaced_ids if i in contents}

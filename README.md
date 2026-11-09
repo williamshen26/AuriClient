@@ -210,7 +210,7 @@ The password is stored in Home Assistant's configuration, like the passwords of 
   - the day's conversations, for a week;
   - the facts and preferences it learned.
 
-  A new fact either adds to what Auri knows, replaces what changed, or confirms it. The old version is kept as history. If Home Assistant was off, missed days (up to a week back) are processed after it starts. A day that fails is tried again on later runs, up to three attempts in all.
+  A new fact either adds to what Auri knows, replaces what changed, or confirms it. The old version is kept as history. Whether it's replaced or said again, at night or in conversation, a memory keeps the higher importance and the stricter privacy of the two, so an allergy said again casually is still critical and private. What Auri saves when you ask, and what was imported from an earlier version, goes through the same comparison once, the night after: when another memory already says all of it, it's retired (kept as history) in favour of that one. Nothing is rewritten, and of two that say the same, one always stays. If Home Assistant was off, missed days (up to a week back) are processed after it starts. A day that fails is tried again on later runs, up to three attempts in all.
 
 Appointments with a date or time go in your calendar, after Auri checks with you, even when you say "remember…". If you mention one in passing, Auri offers once to add it. Without a calendar, or if you'd rather not, Auri keeps them in memory. Things that repeat ("piano every Thursday") are kept in memory as routines, because Auri can't add repeating events to the calendar, and they don't expire. When you ask what's coming up, Auri checks both the calendar and memory.
 
@@ -226,6 +226,8 @@ When you use Assist while signed in to Home Assistant, Auri knows who you are. V
 - for something personal ("remember I like oat milk"), Auri asks "Who should I remember this for?", once per conversation, and remembers your answer for the rest of it.
 
 People and pets don't have to be in Home Assistant to be remembered: "remember Lillian likes candy" is saved about Lillian, and Auri learns your pets from what you say. Say who someone is the first time ("my girlfriend Lillian likes candy", "our dog Biscuit is allergic to chicken"), so Auri can also answer questions that don't use their name. A pet added to Home Assistant as a person (for example to track its collar) is treated as a person.
+
+**One name, two spellings.** Speech-to-text can spell a name differently from one time to the next (Cleo, then Clio), and Auri then knows two pets where there's one. It won't decide that on its own, because they could be two pets. So when two pets, or two people who aren't both in Home Assistant, have names a letter or so apart, a notice under **Settings → Repairs** asks once: the same one, and how it's spelled, or two? A name saved before Auri knew it was a pet or a person ("remember Cleo is our dog") counts too, from four letters; stored twice exactly the same way, it's simply merged, without asking. The same one keeps both spellings, so either finds everything Auri knows about it. "Two" isn't asked again, and "Not sure yet" leaves it for later. A name the nightly run learns later can bring the notice back, for that pair.
 
 When you're signed in, Auri takes you to be the person your login is linked to in Home Assistant. If someone else uses a login (you test with the admin account, say), or the household shares one, like a wall tablet, set that in the integration's options under **Who uses each login**. A shared login is treated like a voice satellite. Mark a login a service uses, such as Zigbee2MQTT's MQTT login, as **Not a person**, so its person isn't listed as a household member. You don't need to delete it in Home Assistant: deleting a person there also deletes its login.
 
@@ -315,6 +317,8 @@ Put times, dates, yes or no, and plain numbers in quotes (`expected: "20:00"`). 
   - `memory_not_shown`: the memory never reached Auri, so the search is what needs work.
 - **`by_case`:** the same numbers for each `case`, an optional label you give questions, such as `paraphrase`.
 
+**An outdated memory.** `outdated` is optional too: words from a memory the answer has replaced but that's still stored, such as an old address. Each question then also shows where that memory reached Auri, in `outdated_found_in`, with the same values as `memory_found_in`. The result's `outdated` section adds them up: how many still reached Auri (`shown`), where (`found_in`), and how many of those answers weren't correct (`not_correct_when_shown`).
+
 **A test memory.** To test with memories you choose instead of your household's, list a household and memories in the file. Auri is asked about those, in a test memory built when the exam starts and deleted when it ends.
 - **Your real memory is safe:** the exam's questions never read or change it, even one that makes Auri remember or forget something.
 - **Runs compare:** the memories are the same every time.
@@ -344,6 +348,8 @@ Each memory has `text`, and optionally:
 - **`private`:** `true` for a private memory. Private memories aren't in the notes for someone who isn't signed in, unless **Share memories within the household** is on.
 - **`days_ago`:** when it was said, 0 by default.
 - **`due_in_days`:** when a commitment is due.
+
+The household can also list `same`: pairs of its pets that are one pet under two names, the right spelling first (`same: [[Zoey, Zoe]]`). That's the answer to the question in [One name, two spellings](#who-is-speaking), given before the questions are asked. The result's `similar_names` lists the pairs that question would ask about.
 
 A test memory holds up to 300 memories. To keep more than one exam file, give the action's `file` option a file name from the config folder, for example `hey_auri_memory_benchmark.yaml`.
 
@@ -400,7 +406,7 @@ actions:
 | `hey_auri_client.get_auri_sticky_notes` | Returns all notes. |
 | `hey_auri_client.assign_mac` | Adds MAC addresses to a media player for Wake-on-LAN. Use it when a device has more than one network interface and Home Assistant only knows one of them. |
 | `hey_auri_client.sync_bookings` | Reads the booking calendar now, rather than waiting for the next 30-minute check, and returns what it found: the number of bookings, the next booking, and whether the Guest options changed. |
-| `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. Without `date`, it also rates imported preferences not rated yet (`rated_imports`: how many were rated, raised and made private; see [Old saved preferences](#old-saved-preferences)). |
+| `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. Without `date`, it also rates imported preferences not rated yet (`rated_imports`: how many were rated, raised and made private; see [Old saved preferences](#old-saved-preferences)), and compares what was saved in conversation or imported since the last run (`compared_saves`: how many, what the comparison said about the ones with a close memory, and each one retired, with the memory that already says it). |
 | `hey_auri_client.run_memory_exam` | Asks the questions in `hey_auri_memory_exam.yaml` (or the file named in `file`) and returns the score and where each answer's memory came from (see [Testing what Auri remembers](#testing-what-auri-remembers)). |
 
 ## Events
@@ -428,7 +434,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - the text of memories that need a search key (an embedding), such as preferences imported from an earlier version, so the cloud can compute it;
   - once, the text of preferences imported from an earlier version, so the cloud can rate how important and how private each one is;
   - for a message that isn't in English: its text, also to compute a search key, so Home Assistant can look for memories by meaning;
-  - every night: the day's conversations (with passwords, card numbers and similar removed), the names of the people, pets and subjects Auri knows, and, for each new fact, the few stored memories most like it, so the cloud can summarize the day and tell what's new. The cloud returns the summary and the facts and keeps none of it.
+  - every night: the day's conversations (with passwords, card numbers and similar removed), the names of the people, pets and subjects Auri knows, and, for each new fact (and each memory saved in conversation or imported), the few stored memories most like it, so the cloud can summarize the day and tell what's new. The cloud returns the summary and the facts and keeps none of it.
 
 Guest details, timers and notes are stored in Home Assistant, and memories in your own PostgreSQL database. The cloud uses conversation history for about 5 minutes, so that follow-up questions work. After that the history expires and is deleted automatically, usually within a few days. If memory debugging is turned on for your account, the memory notes and profile sent with each message are kept in that history too, and expire with it. See the [Privacy Policy](https://hey-auri.com/privacy.html).
 
@@ -447,6 +453,7 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
 | **Settings → Repairs** says some logins look like services, not people | Open the notice and check who uses each login. Auri counts each login's person as a household member, so a login that a service or a device uses should be **Not a person**. |
+| **Settings → Repairs** says Auri may know one pet or person under two names | Open the notice. For each pair, choose the same one (and its spelling) or two. See [One name, two spellings](#who-is-speaking). |
 | Auri counts a service, like MQTT-user, as a household member | Set its login to **Not a person** under **Configure → Who uses each login**. |
 | `sensor.auri_memory` is `unavailable` | Home Assistant can't reach the database. Auri keeps working without memory, holds on to the latest conversation (up to 1,000 messages), and saves it when the database is back. |
 | `sensor.auri_memory` is `error` | Its `error` attribute names the problem, for example `pgvector_missing`, `insufficient_privilege` or `schema_too_new` (the database was set up by a newer version of this integration: update it). |

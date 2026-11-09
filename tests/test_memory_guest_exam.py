@@ -23,6 +23,7 @@ from custom_components.hey_auri_client.memory.exam import (  # noqa: E402
     find_memory,
     meaning_notes,
     memory_words,
+    outdated_summary,
     parse_exam,
     recall_summary,
     score,
@@ -171,10 +172,16 @@ def test_exam_questions_can_name_their_memory():
     questions = parse_exam([
         {"q": "When is piano?", "expected": "Thursday", "memory": "  Mia   piano ", "case": "direct"},
         {"q": "Anything else?", "expected": "No", "memory": "?!", "case": " "},  # no words: nothing to match
+        {"q": "Where's the key?", "expected": "In the lockbox.", "memory": "lockbox", "outdated": " flower  pot ",
+         "case": "corrected"},
+        {"q": "Who drives?", "expected": "Will.", "outdated": "..."},
     ])
     assert questions == [
         {"q": "When is piano?", "expected": "Thursday", "memory": "Mia piano", "case": "direct"},
         {"q": "Anything else?", "expected": "No"},
+        {"q": "Where's the key?", "expected": "In the lockbox.", "memory": "lockbox", "outdated": "flower pot",
+         "case": "corrected"},
+        {"q": "Who drives?", "expected": "Will."},
     ]
     with pytest.raises(ValueError, match="benchmark.yaml"):
         parse_exam({"nothing": True}, "benchmark.yaml")
@@ -194,6 +201,16 @@ def test_an_exam_file_with_values_yaml_reads_as_something_else_is_refused(tmp_pa
             parse_exam(load_yaml(exam), "exam.yaml")
     exam.write_text('- q: When is bedtime?\n  expected: "20:00."\n  memory: "20:00"\n', encoding="utf-8")
     assert parse_exam(load_yaml(exam), "exam.yaml") == [{"q": "When is bedtime?", "expected": "20:00.", "memory": "20:00"}]
+
+
+def test_a_test_memory_can_say_two_pets_are_one():
+    household = {"people": ["Will"], "pets": ["Zoey", "Zoe"], "same": [["Zoey", "Zoe"]]}
+    data = {"household": household, "memories": ["Zoe is 12 years old."]}
+    assert parse_exam_memory(data, "f.yaml").same == [("Zoey", "Zoe")]
+    assert parse_exam_memory({**data, "household": {"pets": ["Zoey"]}}, "f.yaml").same == []
+    for wrong in ("Zoey", [["Zoey"]], [["Zoey", "Will"]]):
+        with pytest.raises(ValueError, match="household.same"):
+            parse_exam_memory({**data, "household": {**household, "same": wrong}}, "f.yaml")
 
 
 def test_the_exam_file_is_named_inside_the_config_folder():
@@ -265,6 +282,22 @@ def test_recall_and_mrr():
     }
     assert "by_case" not in recall_summary([graded("correct", "notes", 1)])
     assert recall_summary([graded("correct", None)]) is None
+
+
+def test_how_often_an_outdated_memory_still_reaches_auri():
+    grades = [
+        {"grade": "correct", "outdated_found_in": "profile"},
+        {"grade": "wrong", "outdated_found_in": "notes"},  # shown, and the answer went with it
+        {"grade": "partial", "outdated_found_in": "none"},
+        {"grade": "wrong"},  # names no outdated memory: left out
+    ]
+    assert outdated_summary(grades) == {
+        "questions": 3,
+        "shown": 2,
+        "found_in": {"profile": 1, "notes": 1, "recall_memory": 0, "none": 1},
+        "not_correct_when_shown": 1,
+    }
+    assert outdated_summary([{"grade": "correct"}]) is None
 
 
 def test_each_search_shows_what_it_returned():

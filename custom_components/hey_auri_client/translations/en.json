@@ -163,6 +163,21 @@
           "answered": "Who uses each login has been answered already."
         }
       }
+    },
+    "similar_names": {
+      "title": "Auri may know one pet or person under two names",
+      "fix_flow": {
+        "step": {
+          "names": {
+            "title": "Names spelled two ways",
+            "description": "Speech-to-text sometimes spells a name differently from one time to the next, and Auri then remembers two pets or people where there's one. These names are a letter or so apart: {names}.\n\nFor each, choose whether it's the same one, and how it's spelled, or two. The same one keeps both spellings, so either name finds it, and everything Auri remembers about each is kept. Leave Not sure yet to be asked again later."
+          }
+        },
+        "abort": {
+          "not_set_up": "Hey Auri Client isn't set up anymore.",
+          "answered": "These names have been answered already."
+        }
+      }
     }
   }
 }

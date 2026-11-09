@@ -282,6 +282,16 @@ class MemoryRuntime:
             self.guest.turn_logger.async_schedule_flush()
         await self.async_import_legacy()
         await self.async_backfill_embeddings()
+        await self._async_check_names()
+
+    async def _async_check_names(self) -> None:
+        """The Repairs notice for names that may be one pet or person spelled two ways."""
+        from .names import async_update_names_issue  # pylint: disable=import-outside-toplevel
+
+        try:
+            await async_update_names_issue(self.hass, self.entry, self)
+        except Exception as err:  # noqa: BLE001 (a notice must never stop memory)
+            _LOGGER.debug("Couldn't check for names spelled two ways: %s", err)
 
     async def _async_health_check(self, _now: datetime | None = None) -> None:
         store = self.owner.store
@@ -519,6 +529,8 @@ class MemoryRuntime:
         for space in self._spaces():
             space.invalidate()
             await space.async_refresh_entities()
+        # The run may have learned a name spelled another way.
+        await self._async_check_names()
         self._notify()
         return result
 
@@ -563,6 +575,19 @@ class MemoryRuntime:
         store = MemoryStore(engine, schema=EXAM_MEMORY_SCHEMA, iterative_scan=self._iterative_scan)
         await self.hass.async_add_executor_job(space.attach_blocking, store)
         await space.async_refresh_entities(sync_persons=True)
+        # What the household would be asked about, then the file's answer to it.
+        from .names import Merge, merge_blocking, space_pairs  # pylint: disable=import-outside-toplevel
+
+        space.similar_names = [pair.label for pair in space_pairs(space, set())]
+        if memory.same:
+            pets = {entity.name.casefold(): entity.id for entity in space.entities if entity.kind == "pet"}
+            merges = [
+                Merge(pets[keep.casefold()], pets[drop.casefold()])
+                for keep, drop in memory.same
+                if keep.casefold() in pets and drop.casefold() in pets
+            ]
+            await self.hass.async_add_executor_job(merge_blocking, store, merges, [])
+            await space.async_refresh_entities()
         self.exam = space
         # Searching by meaning (recall_memory) needs every memory embedded.
         await space.async_backfill_embeddings(max_batches=MAX_EXAM_MEMORIES // 100 + 1)

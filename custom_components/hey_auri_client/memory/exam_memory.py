@@ -44,11 +44,16 @@ class SeedMemory:
 
 @dataclass(slots=True)
 class ExamMemory:
-    """An exam file's household and memories."""
+    """An exam file's household and memories.
+
+    same: pets that are one pet under two names, the right spelling first: the
+    answer the household would give the Repairs question (memory/names.py).
+    """
 
     people: list[str]
     pets: list[str]
     memories: list[SeedMemory]
+    same: list[tuple[str, str]] = field(default_factory=list)
 
 
 def parse_exam_memory(data: Any, name: str) -> ExamMemory | None:
@@ -67,7 +72,23 @@ def parse_exam_memory(data: Any, name: str) -> ExamMemory | None:
     known = {person.casefold() for person in people}
     pets = [pet for pet in _names(household.get("pets")) if pet.casefold() not in known]
     memories = [_seed(item, f"{name}: memory {position}") for position, item in enumerate(items, start=1)]
-    return ExamMemory(people=people, pets=pets, memories=memories)
+    return ExamMemory(people=people, pets=pets, memories=memories, same=_same(household.get("same"), pets, name))
+
+
+def _same(value: Any, pets: Sequence[str], name: str) -> list[tuple[str, str]]:
+    """household.same: pairs of the file's pets that are one pet, the right spelling first."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{name}: household.same must be a list of pairs of pets, like [[Zoey, Zoe]]")
+    known = {pet.casefold() for pet in pets}
+    pairs: list[tuple[str, str]] = []
+    for item in value:
+        names = _names(item)
+        if len(names) != 2 or not all(pet.casefold() in known for pet in names):
+            raise ValueError(f"{name}: each pair in household.same needs two of the household's pets, like [Zoey, Zoe]")
+        pairs.append((names[0], names[1]))
+    return pairs
 
 
 def _names(value: Any) -> list[str]:
@@ -161,6 +182,8 @@ class ExamMemorySpace(MemorySpace):
 
     def __init__(self, runtime: MemoryRuntime, people: Sequence[str]) -> None:
         super().__init__(runtime, mode="owner", schema=EXAM_MEMORY_SCHEMA, spool_key=_SPOOL_KEY)
+        # The names the household would be asked about (memory/names.py), before household.same is applied.
+        self.similar_names: list[str] = []
         self._exam_people = [
             {"entity_id": f"person.auri_exam_{index}_{_slug(name)}", "name": name, "user_id": None}
             for index, name in enumerate(people, start=1)

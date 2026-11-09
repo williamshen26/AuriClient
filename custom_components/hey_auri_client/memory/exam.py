@@ -17,7 +17,9 @@ run, devices included.
 
 A question's memory (words from the memory that answers it) also shows where
 that memory reached Auri: the memory profile, the notes matched to the
-question, a recall_memory search, or nowhere. Each question also records
+question, a recall_memory search, or nowhere. Its outdated (words from a
+memory the answer has replaced, such as an old address) shows whether that
+one still reached Auri too. Each question also records
 how long its turn took, how many times Auri searched and what each search
 returned (its words, how many memories and how long, and their scores), and
 how long one /memory/embed call for the question takes: what embedding
@@ -72,7 +74,7 @@ _WORD = re.compile(r"\w[\w'’-]*")
 
 
 def parse_exam(data: Any, name: str = MEMORY_EXAM_FILE) -> list[dict[str, str]]:
-    """Questions from the exam file: a list of {q, expected, memory?, case?} (or {questions: [...]})."""
+    """Questions from the exam file: a list of {q, expected, memory?, outdated?, case?} (or {questions: [...]})."""
     if isinstance(data, dict):
         data = data.get("questions")
     if not isinstance(data, list):
@@ -89,6 +91,8 @@ def parse_exam(data: Any, name: str = MEMORY_EXAM_FILE) -> list[dict[str, str]]:
         entry = {"q": question, "expected": expected}
         if memory_words(memory := _clean(_text(item, ("memory",), where), _MAX_MEMORY_CHARS)):
             entry["memory"] = memory
+        if memory_words(outdated := _clean(_text(item, ("outdated",), where), _MAX_MEMORY_CHARS)):
+            entry["outdated"] = outdated
         if case := _clean(item.get("case"), _MAX_CASE_CHARS):
             entry["case"] = case
         questions.append(entry)
@@ -254,6 +258,26 @@ def recall_summary(grades: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
     return summary
 
 
+def outdated_summary(grades: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """Over the questions that name an outdated memory: how often it still reached Auri, and where.
+
+    not_correct_when_shown counts the answers that weren't correct although
+    the outdated memory was shown. None when no question names one.
+    """
+    named = [grade for grade in grades if grade.get("outdated_found_in")]
+    if not named:
+        return None
+    shown = [grade for grade in named if grade["outdated_found_in"] != "none"]
+    return {
+        "questions": len(named),
+        "shown": len(shown),
+        "found_in": {
+            source: sum(1 for grade in named if grade["outdated_found_in"] == source) for source in (*MEMORY_SOURCES, "none")
+        },
+        "not_correct_when_shown": sum(1 for grade in shown if grade.get("grade") != "correct"),
+    }
+
+
 def _recall_numbers(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """found: the share whose memory reached Auri; mrr: the mean of 1 / its place, 0 when not found.
 
@@ -341,6 +365,7 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
         answered: list[dict[str, Any]] = []
         try:
             space = await runtime.async_open_exam_memory(exam_memory) if exam_memory else runtime.owner
+            similar_names = list(getattr(space, "similar_names", [])) if exam_memory else []
             space.recall_trace.clear()
             for question in questions:
                 conversation_id = f"{MEMORY_EXAM_CONVERSATION_PREFIX}{uuid.uuid4().hex}"
@@ -370,6 +395,9 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
                 if "memory" in question:
                     found = find_memory(memory_words(question["memory"]), trace)
                     item["memory_found_in"], item["memory_rank"] = found or ("none", None)
+                if "outdated" in question:
+                    stale = find_memory(memory_words(question["outdated"]), trace)
+                    item["outdated_found_in"] = stale[0] if stale else "none"
                 if embedded and (
                     notes := await async_meaning_notes(space, embedded[1], embedded[2], trace, question.get("memory"))
                 ):
@@ -409,9 +437,14 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
             summary["file"] = name
         if exam_memory:
             summary["test_memory"] = True
+            if similar_names:
+                # The names the hub would ask about in Repairs (before the file's household.same).
+                summary["similar_names"] = similar_names
         summary["turns"] = turn_summary(grades)
         if (recall := recall_summary(grades)) is not None:
             summary["memory"] = recall
+        if (stale := outdated_summary(grades)) is not None:
+            summary["outdated"] = stale
         await hass.async_add_executor_job(
             lambda: store.finish_run(run_id, status="succeeded", stats={**summary, "grades": grades})
         )

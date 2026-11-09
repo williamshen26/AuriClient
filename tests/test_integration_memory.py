@@ -14,6 +14,7 @@ import math
 import re
 from typing import Any
 from unittest.mock import AsyncMock, patch
+import zlib
 
 import pytest
 
@@ -43,11 +44,13 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     CONF_MEMORY_SHARE_HOUSEHOLD,
     CONF_MEMORY_VAULT_PATH,
     CONF_SHARED_SECRET,
+    DATA_MEMORY,
     DOMAIN,
     MEMORY_EXAM_FILE,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
-from custom_components.hey_auri_client.memory import exam, logins, space as memory_space, turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory import exam, logins, names, space as memory_space, turn_log  # noqa: E402
+from custom_components.hey_auri_client.memory.recall import match_subjects  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApiError  # noqa: E402
 from custom_components.hey_auri_client.memory.db import EXAM_MEMORY_SCHEMA  # noqa: E402
 from custom_components.hey_auri_client.memory.identity import Speaker  # noqa: E402
@@ -61,7 +64,8 @@ _WORD = re.compile(r"[a-z0-9']+")
 def fake_vector(text: str) -> list[float]:
     vector = [0.0] * 768
     for word in _WORD.findall(text.lower()):
-        vector[hash(word) % 768] += 1.0
+        # crc32, not hash(): Python seeds hash() per run, so which words collide would change between runs.
+        vector[zlib.crc32(word.encode()) % 768] += 1.0
     norm = math.sqrt(sum(v * v for v in vector)) or 1.0
     return [v / norm for v in vector]
 
@@ -290,6 +294,78 @@ async def test_the_owners_own_login_is_kept_when_every_login_looks_like_a_servic
     await logins.async_update_logins_issue(hass, entry)
     issue = ir.async_get(hass).async_get_issue(DOMAIN, f"service_logins_{entry.entry_id}")
     assert issue.translation_placeholders == {"logins": "MQTT-user"}
+
+
+async def test_a_repairs_notice_asks_about_names_spelled_two_ways(hass: HomeAssistant, memory_setup, hass_client) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    store = runtime.store
+
+    def seed() -> list[int]:
+        import sqlalchemy
+
+        zoey, zoe, cleo, clio = store.resolve_entities([("Zoey", "pet"), ("Zoe", "pet"), ("Cleo", "pet"), ("Clio", "pet")])
+        store.insert_memory(NewMemory(kind="fact", content="Zoe is 12 years old.", source="chat", about_entity_ids=[zoe]))
+        # Will also stored as a topic, as a person renamed in Home Assistant can leave behind.
+        with store.engine.begin() as conn:
+            topic = conn.execute(sqlalchemy.text(
+                "INSERT INTO auri_memory.mem_entities (scope, kind, name) VALUES ('owner', 'topic', 'will') RETURNING id"
+            )).scalar()
+        store.insert_memory(NewMemory(kind="fact", content="Will runs on Sundays.", source="chat", about_entity_ids=[topic]))
+        return [zoey, zoe, cleo, clio]
+
+    zoey, zoe, _cleo, _clio = await hass.async_add_executor_job(seed)
+    await runtime.owner.async_refresh_entities()
+    entry = runtime.entry
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[DATA_MEMORY] = runtime
+    issue_id = f"similar_names_{entry.entry_id}"
+    issues = ir.async_get(hass)
+
+    await names.async_update_names_issue(hass, entry, runtime)
+    issue = issues.async_get_issue(DOMAIN, issue_id)
+    assert issue.is_fixable and issue.translation_placeholders == {"names": "Cleo and Clio; Zoe and Zoey"}
+    # Will stored again under the same name wasn't asked about: it's one person now.
+    [runs] = _db(runtime, "SELECT e.to_entity FROM auri_memory.mem_edges e JOIN auri_memory.mem_memories m "
+                          "ON m.id = e.from_memory WHERE m.content = 'Will runs on Sundays.'")
+    assert runs["to_entity"] == runtime.owner.person_ids["person.will"]
+    assert [entity.name for entity in runtime.owner.entities if entity.name.lower() == "will"] == ["Will"]
+
+    # The fix: Zoe and Zoey are one cat, spelled Zoey; Cleo and Clio are two dogs.
+    assert await async_setup_component(hass, "repairs", {})
+    hass.config.components.add(DOMAIN)
+    client = await hass_client()
+    response = await client.post("/api/repairs/issues/fix", json={"handler": DOMAIN, "issue_id": issue_id})
+    flow = await response.json()
+    assert flow["step_id"] == "names" and flow["description_placeholders"] == {"names": "Cleo and Clio; Zoe and Zoey"}
+    assert {field["name"]: field.get("default") for field in flow["data_schema"]} == {
+        "Cleo and Clio": "unsure", "Zoe and Zoey": "unsure",
+    }
+    response = await client.post(
+        f"/api/repairs/issues/fix/{flow['flow_id']}", json={"Zoe and Zoey": f"same:{zoey}", "Cleo and Clio": "different"}
+    )
+    assert (await response.json())["type"] == "create_entry"
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+
+    pets = [(entity.name, entity.aliases) for entity in runtime.owner.entities if entity.kind == "pet"]
+    assert pets == [("Cleo", ()), ("Clio", ()), ("Zoey", ("Zoe",))]
+    assert [m["name"] for m in runtime.owner.household_roster() if m["kind"] == "pet"] == ["Cleo", "Clio", "Zoey"]
+    # A question that says Zoe finds what's known about Zoey, the age said as Zoe included.
+    assert match_subjects("How old is Zoe?", runtime.owner.entities) == [zoey]
+    [age] = _db(runtime, "SELECT e.to_entity FROM auri_memory.mem_edges e JOIN auri_memory.mem_memories m "
+                         "ON m.id = e.from_memory WHERE m.content = 'Zoe is 12 years old.'")
+    assert age["to_entity"] == zoey and zoe not in {entity.id for entity in runtime.owner.entities}
+
+    # Asked once: Cleo and Clio don't come back, after a nightly run either.
+    await runtime.async_run_nightly()
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+
+    # A name the nightly run learns brings it back, for that pair; with memory not working, it goes.
+    await hass.async_add_executor_job(lambda: store.resolve_entities([("Rex", "pet"), ("Rexy", "pet")]))
+    await runtime.async_run_nightly()
+    assert issues.async_get_issue(DOMAIN, issue_id).translation_placeholders == {"names": "Rex and Rexy"}
+    runtime.state = MemoryState.UNAVAILABLE
+    await names.async_update_names_issue(hass, entry, runtime)
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+    runtime.state = MemoryState.ENABLED
 
 
 # ── agent turns ─────────────────────────────────────────────────────────────
@@ -1106,8 +1182,9 @@ async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeA
     await runtime.owner.async_refresh_entities()
     await runtime.owner.async_backfill_embeddings()
     (tmp_path / MEMORY_EXAM_FILE).write_text(
-        "- q: What day is Mia's piano lesson?\n  expected: Thursday.\n  memory: Mia piano Thursday\n  case: direct\n"
-        "- q: Which car is Will thinking of getting?\n  expected: A Volvo XC40.\n  memory: Volvo\n"
+        "- q: What day is Mia's piano lesson?\n  expected: Thursday.\n  memory: Mia piano Thursday\n  outdated: Thursday\n"
+        "  case: direct\n"
+        "- q: Which car is Will thinking of getting?\n  expected: A Volvo XC40.\n  memory: Volvo\n  outdated: Mia piano\n"
         "- q: What's the Wi-Fi password?\n  expected: HomeNet.\n  memory: wifi password\n"
         "- q: Is it raining?\n  expected: No.\n",
         encoding="utf-8",
@@ -1127,6 +1204,12 @@ async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeA
 
     found = [(item.get("memory_found_in"), item.get("memory_rank")) for item in result["grades"]]
     assert found == [("notes", 1), ("recall_memory", 1), ("none", None), (None, None)]
+    # An outdated memory is looked for the same way (here, stand-ins that are or aren't shown).
+    assert [item.get("outdated_found_in") for item in result["grades"]] == ["notes", "none", None, None]
+    assert result["outdated"] == {
+        "questions": 2, "shown": 1, "found_in": {"profile": 0, "notes": 1, "recall_memory": 0, "none": 1},
+        "not_correct_when_shown": 0,
+    }
     assert [item["searches"] for item in result["grades"]] == [0, 1, 0, 0]
     assert all(isinstance(item["seconds"], float) and item["seconds"] >= 0 for item in result["grades"])
     # One embedding call per question is timed; the fake backend answers it.
@@ -1196,7 +1279,8 @@ async def test_an_exam_can_bring_its_own_memories(hass: HomeAssistant, memory_se
     await runtime.owner.async_refresh_entities()
     real_memories = _db(runtime, "SELECT id, content, status FROM auri_memory.mem_memories ORDER BY id")
     (tmp_path / "benchmark.yaml").write_text(
-        "household:\n  people: [Ana, Mia]\n  pets: [Pip]\n"
+        # Pipp is Pip spelled another way, which the household has said (same).
+        "household:\n  people: [Ana, Mia]\n  pets: [Pip, Pipp]\n  same: [[Pip, Pipp]]\n"
         "memories:\n"
         "  - text: Mia has piano every Thursday at 16:00.\n    about: [Mia]\n    importance: 4\n"
         "  - text: Pip is allergic to chicken.\n    about: [Pip]\n"
@@ -1237,6 +1321,8 @@ async def test_an_exam_can_bring_its_own_memories(hass: HomeAssistant, memory_se
     shown = [memory["text"] for item in result["grades"] for memory in item["meaning_notes"]["memories"]]
     assert "Pip is allergic to chicken." in shown and "Mia has piano every Tuesday." not in shown
     assert result["file"] == "benchmark.yaml" and result["test_memory"] is True
+    # The pair Repairs would ask about, which the file's answer made one pet (the household above lists Pip once).
+    assert result["similar_names"] == ["Pip and Pipp"]
     # The test memory is gone, and the real memory is as it was.
     assert runtime.exam is None and not _schema_exists(runtime, EXAM_MEMORY_SCHEMA)
     assert _db(runtime, "SELECT id, content, status FROM auri_memory.mem_memories ORDER BY id") == real_memories

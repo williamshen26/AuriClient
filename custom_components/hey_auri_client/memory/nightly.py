@@ -14,11 +14,13 @@ For each finished local day (days end at the configured boundary hour):
 Every cloud call happens before the write, so a retry starts clean.
 
 After the days, a catch-up also rewrites digests a forget took out of
-service and, in the owner's memory, rates what an import brought in, once.
+service and, in the owner's memory, rates what an import brought in, once,
+and compares once what an import or a conversation saved without this run's
+comparison, retiring what another memory already says.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 import logging
@@ -63,6 +65,11 @@ _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
 _NOT_A_PERSON = frozenset({"assistant", "a household member", "household member", "someone"})
 # Meta key: ids of imported memories already rated.
 _IMPORTS_RATED = "imports_rated"
+# Meta key: the highest id of a memory saved without the nightly comparison that has been through it.
+# (Not "compared_up_to": that one was written before "skip" named what already says it.)
+_COMPARED_UP_TO = "saves_compared_up_to"
+# How much of a memory the comparison's result shows.
+_SHOWN_CHARS = 80
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -96,6 +103,23 @@ def raised_rating(row: dict[str, Any], rating: dict[str, Any]) -> tuple[int, str
     if rating.get("sensitivity") == "private" and sensitivity == "normal":
         sensitivity = "private"
     return importance, sensitivity
+
+
+def said_by(decision: dict[str, Any], neighbors: Sequence[dict[str, Any]]) -> list[int]:
+    """The memories a "skip" says already hold it: the ones the model named, of those it was shown.
+
+    The model doesn't always name them, so without a name the nearest counts
+    when it's all but the same text (neighbors come nearest first).
+    """
+    shown = {int(neighbor["id"]) for neighbor in neighbors}
+    named = [
+        memory_id
+        for memory_id in decision.get("replaces") or []
+        if isinstance(memory_id, int) and not isinstance(memory_id, bool) and memory_id in shown
+    ]
+    if not named and neighbors and float(neighbors[0].get("sim") or 0.0) >= CANDIDATE_DUPLICATE_SIM:
+        named = [int(neighbors[0]["id"])]
+    return named
 
 
 def parse_speaker(label: Any) -> tuple[str | None, bool]:
@@ -190,6 +214,9 @@ class NightlyJob:
         )
         if not stopped:
             results["embedded"] = await self._space.async_backfill_embeddings()
+            if not self._space.is_guest:
+                # After the embeddings: comparing needs them.
+                results["compared_saves"] = await self._async_compare_saved()
         await self._async_write_memory_note()
         return results
 
@@ -475,7 +502,12 @@ class NightlyJob:
         return results
 
     async def _async_reconcile_batch(
-        self, run: _Run, batch: list[tuple[dict[str, Any], list[dict[str, Any]]]], depth: int = 0
+        self,
+        run: _Run,
+        batch: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+        depth: int = 0,
+        *,
+        embed_updates: bool = True,
     ) -> list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]]:
         items = [
             {
@@ -498,15 +530,15 @@ class NightlyJob:
         ]
         try:
             response = await self._space.api.reconcile(
-                day=run.envelope["day"], household=run.envelope["household"], items=items, embed_updates=True
+                day=run.envelope["day"], household=run.envelope["household"], items=items, embed_updates=embed_updates
             )
         except MemoryApiError as err:
             if not err.retry_smaller or depth >= MAX_SPLIT_DEPTH or len(batch) < 2:
                 raise
             middle = len(batch) // 2
             return [
-                *await self._async_reconcile_batch(run, batch[:middle], depth + 1),
-                *await self._async_reconcile_batch(run, batch[middle:], depth + 1),
+                *await self._async_reconcile_batch(run, batch[:middle], depth + 1, embed_updates=embed_updates),
+                *await self._async_reconcile_batch(run, batch[middle:], depth + 1, embed_updates=embed_updates),
             ]
 
         run.add_usage(response)
@@ -582,18 +614,24 @@ class NightlyJob:
             for candidate, decision, neighbors in decisions:
                 action = decision.get("action") or "add"
                 if action == "skip":
-                    covered = [int(i) for i in decision.get("replaces") or []]
-                    if not covered and neighbors:
-                        covered = [int(neighbors[0]["id"])]
+                    named = said_by(decision, neighbors)
+                    covered = named or ([int(neighbors[0]["id"])] if neighbors else [])
                     store.confirm(conn, covered)
+                    # The memories that already say it take its rating if it's higher: only those
+                    # said_by finds, since the nearest one may not say it.
+                    store.raise_rating(
+                        conn,
+                        named,
+                        importance=int(candidate.get("importance") or 3),
+                        sensitivity="private" if candidate.get("sensitivity") == "private" else "normal",
+                    )
                     # A known fact can still tell what its subject is (Biscuit is a pet).
                     store.learn_kinds(conn, _subjects(candidate))
                     counts["facts_confirmed"] += 1
                     continue
 
-                memory_id, duplicate = store.insert_memory(
-                    self._fact(run, day_start, candidate, decision, persons, conn), conn
-                )
+                fact = self._fact(run, day_start, candidate, decision, persons, conn)
+                memory_id, duplicate = store.insert_memory(fact, conn)
                 # An update whose merged sentence is already stored word for word
                 # still retires what it replaces, in favour of that stored memory.
                 replaced = (
@@ -603,6 +641,7 @@ class NightlyJob:
                 )
                 if duplicate:
                     store.confirm(conn, [memory_id])
+                    store.raise_rating(conn, [memory_id], importance=fact.importance, sensitivity=fact.sensitivity)
                 if replaced:
                     counts["facts_updated"] += 1
                 elif duplicate:
@@ -767,6 +806,103 @@ class NightlyJob:
             if changes:
                 self._space.invalidate()
         return result
+
+    # ── memories saved without the nightly comparison ───────────────────────
+
+    async def _async_compare_saved(self) -> dict[str, Any]:
+        """Compare each memory an import or a conversation saved, once, with its nearest memories.
+
+        What the nightly run learns is compared with what's known; an import and
+        a conversation save weren't (a save only checks for a copy word for
+        word), so a fact can be stored twice in other words: a birthday
+        imported, then said again. Each one goes through the comparison a fact
+        learned at night gets, but only "already said" changes anything: it's
+        retired, as replaced by the memory that says it, which keeps the higher
+        rating. Nothing is rewritten, and of two that say the same, one always
+        stays (in the first run's backlog, the newer). A failed call leaves the
+        rest for the next run.
+        """
+        store = self._store
+        after = int(await self._run(store.get_meta, _COMPARED_UP_TO) or 0)
+        rows = await self._run(store.saved_without_comparison, after)
+        # decisions: what the comparison said, for the ones with memories close enough to compare.
+        result: dict[str, Any] = {"compared": 0, "decisions": {"add": 0, "update": 0, "skip": 0}, "retired": []}
+        if not rows:
+            return result
+        today = current_day(dt_util.now(), self._space.config.day_boundary_hour)
+        run = _Run(day=today, run_id=0, envelope=self._envelope(today))
+        pending: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        for row in rows:
+            if not row["has_vector"]:
+                continue  # its embedding failed just before this; it isn't compared
+            nearby = await self._run(lambda memory_id=row["id"]: store.neighbors_of(memory_id, limit=NEIGHBOR_LIMIT))
+            if neighbors := [neighbor for neighbor in nearby if neighbor["sim"] >= NEIGHBOR_MIN_SIM]:
+                pending.append((row, neighbors))
+
+        done_up_to = int(rows[-1]["id"])
+        decided: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = []
+        for start in range(0, len(pending), RECONCILE_BATCH):
+            batch = pending[start:start + RECONCILE_BATCH]
+            candidates = [
+                (
+                    {
+                        "statement": row["content"],
+                        "type": row["kind"],
+                        "speaker": row["speaker_name"] or "",
+                        "occurred_on": dt_util.as_local(row["at"]).date().isoformat() if row.get("at") else "",
+                    },
+                    neighbors,
+                )
+                for row, neighbors in batch
+            ]
+            try:
+                answers = await self._async_reconcile_batch(run, candidates, embed_updates=False)
+            except MemoryApiError as err:
+                _LOGGER.debug("Comparing saved memories postponed: %s", err)
+                result["postponed"] = "over_budget" if err.over_budget else "memory_disabled" if err.disabled else "cloud_error"
+                done_up_to = int(batch[0][0]["id"]) - 1
+                break
+            decided.extend((row, decision, neighbors) for (row, _), (_, decision, neighbors) in zip(batch, answers))
+
+        for _, decision, _ in decided:
+            action = decision.get("action")
+            result["decisions"][action if action in result["decisions"] else "add"] += 1
+        if decided:
+            result["retired"] = await self._run(self._retire_duplicates_blocking, decided)
+        result["compared"] = sum(1 for row in rows if row["id"] <= done_up_to)
+        if done_up_to > after:
+            await self._run(store.set_meta, _COMPARED_UP_TO, done_up_to)
+        if result["retired"]:
+            self._space.invalidate()
+        return result
+
+    def _retire_duplicates_blocking(
+        self, decided: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]]
+    ) -> list[dict[str, Any]]:
+        """Retire each memory the comparison found already said, in order: what was retired, and what says it."""
+        store = self._store
+        shown: list[dict[str, Any]] = []
+        with store.engine.begin() as conn:
+            for row, decision, neighbors in decided:
+                if decision.get("action") != "skip":
+                    continue
+                nearby = {int(neighbor["id"]): neighbor for neighbor in neighbors}
+                named = said_by(decision, neighbors)
+                # Still current, in this transaction too: of two that say the same, the first one
+                # retired can't stand in for the other, so one stays; nor can one forgotten meanwhile.
+                current = store.current_ids(conn, named)
+                cover = next((memory_id for memory_id in named if memory_id in current), None)
+                if cover is None or not store.supersede(conn, [row["id"]], cover, reason="duplicate"):
+                    continue
+                store.confirm(conn, [cover])
+                shown.append(
+                    {
+                        "id": int(row["id"]),
+                        "text": row["content"][:_SHOWN_CHARS],
+                        "said_by": {"id": cover, "text": nearby[cover]["content"][:_SHOWN_CHARS]},
+                    }
+                )
+        return shown
 
     # ── Obsidian copy ───────────────────────────────────────────────────────
 
