@@ -14,9 +14,10 @@ For each finished local day (days end at the configured boundary hour):
 Every cloud call happens before the write, so a retry starts clean.
 
 After the days, a catch-up also rewrites digests a forget took out of
-service and, in the owner's memory, rates what an import brought in, once,
-and compares once what an import or a conversation saved without this run's
-comparison, retiring what another memory already says.
+service, rates what an import brought in, once (in the owner's memory: a
+guest stay's details are rated by the code that writes them), and compares
+once what an import or a conversation saved without this run's comparison,
+retiring what another memory already says.
 """
 from __future__ import annotations
 
@@ -214,9 +215,8 @@ class NightlyJob:
         )
         if not stopped:
             results["embedded"] = await self._space.async_backfill_embeddings()
-            if not self._space.is_guest:
-                # After the embeddings: comparing needs them.
-                results["compared_saves"] = await self._async_compare_saved()
+            # After the embeddings: comparing needs them.
+            results["compared_saves"] = await self._async_compare_saved()
         await self._async_write_memory_note()
         return results
 
@@ -529,8 +529,10 @@ class NightlyJob:
             for position, (candidate, neighbors) in enumerate(batch)
         ]
         try:
+            # The scope too, or the backend takes it for the owner's memory and leaves out its note about guests.
             response = await self._space.api.reconcile(
-                day=run.envelope["day"], household=run.envelope["household"], items=items, embed_updates=embed_updates
+                scope=run.envelope["scope"], day=run.envelope["day"], household=run.envelope["household"],
+                items=items, embed_updates=embed_updates,
             )
         except MemoryApiError as err:
             if not err.retry_smaller or depth >= MAX_SPLIT_DEPTH or len(batch) < 2:

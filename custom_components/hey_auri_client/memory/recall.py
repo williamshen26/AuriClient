@@ -119,18 +119,19 @@ def should_auto_recall(text: str) -> bool:
     return " ".join(word_list(text)) not in _SHORT_REPLIES
 
 
-def reads_as_english(text: str, hub_language: str) -> bool:
+def reads_as_english(text: str, hub_language: str | None) -> bool:
     """Whether a message is in English, so the keyword search can read it (memories are written in English).
 
     Home Assistant can't say: the language it passes is the voice pipeline's setting, whatever was
     said. So this goes by the text, with no word list per language. A letter from another script
     means it isn't. With Latin letters only, it is on a hub set to English, so those households
-    don't wait on short commands like "Open the garage door". On other hubs, it is when at least
-    30% of its words are English function words. A mistake only costs a wait, or today's notes.
+    don't wait on short commands like "Open the garage door". On other hubs, and with no hub
+    language (guests, who needn't speak the household's), it is when at least 30% of its words
+    are English function words. A mistake only costs a wait, or today's notes.
     """
     if any(char.isalpha() and _script(char) != "LATIN" for char in text or ""):
         return False
-    if hub_language.lower().split("-")[0] == "en":
+    if hub_language and hub_language.lower().split("-")[0] == "en":
         return True
     words = _LETTER_WORD.findall((text or "").casefold().replace("’", "'"))
     return not words or sum(word in _ENGLISH_FUNCTION_WORDS for word in words) / len(words) >= _ENGLISH_WORD_SHARE

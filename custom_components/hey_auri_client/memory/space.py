@@ -440,7 +440,8 @@ class MemorySpace:
         through names. Nothing on a timeout or an error: the turn goes on with the keyword notes.
         """
         store = self.store
-        language = str(self.entry.options.get(CONF_STT_LANGUAGE) or DEFAULT_STT_LANGUAGE)
+        # The hub's language is the household's. Guests needn't speak it, so for them the words decide.
+        language = None if self.is_guest else str(self.entry.options.get(CONF_STT_LANGUAGE) or DEFAULT_STT_LANGUAGE)
         if store is None or not should_auto_recall(text) or reads_as_english(text, language):
             return []
         try:

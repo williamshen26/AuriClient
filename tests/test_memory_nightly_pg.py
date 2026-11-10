@@ -114,6 +114,7 @@ class FakeApi:
 
     async def reconcile(self, **fields):
         self.calls.append(("reconcile", len(fields["items"])))
+        self.scopes.add(fields.get("scope"))
         self.embed_updates.append(fields.get("embed_updates"))
         self._maybe_fail("reconcile")
         return {
@@ -810,6 +811,7 @@ def test_a_fact_saved_twice_in_other_words_is_kept_once(store, make_job):
     }
     assert seen == ["Mia's birthday: March 3.", "Mia's birthday is on March 3."]
     assert api.embed_updates == [False]  # nothing is rewritten, so no merged sentence needs embedding
+    assert api.scopes == {"owner"}
     [old] = rows(store, "SELECT status, superseded_by, status_reason FROM auri_memory.mem_memories WHERE id = :id", id=imported)
     assert (old["status"], old["superseded_by"], old["status_reason"]) == ("superseded", said, "duplicate")
     # The one that stays keeps the stricter privacy, and counts as said again.
@@ -924,10 +926,40 @@ def test_a_guest_stays_memories_keep_their_ratings(store, pg_engine, pg_config, 
 
     result = asyncio.run(NightlyJob(FakeRuntime(hass, guests, pg_config(vault_path=""), api, mode="guest")).async_catch_up(days_back=7))
 
-    assert "rated_imports" not in result and "compared_saves" not in result
-    assert not [call for call in api.calls if call[0] in ("rate", "reconcile")]
-    [row] = rows(guests, f"SELECT importance, sensitivity FROM {GUEST_MEMORY_SCHEMA}.mem_memories WHERE id = :id", id=seed)
-    assert (row["importance"], row["sensitivity"]) == (4, "normal")
+    assert "rated_imports" not in result
+    assert not [call for call in api.calls if call[0] == "rate"]
+    assert _rating(guests, seed) == (4, "normal")
+
+
+def test_a_guest_fact_saved_twice_in_other_words_is_kept_once(store, pg_engine, pg_config, tmp_path):
+    # Like the household's: here the host's note, which the guests then asked Auri to remember in their own words.
+    apply_migrations(pg_engine, app_version="test", schema=GUEST_MEMORY_SCHEMA)
+    guests = MemoryStore(pg_engine, schema=GUEST_MEMORY_SCHEMA, scope=GUEST_SCOPE)
+    guests.ensure_household()
+
+    def saved(content: str, source: str, importance: int) -> int:
+        memory_id, _ = guests.insert_memory(NewMemory(kind="fact", content=content, source=source, importance=importance,
+                                                      embedding=fake_vector(content), embedding_model=TAG))
+        return memory_id
+
+    note = saved("The host's note about this stay: Sam's birthday is on Saturday.", "import", 4)
+    said = saved("Sam's birthday is this Saturday.", "chat", 3)
+    hass = FakeHass(str(tmp_path / "config"))
+    os.makedirs(hass.config.config_dir, exist_ok=True)
+    api = FakeApi([], decide=_says_the_birthday([]))
+    job = NightlyJob(FakeRuntime(hass, guests, pg_config(vault_path=""), api, mode="guest"))
+
+    result = asyncio.run(job.async_catch_up(days_back=7))
+
+    assert result["compared_saves"]["retired"] == [{
+        "id": note, "text": "The host's note about this stay: Sam's birthday is on Saturday.",
+        "said_by": {"id": said, "text": "Sam's birthday is this Saturday."},
+    }]
+    assert api.scopes == {"guest"}  # every call says it's the guests' memory, the comparison too
+    assert _rating(guests, said) == (4, "normal")  # the one that stays keeps the higher rating
+    assert store.counts() == {}  # the owner's memory is untouched
+    # Each is compared once.
+    assert asyncio.run(job.async_catch_up(days_back=7))["compared_saves"]["compared"] == 0
 
 
 def test_long_days_are_split_to_fit_each_request(store, make_job):

@@ -71,6 +71,12 @@ def test_should_auto_recall_counts_words_in_any_script(text, expected):
         ("¿Cómo toma Sofía el café?", "es", False),
         ("Comment je connecte mon ordinateur portable à internet ?", "fr", False),
         ("Hoe krijg ik mijn laptop online?", "nl", False),
+        # With no hub language (a guest's message), the words decide, as on other hubs.
+        ("Where did we park the car?", None, True),
+        ("¿Dónde dejamos el coche?", None, False),
+        ("Où est-ce qu'on a garé la voiture ?", None, False),
+        ("Open the garage door", None, False),
+        ("我们把车停在哪里了？", None, False),
         # Nothing to read.
         ("", "zh", True),
         ("12 + 30", "zh", True),

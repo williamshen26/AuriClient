@@ -965,6 +965,31 @@ async def test_guests_and_owners_never_share_memories(hass: HomeAssistant, memor
     assert all(member["name"] != "Sarah Lee" for member in memory["household"])
 
 
+async def test_guests_get_notes_by_meaning_whatever_the_hub_is_set_to(hass: HomeAssistant, memory_setup) -> None:
+    agent, runtime, _client, _will = memory_setup
+    await _set_guest_options(hass, agent, runtime, **_GUEST)
+    parked = "The guests parked in spot 4 behind the building."
+    await hass.async_add_executor_job(
+        runtime.guest.store.insert_memory, NewMemory(kind="fact", content=parked, source="chat")
+    )
+    await _settle(hass)
+    await runtime.guest.async_refresh_entities()
+    await runtime.guest.async_backfill_embeddings()
+    question = "¿Dónde dejamos el coche?"
+
+    embed = _embeds_as(parked)
+    with patch.object(runtime.api, "embed", embed):
+        # The hub is set to English, the household's language: Latin letters need no embedding.
+        await runtime.owner.async_turn_context(question, Speaker(), "g1")
+        embed.assert_not_awaited()
+        # Guests may speak another: an English question still needs none, but a Spanish one gets notes by meaning.
+        await runtime.guest.async_turn_context("Where did we park the car?", Speaker(), "g2")
+        embed.assert_not_awaited()
+        block = await runtime.guest.async_turn_context(question, Speaker(), "g3")
+    embed.assert_awaited_once_with([question], task_type="RETRIEVAL_QUERY", scope="guest")
+    assert parked in block["notes"] and parked not in block["profile"]
+
+
 async def test_guest_memory_starts_again_and_is_erased(hass: HomeAssistant, memory_setup) -> None:
     agent, runtime, _, _ = memory_setup
     await _set_guest_options(hass, agent, runtime, **_GUEST)
