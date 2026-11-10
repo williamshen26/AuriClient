@@ -114,3 +114,17 @@ class MemoryApi:
 
     async def grade(self, items: list[dict[str, str]]) -> dict[str, Any]:
         return await self._post("grade", {"items": items})
+
+    async def exam_allowed(self) -> bool:
+        """Whether this account may run the memory exam (memory_exam on its account). No model call.
+
+        A refusal (403) or a backend without the check (404) is a no; any other
+        failure raises MemoryApiError.
+        """
+        try:
+            response = await self._post("exam", {})
+        except MemoryApiError as err:
+            if err.status_code in {403, 404}:
+                return False
+            raise
+        return response.get("allowed") is True

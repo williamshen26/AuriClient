@@ -29,6 +29,11 @@ add to the notes. Auri never sees it. A file that also lists memories is
 asked against them, in a test memory (exam_memory.py), instead of the
 household's real memory. A question that changes the household's language
 has it put back at once, and shows what it changed it to as language_set.
+
+It's a developer tool. Its questions are real turns that cost tokens, so only
+an account with memory_exam on its auth-clients row gets the action
+(registered once memory connects), and the exam asks the backend again before
+its first question.
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.yaml import load_yaml
 
 from ..const import CONF_STT_LANGUAGE, MEMORY_EXAM_CONVERSATION_PREFIX, MEMORY_EXAM_FILE
+from .api import MemoryApiError
 from .exam_memory import parse_exam_memory
 from .recall import RecallRow, TraceEntry
 
@@ -344,6 +350,13 @@ async def async_run_exam(runtime: "MemoryRuntime", file_name: str | None = None)
         raise HomeAssistantError("Memory isn't set up, or its database can't be reached")
     if runtime.last_known_mode == "guest":
         raise HomeAssistantError("The memory exam only runs in owner mode")
+    # Asked again here: the account may have lost the exam since its action was offered.
+    try:
+        allowed = await runtime.api.exam_allowed()
+    except MemoryApiError as err:
+        raise HomeAssistantError(f"Couldn't check whether this account may run the memory exam: {err}") from err
+    if not allowed:
+        raise HomeAssistantError("The memory exam isn't turned on for this account")
 
     name = file_name or MEMORY_EXAM_FILE
     try:

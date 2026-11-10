@@ -283,6 +283,19 @@ class MemoryRuntime:
         await self.async_import_legacy()
         await self.async_backfill_embeddings()
         await self._async_check_names()
+        await self._async_offer_exam()
+
+    async def _async_offer_exam(self) -> None:
+        """Offer the memory exam's action, a developer tool, only on an account the backend lets run it."""
+        from ..conversation.services import async_register_exam_action  # pylint: disable=import-outside-toplevel
+
+        try:
+            allowed = await self.api.exam_allowed()
+        except Exception as err:  # noqa: BLE001 (a developer tool must never stop memory)
+            _LOGGER.debug("Couldn't check whether this account may run the memory exam: %s", err)
+            return
+        if allowed:
+            async_register_exam_action(self.hass)
 
     async def _async_check_names(self) -> None:
         """The Repairs notice for names that may be one pet or person spelled two ways."""

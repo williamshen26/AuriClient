@@ -47,6 +47,7 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     DATA_MEMORY,
     DOMAIN,
     MEMORY_EXAM_FILE,
+    SERVICE_RUN_MEMORY_EXAM,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
 from custom_components.hey_auri_client.memory import exam, logins, names, space as memory_space, turn_log  # noqa: E402
@@ -56,6 +57,7 @@ from custom_components.hey_auri_client.memory.db import EXAM_MEMORY_SCHEMA  # no
 from custom_components.hey_auri_client.memory.identity import Speaker  # noqa: E402
 from custom_components.hey_auri_client.memory.runtime import MemoryRuntime, MemoryState  # noqa: E402
 from custom_components.hey_auri_client.memory.store import NewMemory  # noqa: E402
+from custom_components.hey_auri_client.exceptions import SaaSRequestError  # noqa: E402
 from custom_components.hey_auri_client.saas_client import SaaSTurnResponse  # noqa: E402
 
 _WORD = re.compile(r"[a-z0-9']+")
@@ -372,11 +374,13 @@ async def test_a_repairs_notice_asks_about_names_spelled_two_ways(hass: HomeAssi
 
 
 class FakeClient:
-    """Scripted backend: returns the queued responses and answers /memory/embed."""
+    """Scripted backend: returns the queued responses, and answers /memory/embed and /memory/exam."""
 
     def __init__(self) -> None:
         self.responses: list[SaaSTurnResponse] = []
         self.payloads: list[dict[str, Any]] = []
+        # /memory/exam: its answer, or the HTTP status it fails with.
+        self.exam_answer: dict[str, Any] | int = {"allowed": True}
 
     async def send_user_turn(self, payload: dict[str, Any]) -> SaaSTurnResponse:
         self.payloads.append(payload)
@@ -387,6 +391,11 @@ class FakeClient:
         return self.responses.pop(0)
 
     async def post_json(self, path: str, payload: dict[str, Any], **_kwargs) -> dict[str, Any]:
+        if path == "/memory/exam":
+            if isinstance(self.exam_answer, int):
+                body = {"error": "exam_disabled", "message": "The memory exam isn't enabled for this account."}
+                raise SaaSRequestError("Request failed", status_code=self.exam_answer, response_body=json.dumps(body))
+            return self.exam_answer
         assert path == "/memory/embed"
         return {"model": "fake-embed", "dimensions": 768, "embeddings": [fake_vector(t) for t in payload["texts"]]}
 
@@ -1167,9 +1176,38 @@ def _schema_exists(runtime: MemoryRuntime, schema: str) -> bool:
     return bool(_db(runtime, f"SELECT count(*) AS n FROM pg_namespace WHERE nspname = '{schema}'")[0]["n"])
 
 
+@pytest.mark.parametrize("answer", [403, 404, 500, {"allowed": False}])
+async def test_only_an_account_that_may_run_the_exam_gets_it(hass: HomeAssistant, memory_options, answer) -> None:
+    """Exam questions are real turns that cost tokens, so the backend decides which accounts may run it."""
+    await async_setup_component(hass, "homeassistant", {})
+    entry = _entry(memory_options)
+    entry.add_to_hass(hass)
+    client = FakeClient()
+    # 403: not this account. 404: a backend without the check. 500: the check failed.
+    client.exam_answer = answer
+    runtime = MemoryRuntime(hass, entry, client, app_version="test")
+    await runtime.async_start()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    try:
+        assert runtime.state is MemoryState.ENABLED
+        assert not hass.services.has_service(DOMAIN, SERVICE_RUN_MEMORY_EXAM)
+
+        # Started anyway (say its action stayed after the account lost the exam): it stops before
+        # anything else, even before looking for its file, and asks nothing.
+        refusal = "Couldn't check" if answer == 500 else "isn't turned on for this account"
+        with pytest.raises(HomeAssistantError, match=refusal):
+            await runtime.async_run_exam()
+        assert client.payloads == []
+        assert _db(runtime, "SELECT id FROM auri_memory.mem_runs WHERE job = 'exam'") == []
+    finally:
+        await runtime.async_shutdown()
+
+
 async def test_the_exam_shows_where_each_answers_memory_reached_auri(hass: HomeAssistant, memory_setup, tmp_path) -> None:
     agent, runtime, client, _will = memory_setup
     store = runtime.store
+    # The fake account may run the exam, so its action was offered once memory connected.
+    assert hass.services.has_service(DOMAIN, SERVICE_RUN_MEMORY_EXAM)
 
     def seed() -> None:
         will, mia = store.resolve_entities([("Will", "person"), ("Mia", "person")])

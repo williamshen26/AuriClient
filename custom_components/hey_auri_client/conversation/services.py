@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
@@ -191,12 +191,6 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
             )
         return result
 
-    async def _handle_run_memory_exam(call: ServiceCall) -> dict[str, object]:
-        try:
-            return await _memory_runtime(hass).async_run_exam(call.data.get(ATTR_FILE))
-        except MemoryApiError as err:
-            raise HomeAssistantError(f"Grading failed: {err}") from err
-
     async def _handle_sync_bookings(call: ServiceCall) -> dict[str, object]:
         del call
         sync = _booking_sync(hass)
@@ -216,13 +210,6 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
         SERVICE_RUN_MEMORY_JOB,
         _handle_run_memory_job,
         schema=RUN_MEMORY_JOB_SCHEMA,
-        supports_response=SupportsResponse.OPTIONAL,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RUN_MEMORY_EXAM,
-        _handle_run_memory_exam,
-        schema=RUN_MEMORY_EXAM_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
@@ -269,3 +256,29 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
     )
 
     hass.data[DOMAIN]["services_registered"] = True
+
+
+@callback
+def async_register_exam_action(hass: HomeAssistant) -> None:
+    """Offer run_memory_exam, a developer tool, once the backend says this account may run it.
+
+    Its questions are real conversation turns that cost tokens, so a hub on any
+    other account never gets the action. The memory runtime calls this after
+    it connects.
+    """
+    if hass.services.has_service(DOMAIN, SERVICE_RUN_MEMORY_EXAM):
+        return
+
+    async def _handle_run_memory_exam(call: ServiceCall) -> dict[str, object]:
+        try:
+            return await _memory_runtime(hass).async_run_exam(call.data.get(ATTR_FILE))
+        except MemoryApiError as err:
+            raise HomeAssistantError(f"Grading failed: {err}") from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RUN_MEMORY_EXAM,
+        _handle_run_memory_exam,
+        schema=RUN_MEMORY_EXAM_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )

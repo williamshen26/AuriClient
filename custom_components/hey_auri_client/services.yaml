@@ -97,7 +97,9 @@ run_memory_exam:
     from the memory that answers it) also shows whether that memory reached
     Auri. A file that lists its own memories is asked against them, in a test
     memory deleted afterwards, instead of your real memory. Write questions,
-    not commands: they run like real requests.
+    not commands: they run like real requests. A developer tool, only on
+    accounts with the memory exam turned on, because its questions cost what
+    the same conversations would (docs/memory-exam.md in the repository).
   fields:
     file:
       required: false
