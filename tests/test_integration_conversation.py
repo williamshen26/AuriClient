@@ -17,6 +17,7 @@ from homeassistant.setup import async_setup_component  # noqa: E402
 
 from custom_components.hey_auri_client.const import CONF_CLIENT_ID, CONF_SHARED_SECRET, DOMAIN  # noqa: E402
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
+from custom_components.hey_auri_client.conversation.helpers import build_context_snapshot  # noqa: E402
 from custom_components.hey_auri_client.saas_client import SaaSTurnResponse  # noqa: E402
 
 
@@ -68,3 +69,27 @@ async def test_a_reply_that_asks_something_keeps_the_satellite_listening(
     )
 
     assert result.continue_conversation is keeps_listening
+
+
+@pytest.mark.usefixtures("agent")
+async def test_the_agent_gets_the_time_in_home_assistants_time_zone(hass: HomeAssistant, freezer) -> None:
+    """Not in the process's own time zone, which comes from the host or the container.
+
+    A process zone that matched Home Assistant's for years can stop matching: British Columbia
+    stayed on UTC-7 in November 2026, while Los Angeles went back to UTC-8. America/Phoenix stays
+    on UTC-7 too, and its rules don't depend on how new the time zone data is.
+    """
+    await hass.config.async_set_time_zone("America/Phoenix")
+    freezer.move_to("2026-11-10T19:19:07+00:00")
+
+    snapshot = await build_context_snapshot(
+        hass,
+        conversation.ConversationInput(
+            text="What time is it?", context=Context(), conversation_id="c1", device_id=None,
+            satellite_id=None, language="en", agent_id="hey_auri_client",
+        ),
+    )
+
+    assert snapshot["now"] == "2026-11-10T12:19:07-07:00"
+    assert snapshot["day_of_week"] == "Tuesday"
+    assert snapshot["home_location"]["time_zone"] == "America/Phoenix"

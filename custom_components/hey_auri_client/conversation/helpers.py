@@ -1,7 +1,6 @@
 """Helpers for conversation-related integration logic."""
 from __future__ import annotations
 
-from datetime import datetime
 import difflib
 from typing import Any, Mapping
 
@@ -10,6 +9,7 @@ from homeassistant.components.homeassistant.exposed_entities import async_should
 from homeassistant.const import ATTR_NAME
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
+from homeassistant.util import dt as dt_util
 
 from ..cache import add_processed_entity, get_media_player_sources, get_processed_entities
 from ..const import CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, DOMAIN
@@ -121,7 +121,10 @@ async def build_context_snapshot(
 ) -> dict[str, Any]:
     """Build the structured context payload sent to the SaaS backend."""
     user_name = await get_user_name(hass, user_input.context.user_id)
-    now = datetime.now().astimezone()
+    # Home Assistant's clock, in the time zone set in Home Assistant (the time_zone sent below).
+    # Not the process's local time: its zone comes from the container's TZ or the host (UTC in
+    # a container without TZ), and doesn't follow a change to Home Assistant's setting.
+    now = dt_util.now()
     return {
         "agent_id": user_input.agent_id,
         "device_id": user_input.device_id,
