@@ -61,6 +61,11 @@ class SaaSTurnResponse:
     # backends, which disables memory on this side).
     mode: str | None = None
     memory_allowed: bool = False
+    # Whether the user's device should keep listening after this reply ([listen], or a
+    # question); None from older backends, where the client checks for a question itself.
+    listen: bool | None = None
+    # Heard from an open mic and not said to Auri: no answer at all.
+    ignored: bool = False
 
 
 @dataclass(slots=True)
@@ -808,6 +813,7 @@ def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
         raise SaaSRequestError(f"Unknown response type: {response}")
 
     mode = response.get("mode")
+    listen = response.get("listen")
     return SaaSTurnResponse(
         response_type=response_type,
         conversation_id=response["conversation_id"],
@@ -816,6 +822,8 @@ def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
         tool_calls=response.get("tool_calls"),
         mode=mode if mode in {"owner", "guest"} else None,
         memory_allowed=response.get("memory_allowed") is True,
+        listen=listen if isinstance(listen, bool) else None,
+        ignored=response.get("ignored") is True,
     )
 
 

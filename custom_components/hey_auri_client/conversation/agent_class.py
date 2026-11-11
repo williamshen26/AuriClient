@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import intent
 
@@ -20,6 +20,8 @@ from ..const import (
     CONF_SHARED_SECRET,
     DATA_FRONTEND_CLIENT,
     DOMAIN,
+    EVENT_AURI_INTERRUPTED,
+    EVENT_AURI_WAKE_WORD,
     EVENT_CONVERSATION_FINISHED,
     FAST_PATH_ACK_PHRASES,
     MEMORY_EXAM_CONVERSATION_PREFIX,
@@ -29,6 +31,7 @@ from ..bookings.automatic_mode import stay_context
 from ..bookings.guest_name import async_mark_asked
 from ..cache import reset_processed_entities
 from ..exceptions import SaaSRequestError, ToolExecutionError
+from .follow_up import FollowUpTracker
 from .helpers import build_context_snapshot, get_response_language
 from ..helpers import get_timeout_seconds
 from .local_tool_executor import MEMORY_TOOL_NAMES, LocalToolExecutor
@@ -146,6 +149,30 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         )
         self.memory: MemoryRuntime | None = None
         self.tool_executor = LocalToolExecutor(hass)
+        # Turns heard from a mic left open after a reply, and how many in a row.
+        self.follow_ups = FollowUpTracker()
+        entry.async_on_unload(hass.bus.async_listen(EVENT_AURI_INTERRUPTED, self._async_note_interruption))
+        entry.async_on_unload(hass.bus.async_listen(EVENT_AURI_WAKE_WORD, self._async_note_wake))
+
+    @callback
+    def _async_note_interruption(self, event: Event) -> None:
+        """A satellite's firmware cut Auri's reply short because the user talked over it."""
+        device_id = event.data.get("device_id")
+        if isinstance(device_id, str) and device_id:
+            self.follow_ups.note_interruption(device_id)
+
+    @callback
+    def _async_note_wake(self, event: Event) -> None:
+        """A satellite's firmware started a request for the user (the wake word or the button)."""
+        device_id = event.data.get("device_id")
+        if isinstance(device_id, str) and device_id:
+            self.follow_ups.note_wake(device_id)
+
+    def _silent_result(self, conversation_id: str) -> conversation.ConversationResult:
+        """No answer: Home Assistant skips text-to-speech for empty speech, and the satellite goes idle."""
+        intent_response = intent.IntentResponse(language=get_response_language(self.hass))
+        intent_response.async_set_speech("")
+        return conversation.ConversationResult(response=intent_response, conversation_id=conversation_id)
 
     def attach_memory(self, memory: MemoryRuntime) -> None:
         """Use the entry's memory runtime (created after this agent's client, which it calls)."""
@@ -232,7 +259,16 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
 
         conversation_id = user_input.conversation_id or str(uuid.uuid4())
         reset_processed_entities(conversation_id)
+        heard = self.follow_ups.begin_turn(conversation_id, user_input.device_id, user_input.text)
+        if heard.echo or heard.over_limit:
+            # The satellite hearing its own reply, or a run of interruptions past the limit.
+            _LOGGER.debug("No answer to %s", "Auri's own reply heard back" if heard.echo else "an interruption past the limit")
+            self.follow_ups.finish_turn(conversation_id, listen=False)
+            return self._silent_result(conversation_id)
         context = await build_context_snapshot(self.hass, user_input)
+        if heard.open_mic:
+            # Heard without the wake word: Auri may stay silent if it wasn't said to it.
+            context["follow_up"] = True
         # For the dashboard's Automatic mode (the backend decides the mode from
         # this), and for asking the guests their name.
         stay = stay_context(self.hass, self.entry.options)
@@ -301,6 +337,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                     self._log_turn(
                         user_input, turn, reply=ack_phrase, tool_names=tool_names, kind="device_control"
                     )
+                    # A device command isn't a back-and-forth: the mic closes.
+                    self.follow_ups.finish_turn(conversation_id, listen=False, reply=ack_phrase)
                     self.hass.bus.async_fire(
                         EVENT_CONVERSATION_FINISHED,
                         {
@@ -319,6 +357,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                 self._note_response(response, turn)
         except (SaaSRequestError, ToolExecutionError, HomeAssistantError) as err:
             _LOGGER.error("Thin frontend request failed: %s", err, exc_info=err)
+            self.follow_ups.finish_turn(conversation_id, listen=False)
             intent_response = intent.IntentResponse(language=user_input.language)
             if isinstance(err, SaaSRequestError) and (
                 err.status_code == 429 or "SaaS request failed: 429" in str(err)
@@ -339,6 +378,11 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                 conversation_id=conversation_id,
             )
 
+        if response.ignored:
+            # Heard from an open mic and not said to Auri: no answer, nothing for memory.
+            self.follow_ups.finish_turn(conversation_id, listen=False)
+            return self._silent_result(conversation_id)
+
         intent_response = intent.IntentResponse(language=get_response_language(self.hass))
         intent_response.async_set_speech(response.content or "")
         self._log_turn(user_input, turn, reply=response.content, tool_names=tool_names)
@@ -356,11 +400,16 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             },
         )
 
-        # A reply that asks something: an ESPHome satellite (Voice PE) listens
-        # for the answer without the wake word, and Home Assistant sends it
-        # straight back to Auri in this conversation.
+        # Auri expects an answer right away ([listen], or a question): the satellite, the phone
+        # app or the web UI keeps listening without the wake word, and Home Assistant sends the
+        # answer straight back to Auri in this conversation. An older backend sends no flag.
+        listen = response.listen
+        if listen is None:
+            listen = (response.content or "").strip().endswith(_QUESTION_MARKS)
         return conversation.ConversationResult(
             response=intent_response,
             conversation_id=conversation_id,
-            continue_conversation=(response.content or "").strip().endswith(_QUESTION_MARKS),
+            continue_conversation=self.follow_ups.finish_turn(
+                conversation_id, listen=listen, reply=response.content or ""
+            ),
         )

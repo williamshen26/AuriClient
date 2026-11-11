@@ -19,6 +19,7 @@ The integration adds three things to Home Assistant:
 - **42 languages**: say "speak Spanish to me" and Auri switches both listening and speaking.
 - **Personalities**: Auri, Tovi, Glen or Brigg, chosen on your dashboard at hey-auri.com.
 - **Quick confirmations**: simple device commands get an immediate spoken "OK" instead of waiting for a full reply.
+- **Hands-free follow-ups**: when Auri expects an answer, such as a question or the next step of a recipe, it keeps listening, so you don't repeat the wake word. See [Keeping the mic open](#keeping-the-mic-open).
 
 ## Requirements
 
@@ -53,7 +54,16 @@ The integration adds three things to Home Assistant:
 
 Auri can only see and control entities that are exposed to Assist. Choose them under **Settings → Voice assistants → Expose**.
 
-When Auri asks you something, such as "Which light, the kitchen or the hall?", a satellite built on ESPHome, such as Home Assistant Voice Preview Edition, keeps listening for your answer, so you don't need the wake word. If nobody answers, it goes back to waiting for the wake word. Wyoming satellites always wait for the wake word.
+### Keeping the mic open
+
+When Auri expects an answer right away, it keeps listening, so you don't need the wake word. That happens when it asks you something, such as "Which light, the kitchen or the hall?", when it offers a choice or a next step, or in a back-and-forth, such as a recipe step by step. Auri decides this with each reply. This works on a satellite built on ESPHome, such as Home Assistant Voice Preview Edition, and in the Home Assistant app and web UI. Wyoming satellites always wait for the wake word.
+
+- **Nobody answers:** the satellite goes back to waiting for the wake word.
+- **Device commands** ("turn on the light", answered "OK") never keep listening.
+- **Speech that wasn't meant for Auri:** if what's heard while it listens isn't said to Auri (people talking to each other, a TV), Auri doesn't answer, and the satellite goes back to waiting. Those words aren't kept, in the conversation or in memory.
+- **At most 10 in a row:** after 10 answers in a row without the wake word, Auri waits for the wake word again. Saying it continues the same conversation.
+- **Talking over Auri:** a satellite whose firmware can do it may let you talk over Auri mid-reply. The firmware fires the `esphome.auri_interrupted` event, and Auri treats what it hears next the same way, with the same limit.
+- **The wake word:** Home Assistant doesn't tell Auri how a request started. A satellite whose firmware fires `esphome.auri_wake_word` when you say the wake word or press its button tells Auri that the next request is yours. Auri always answers it and starts the count over. Without that event, a request in the 2 minutes after a reply that kept listening is treated like an answer: Auri still answers anything said to it.
 
 ## Owner and guest mode
 
@@ -106,7 +116,7 @@ The link shows when your home is empty, so keep it private. Auri never writes it
 
 Airbnb's calendar doesn't include the guest's name. When **Guest name** in the Guest options is empty, Auri asks the guests.
 
-- **When:** the first time a guest talks with Auri after check-in, Auri helps with whatever they asked, then asks their name ("By the way, may I ask your name?"). On a voice satellite, it keeps listening for the answer. A device command Auri only answers "Done" to doesn't count.
+- **When:** the first time a guest talks with Auri after check-in, Auri helps with whatever they asked, then asks their name ("By the way, may I ask your name?"). On a voice satellite, it keeps listening for the answer. A device command Auri only answers "OK" to doesn't count.
 - **What it keeps:** the answer, for that booking only. Auri greets the guests with it, and with [guest memory](#guest-memory) on, it's one of the guests staying. A guest can correct it ("actually, it's Sara").
 - **Once a booking:** if the guest would rather not say, or talks about something else, Auri doesn't ask again during that booking. The next booking starts without a name, and its guests are asked.
 - **Your name wins:** a name you type in **Guest name** is always used, and then Auri doesn't ask. The Guest options show the name the guests gave, and so does the `guest_name` attribute of `sensor.auri_guest_stay`.
@@ -372,6 +382,9 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | Auri asks you to set up Music Assistant | Music playback needs [Music Assistant](https://music-assistant.io). |
 | Auri listens or replies in the wrong language | Ask it to switch (for example, "speak English"), or change **STT default language** in the General options. |
 | An automation's sentence trigger didn't run | If Auri had just asked you something, Home Assistant sent your answer straight to Auri. Say the sentence again after the wake word. |
+| The satellite stopped listening after a few answers | After 10 answers in a row without the wake word, Auri waits for it again (see [Keeping the mic open](#keeping-the-mic-open)). Say the wake word to carry on. |
+| Auri didn't answer something said right after its reply | It was heard without the wake word and didn't sound like it was said to Auri. Say the wake word and ask again. |
+| The satellite answered its own reply | It opened its mic before its reply finished playing, a bug in ESPHome before 2026.11. Update the satellite's firmware. Auri doesn't answer speech that is mostly its own last reply. |
 | The QR code opens the Auri home page | Press **Refresh Session**. |
 | Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
