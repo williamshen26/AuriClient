@@ -25,7 +25,6 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     CONF_CLIENT_ID,
     CONF_SHARED_SECRET,
     DOMAIN,
-    EVENT_AURI_INTERRUPTED,
     EVENT_AURI_WAKE_WORD,
     EVENT_CONVERSATION_FINISHED,
 )
@@ -175,17 +174,6 @@ async def test_speech_from_the_open_mic_is_flagged_and_may_go_unanswered(
     assert spoken(result) == ""
     assert result.continue_conversation is False
     assert len(finished) == 1  # the overheard words weren't a conversation turn
-
-
-async def test_talking_over_auri_flags_that_satellites_next_turn(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
-    agent.client = ScriptedClient(final("Once upon a time, there was a long story."), final("Sure, I'll write it down."))
-    await ask(agent, "Tell me a long story")
-    hass.bus.async_fire(EVENT_AURI_INTERRUPTED, {"device_id": "satellite-1"})
-    await hass.async_block_till_done()
-
-    await ask(agent, "Can you write it on a sticky note instead?")
-
-    assert agent.client.payloads[1]["context"]["follow_up"] is True
 
 
 async def test_auri_hearing_its_own_reply_gets_no_answer(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:

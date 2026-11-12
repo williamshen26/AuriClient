@@ -20,7 +20,6 @@ from ..const import (
     CONF_SHARED_SECRET,
     DATA_FRONTEND_CLIENT,
     DOMAIN,
-    EVENT_AURI_INTERRUPTED,
     EVENT_AURI_WAKE_WORD,
     EVENT_CONVERSATION_FINISHED,
     FAST_PATH_ACK_PHRASES,
@@ -151,15 +150,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         self.tool_executor = LocalToolExecutor(hass)
         # Turns heard from a mic left open after a reply, and how many in a row.
         self.follow_ups = FollowUpTracker()
-        entry.async_on_unload(hass.bus.async_listen(EVENT_AURI_INTERRUPTED, self._async_note_interruption))
         entry.async_on_unload(hass.bus.async_listen(EVENT_AURI_WAKE_WORD, self._async_note_wake))
-
-    @callback
-    def _async_note_interruption(self, event: Event) -> None:
-        """A satellite's firmware cut Auri's reply short because the user talked over it."""
-        device_id = event.data.get("device_id")
-        if isinstance(device_id, str) and device_id:
-            self.follow_ups.note_interruption(device_id)
 
     @callback
     def _async_note_wake(self, event: Event) -> None:
@@ -260,9 +251,9 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         conversation_id = user_input.conversation_id or str(uuid.uuid4())
         reset_processed_entities(conversation_id)
         heard = self.follow_ups.begin_turn(conversation_id, user_input.device_id, user_input.text)
-        if heard.echo or heard.over_limit:
-            # The satellite hearing its own reply, or a run of interruptions past the limit.
-            _LOGGER.debug("No answer to %s", "Auri's own reply heard back" if heard.echo else "an interruption past the limit")
+        if heard.echo:
+            # The satellite heard its own reply (ESPHome before 2026.11 can open the mic too early).
+            _LOGGER.debug("No answer to Auri's own reply heard back")
             self.follow_ups.finish_turn(conversation_id, listen=False)
             return self._silent_result(conversation_id)
         context = await build_context_snapshot(self.hass, user_input)

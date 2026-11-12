@@ -5,7 +5,6 @@ import pytest
 
 from custom_components.hey_auri_client.conversation.follow_up import (
     FOLLOW_UP_WINDOW_SECONDS,
-    INTERRUPTION_WINDOW_SECONDS,
     WAKE_WINDOW_SECONDS,
     FollowUpTracker,
     is_echo,
@@ -60,16 +59,6 @@ def test_a_reply_without_listen_starts_the_count_over():
     assert follow_ups.finish_turn("c1", listen=True) is False  # two follow-ups in this chain
 
 
-
-def test_after_a_reply_without_listen_an_interruption_starts_a_new_count():
-    follow_ups, _clock = tracker(max_rounds=1)
-    follow_ups.begin_turn("c1", "sat", "walk me through it")
-    follow_ups.finish_turn("c1", listen=True)
-    follow_ups.begin_turn("c1", "sat", "and then?")  # the one follow-up allowed
-    follow_ups.finish_turn("c1", listen=False, reply="Then you're done.")  # the chain ends here
-    follow_ups.note_interruption("sat")
-    assert follow_ups.begin_turn("c1", "sat", "wait, write it down").over_limit is False
-
 def test_a_listen_more_than_two_minutes_old_no_longer_counts():
     follow_ups, clock = tracker()
     follow_ups.begin_turn("c1", "sat", "a")
@@ -84,29 +73,6 @@ def test_each_conversation_counts_on_its_own():
     follow_ups.finish_turn("kitchen", listen=True)
     assert follow_ups.begin_turn("phone", None, "b").open_mic is False  # the phone app's own conversation
     assert follow_ups.begin_turn("kitchen", "sat1", "c").open_mic is True
-
-
-def test_talking_over_auri_counts_and_past_the_limit_gets_no_answer():
-    follow_ups, clock = tracker(max_rounds=2)
-    follow_ups.begin_turn("c1", "sat", "tell me a long story")
-    follow_ups.finish_turn("c1", listen=False, reply="Once upon a time")
-    seen = []
-    for _ in range(3):
-        follow_ups.note_interruption("sat")
-        clock.now += 3
-        heard = follow_ups.begin_turn("c1", "sat", "the TV talking")
-        seen.append((heard.open_mic, heard.interrupted, heard.over_limit))
-        follow_ups.finish_turn("c1", listen=False, reply="Sure.")  # a reply to an interruption keeps the count
-    assert seen == [(True, True, False), (True, True, False), (True, True, True)]
-    assert follow_ups.begin_turn("c1", "sat", "the wake word").over_limit is False  # starts over
-
-
-def test_an_interruption_counts_only_for_its_satellite_and_only_soon_after():
-    follow_ups, clock = tracker()
-    follow_ups.note_interruption("sat1")
-    assert follow_ups.begin_turn("c2", "sat2", "a").interrupted is False
-    clock.now += INTERRUPTION_WINDOW_SECONDS + 1
-    assert follow_ups.begin_turn("c1", "sat1", "b").interrupted is False
 
 
 def test_auri_hearing_its_own_reply_is_an_echo_only_from_the_open_mic():
@@ -169,13 +135,3 @@ def test_the_wake_word_counts_only_for_its_satellite_and_only_soon_after():
     clock.now += WAKE_WINDOW_SECONDS + 1
     heard = follow_ups.begin_turn("c1", "sat1", "c")
     assert (heard.woken, heard.open_mic) == (False, True)  # too long ago: some other run's
-
-
-def test_waking_auri_mid_reply_is_a_request_not_an_interruption():
-    follow_ups, _clock = tracker()
-    follow_ups.begin_turn("c1", "sat", "tell me a long story")
-    follow_ups.finish_turn("c1", listen=False)
-    follow_ups.note_interruption("sat")  # the talk-over watcher heard the wake word as speech too
-    follow_ups.note_wake("sat")
-    heard = follow_ups.begin_turn("c1", "sat", "write it on a sticky note")
-    assert (heard.woken, heard.interrupted, heard.open_mic) == (True, False, False)

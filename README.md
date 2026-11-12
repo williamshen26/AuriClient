@@ -62,7 +62,7 @@ When Auri expects an answer right away, it keeps listening, so you don't need th
 - **Device commands** ("turn on the light", answered "OK") never keep listening.
 - **Speech that wasn't meant for Auri:** if what's heard while it listens isn't said to Auri (people talking to each other, a TV), Auri doesn't answer, and the satellite goes back to waiting. Those words aren't kept, in the conversation or in memory.
 - **At most 10 in a row:** after 10 answers in a row without the wake word, Auri waits for the wake word again. Saying it continues the same conversation.
-- **Talking over Auri:** a satellite whose firmware can do it may let you talk over Auri mid-reply. The firmware fires the `esphome.auri_interrupted` event, and Auri treats what it hears next the same way, with the same limit.
+- **Interrupting Auri:** say the wake word during a reply. The stock Voice Preview Edition firmware only stops the reply; firmware that also starts listening takes your new request in one go ("Hey Auri, write it on a sticky note"). Talking over Auri without the wake word isn't supported: on a Voice Preview Edition, the speech detector hears Auri's own voice almost as surely as yours, so the satellite can't tell you apart.
 - **The wake word:** Home Assistant doesn't tell Auri how a request started. A satellite whose firmware fires `esphome.auri_wake_word` when you say the wake word or press its button tells Auri that the next request is yours. Auri always answers it and starts the count over. Without that event, a request in the 2 minutes after a reply that kept listening is treated like an answer: Auri still answers anything said to it.
 
 ## Owner and guest mode

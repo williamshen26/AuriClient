@@ -7,21 +7,23 @@ and the time of the last reply that kept listening:
 - a reply with [listen] keeps listening and adds one, until the count passes MAX_FOLLOW_UP_ROUNDS;
   then the mic closes and the next turn needs the wake word;
 - a reply without [listen] (the fast path, an error, ignored speech, Auri's choice) sets the
-  count back to 0, except a reply to an interrupted turn, so that a run of interruptions adds up;
-- a turn within FOLLOW_UP_WINDOW_SECONDS of a reply that kept listening came from the open mic,
-  and so did a satellite's turn right after its firmware said the user talked over Auri
-  (esphome.auri_interrupted). The client then tells the backend (context.follow_up), so Auri may
-  stay silent when it wasn't said to it. Any other turn was started by the user and starts over.
+  count back to 0;
+- a turn within FOLLOW_UP_WINDOW_SECONDS of a reply that kept listening came from the open mic.
+  The client then tells the backend (context.follow_up), so Auri may stay silent when it wasn't
+  said to it. Any other turn was started by the user and starts over.
 - a satellite's turn right after its firmware said the user woke it (esphome.auri_wake_word: the
-  wake word or the button) was started by the user, whatever the window says: it starts over and
-  is never treated as from the open mic.
+  wake word or the button, also in the middle of a reply) was started by the user, whatever the
+  window says: it starts over and is never treated as from the open mic.
 
 Home Assistant doesn't tell an agent how a request started. Without the wake-word event (stock
 firmware, the phone app), the window can't tell a wake-word request made soon after an unanswered
 follow-up from an answer, so such a request is treated as from the open mic too. That only means
 Auri may ignore it if it clearly wasn't said to Auri, so the limit closes the mic but never
-refuses an ordinary turn. An interruption is an exact signal: past the limit, an interrupted turn
-gets no answer at all.
+refuses an ordinary turn.
+
+Interrupting Auri is by the wake word. Talking over it without the wake word was tried and
+dropped (2026-11-11): a Voice PE's speech detector hears Auri's own voice almost as surely as the
+user's, so the satellite can't tell them apart.
 """
 from __future__ import annotations
 
@@ -36,8 +38,6 @@ from ..const import MAX_FOLLOW_UP_ROUNDS
 # How long after a reply that kept listening a turn still counts as from the open mic: the reply
 # itself, the 15 s Home Assistant listens for speech, and the turn.
 FOLLOW_UP_WINDOW_SECONDS = 120.0
-# How long after a satellite said the user talked over Auri its next turn is that interruption.
-INTERRUPTION_WINDOW_SECONDS = 30.0
 # How long after a satellite said the user woke it its next turn is that request: the speech,
 # up to the 15 s Home Assistant listens for it, and speech-to-text.
 WAKE_WINDOW_SECONDS = 30.0
@@ -55,7 +55,6 @@ _NOT_A_LETTER = re.compile(r"[\W_]+")
 class _Chain:
     count: int = 0
     listened_at: float | None = None  # the last reply that kept listening
-    interrupted_turn: bool = False  # the turn being answered came from talking over Auri
     last_reply: str = ""
 
 
@@ -64,9 +63,7 @@ class TurnStart:
     """What the tracker knows about a turn before it goes to the backend."""
 
     open_mic: bool  # heard from a mic left open after a reply: send context.follow_up
-    interrupted: bool  # the user talked over Auri's reply
     echo: bool  # it's Auri's own last reply coming back: answer silently
-    over_limit: bool  # an interruption past the limit: answer silently
     woken: bool = False  # the satellite said the user started it (wake word or button)
 
 
@@ -93,12 +90,7 @@ class FollowUpTracker:
         self._max_rounds = max_rounds
         self._clock = clock
         self._chains: OrderedDict[str, _Chain] = OrderedDict()
-        self._interrupted_at: dict[str, float] = {}
         self._woken_at: dict[str, float] = {}
-
-    def note_interruption(self, device_id: str) -> None:
-        """A satellite's firmware cut Auri's reply short to listen (esphome.auri_interrupted)."""
-        self._interrupted_at[device_id] = self._clock()
 
     def note_wake(self, device_id: str) -> None:
         """A satellite's firmware started a request for the user: the wake word or the button."""
@@ -107,25 +99,17 @@ class FollowUpTracker:
     def begin_turn(self, conversation_id: str, device_id: str | None, text: str) -> TurnStart:
         now = self._clock()
         chain = self._chain(conversation_id)
-        interrupted_at = self._interrupted_at.pop(device_id, None) if device_id else None
         woken_at = self._woken_at.pop(device_id, None) if device_id else None
         woken = woken_at is not None and now - woken_at <= WAKE_WINDOW_SECONDS
-        # The user started this one: never from the open mic, even talking over Auri with the wake word.
-        interrupted = not woken and interrupted_at is not None and now - interrupted_at <= INTERRUPTION_WINDOW_SECONDS
-        listened = (
+        # The user started this one (the wake word or the button): never from the open mic.
+        open_mic = (
             not woken and chain.listened_at is not None and now - chain.listened_at <= FOLLOW_UP_WINDOW_SECONDS
         )
-        open_mic = interrupted or listened
         if not open_mic:
             chain.count = 0  # the user started this one: a new chain
-        chain.interrupted_turn = interrupted
-        if interrupted:
-            chain.count += 1
         return TurnStart(
             open_mic=open_mic,
-            interrupted=interrupted,
             echo=open_mic and is_echo(text, chain.last_reply),
-            over_limit=interrupted and chain.count > self._max_rounds,
             woken=woken,
         )
 
@@ -133,13 +117,11 @@ class FollowUpTracker:
         """Auri answered (or didn't): whether the mic stays open, within the limit."""
         chain = self._chain(conversation_id)
         if listen:
-            if not chain.interrupted_turn:  # an interruption was counted when it came in
-                chain.count += 1
+            chain.count += 1
             keep = chain.count <= self._max_rounds
         else:
             keep = False
-            if not chain.interrupted_turn:
-                chain.count = 0
+            chain.count = 0
         chain.listened_at = self._clock() if keep else None
         chain.last_reply = reply
         return keep

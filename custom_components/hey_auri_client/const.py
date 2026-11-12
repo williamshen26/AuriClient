@@ -197,11 +197,9 @@ MEDIA_PLAYER_MACS_STORAGE_KEY = f"{DOMAIN}_media_player_macs"
 
 EVENT_AURI_TIMER_FINISHED = f"{DOMAIN}.auri_timer_finished"
 EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"
-# A satellite's firmware fires this when the user talked over Auri and it cut the reply short to
-# listen. Home Assistant adds the satellite's device_id; esphome.* events need no extra permission.
-EVENT_AURI_INTERRUPTED = "esphome.auri_interrupted"
 # A satellite's firmware fires this when the user starts a request: the wake word or the button.
 # Home Assistant doesn't tell an agent how a request started; this resets the follow-up count.
+# Home Assistant adds the satellite's device_id; esphome.* events need no extra permission.
 EVENT_AURI_WAKE_WORD = "esphome.auri_wake_word"
 # Turns in a row heard from a mic left open after a reply, before the wake word is needed again.
 MAX_FOLLOW_UP_ROUNDS = 10
