@@ -412,4 +412,4 @@ logger:
 
 ## License
 
-See the repository license file, if available.
+Hey Auri Client is licensed under the [Apache License 2.0](LICENSE). The license covers this integration's code only: it doesn't grant use of the Hey Auri name or logo, and the integration needs an Auri account to work.
