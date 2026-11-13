@@ -14,7 +14,7 @@ The integration adds three things to Home Assistant:
 - **Music** via [Music Assistant](https://music-assistant.io): search and play, and move what's playing to another speaker.
 - **Everyday skills**: weather forecasts, calendar events, shopping list, timers, sticky notes, and creating and editing automations.
 - **Long-term memory** (optional, owner mode): Auri remembers facts, preferences and past conversations in your own PostgreSQL database, and can keep a readable copy in an Obsidian vault. See [Memory](#memory).
-- **Places and rides**: search for places, get directions, and request Uber ride links. Links arrive by text message or on the [session QR page](#session-qr-code).
+- **Places and rides**: search for places, get directions, and request Uber ride links. Links arrive by text message or on the [session QR page](#session-qr-code). In mainland China they open Amap instead (see [Homes in mainland China](#homes-in-mainland-china)).
 - **Guest mode** for short-term rentals: answers guests' questions from the details you enter (check-in and check-out, Wi-Fi, parking, house rules and more) and can notify you.
 - **42 languages**: say "speak Spanish to me" and Auri switches both listening and speaking.
 - **Personalities**: Auri, Tovi, Glen or Brigg, chosen on your dashboard at hey-auri.com.
@@ -295,7 +295,7 @@ The old tool could rate a preference at most important (4 of 5), and never priva
 
 ## Session QR code
 
-The session QR code gives guests (or you) a page on their phone that lists the links Auri shares, such as Uber ride links and map locations.
+The session QR code gives guests (or you) a page on their phone that lists the links Auri shares, such as Uber ride links and map locations. Each one has a button that opens it in its app: **Open Uber**, **Open Google Maps** or **Open Amap**.
 
 - The **Refresh Session** button (`button.refresh_session`) starts a new session with a new page. Press it between guests. Links shared after a refresh go to the new page, and every link expires after 7 days.
 - The **Session Link** sensor (`sensor.session_link`) holds the current page address. Your account gets its first page when you add the integration, and the sensor shows it from the start. If it can't reach the Auri cloud then, it shows `https://hey-auri.com` until it next starts or you press Refresh Session.
@@ -307,6 +307,18 @@ type: custom:auri-session-qr-card
 entity: sensor.session_link
 placeholder: Waiting for a session…  # optional
 ```
+
+### Homes in mainland China
+
+Uber and Google Maps don't work in mainland China, so there Auri's links open **Amap** (高德地图), the most used map app in China:
+
+- **A place** is a pin in Amap.
+- **A ride** is an Amap route from where the guest is to the destination. No ride service in China lets another app start a booking, so the guest opens the route in Amap and taps **打车** to book. Amap books through partner ride companies, Didi among them. To use the Didi app instead, **Copy address** on the session page copies the destination's name and address.
+- **Names and addresses** are in Chinese, as Amap, Didi and drivers read them, whatever language Auri speaks.
+- **Directions:** Auri still says how long a drive or a walk takes. For public transit, which Auri can't look up in mainland China, it puts an Amap route on the session page instead.
+- **Text messages** only go to US and Canadian numbers written with +1, so a Chinese mobile number gets none; the link is on the session page.
+
+This happens by itself when Home Assistant's country is China (**Settings → System → General**, called **Home information** in newer versions, then **Country**). Moving the home's location doesn't change the country. To choose either way, use **Rides and maps** on your Hey Auri dashboard: **Automatic**, **Uber and Google Maps**, or **Amap (China)**. Hong Kong, Macau and Taiwan keep Uber and Google Maps.
 
 ## Timers and sticky notes
 
@@ -385,6 +397,7 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | The satellite stopped listening after a few answers | After 10 answers in a row without the wake word, Auri waits for it again (see [Keeping the mic open](#keeping-the-mic-open)). Say the wake word to carry on. |
 | Auri didn't answer something said right after its reply | It was heard without the wake word and didn't sound like it was said to Auri. Say the wake word and ask again. |
 | The satellite answered its own reply | It opened its mic before its reply finished playing, a bug in ESPHome before 2026.11. Update the satellite's firmware. Auri doesn't answer speech that is mostly its own last reply. |
+| A home in mainland China gets Uber or Google Maps links | Set Home Assistant's country to China (**Settings → System → General**, or **Home information** in newer versions; moving the home's location doesn't change it), or choose **Amap (China)** under **Rides and maps** on your Hey Auri dashboard (see [Homes in mainland China](#homes-in-mainland-china)). |
 | The QR code opens the Auri home page | Home Assistant couldn't get the session page from the Auri cloud (see the logs). Press **Refresh Session**. |
 | Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
