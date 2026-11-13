@@ -198,9 +198,9 @@ Go to **Settings → Devices & services → Hey Auri Client → Configure → Me
 
 | Option | Description |
 |---|---|
-| PostgreSQL host, port, database name, username, password | Where the database is (port 5432 by default). After saving, leave the password empty to keep the saved one. |
+| PostgreSQL host, port, database name, username, password | Where the database is. The form starts with port 5432 and the database and username `auri` from the SQL above, and on Home Assistant OS with the TimescaleDB app's host; only the password is yours to fill in. After saving, leave the password empty to keep the saved one. |
 | SSL mode | `prefer` by default. Use `require` or stricter when the database is on another machine. |
-| Obsidian vault folder | Optional. See [Obsidian copy](#obsidian-copy). |
+| Obsidian vault folder | Optional. See [Obsidian copy](#obsidian-copy). The form starts with `/share/AuriVault` when that folder is already set up as described there, and empty otherwise. |
 | Include private memories in the vault copy | Off by default. |
 | A day ends at (hour) | 4 by default: talk after midnight counts toward the day before. |
 | Keep the conversation archive for (days) | 365 by default; 0 keeps it forever. |
@@ -272,7 +272,7 @@ Guest memory is stored in your database until it's erased, so you could read it.
 
 ### Obsidian copy
 
-Set **Obsidian vault folder** to your vault's folder, for example `/share/MyVault`, and every night Auri writes into it:
+Set **Obsidian vault folder** to your vault's folder, for example `/share/AuriVault`, and every night Auri writes into it:
 
 - `Auri/Daily/YYYY-MM-DD.md` with the summary of each day;
 - `Auri/Memory.md` with everything it currently remembers, grouped by person and subject.
@@ -282,7 +282,7 @@ It's a copy for reading: the database stays the source, and edits made in the va
 ```yaml
 homeassistant:
   allowlist_external_dirs:
-    - /share/MyVault
+    - /share/AuriVault
 ```
 
 A folder inside `www`, which Home Assistant serves without a login, is refused.

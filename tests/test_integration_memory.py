@@ -152,6 +152,65 @@ async def test_memory_can_be_saved_switched_off_without_a_database(hass: HomeAss
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
 
+def _memory_text_values(result: dict[str, Any]) -> dict[str, Any]:
+    """What the Memory form shows in its text fields."""
+    keys = (CONF_MEMORY_DB_HOST, CONF_MEMORY_DB_NAME, CONF_MEMORY_DB_USER, CONF_MEMORY_VAULT_PATH)
+    return {
+        str(field): (field.description or {}).get("suggested_value")
+        for field in result["data_schema"].schema
+        if str(field) in keys
+    }
+
+
+async def test_the_memory_form_starts_with_suggestions_until_it_is_saved(hass: HomeAssistant, tmp_path) -> None:
+    entry = _entry()
+    entry.add_to_hass(hass)
+    vault = tmp_path / "AuriVault"
+    blank = {CONF_MEMORY_DB_HOST: "", CONF_MEMORY_DB_NAME: "auri", CONF_MEMORY_DB_USER: "auri", CONF_MEMORY_VAULT_PATH: ""}
+
+    # Not Home Assistant OS, and no vault folder: only the database and username from the README.
+    result = await _open_memory_step(hass, entry)
+    assert _memory_text_values(result) == blank
+
+    on_ha_os = patch("custom_components.hey_auri_client.config_flow.is_hassio", return_value=True)
+    vault_path = patch("custom_components.hey_auri_client.config_flow.SUGGESTED_MEMORY_VAULT_PATH", str(vault))
+    with on_ha_os, vault_path:
+        # A folder that doesn't exist, or that Home Assistant may not write to, isn't suggested.
+        result = await _open_memory_step(hass, entry)
+        assert _memory_text_values(result) == {**blank, CONF_MEMORY_DB_HOST: "77b2833f-timescaledb"}
+        vault.mkdir()
+        result = await _open_memory_step(hass, entry)
+        assert _memory_text_values(result)[CONF_MEMORY_VAULT_PATH] == ""
+
+        with patch.object(hass.config, "allowlist_external_dirs", {str(tmp_path)}):
+            result = await _open_memory_step(hass, entry)
+            assert _memory_text_values(result) == {
+                CONF_MEMORY_DB_HOST: "77b2833f-timescaledb",
+                CONF_MEMORY_DB_NAME: "auri",
+                CONF_MEMORY_DB_USER: "auri",
+                CONF_MEMORY_VAULT_PATH: str(vault),
+            }
+
+            # Fields cleared before an error stay cleared when the form comes back.
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], {CONF_MEMORY_ENABLED: True, CONF_MEMORY_DB_NAME: "auri"}
+            )
+            assert result["errors"] == {"base": "memory_settings_missing"}
+            assert _memory_text_values(result) == {
+                CONF_MEMORY_DB_HOST: "", CONF_MEMORY_DB_NAME: "auri", CONF_MEMORY_DB_USER: "", CONF_MEMORY_VAULT_PATH: "",
+            }
+
+            # Once saved, the form shows what was saved, empty fields included.
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], {CONF_MEMORY_ENABLED: False, CONF_MEMORY_DB_USER: "someone"}
+            )
+            assert result["type"] is FlowResultType.CREATE_ENTRY
+            result = await _open_memory_step(hass, entry)
+            assert _memory_text_values(result) == {
+                CONF_MEMORY_DB_HOST: "", CONF_MEMORY_DB_NAME: "", CONF_MEMORY_DB_USER: "someone", CONF_MEMORY_VAULT_PATH: "",
+            }
+
+
 async def test_who_uses_each_login(hass: HomeAssistant) -> None:
     will = await hass.auth.async_create_user("Will")
     admin = await hass.auth.async_create_user("Admin")

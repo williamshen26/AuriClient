@@ -25,7 +25,7 @@
       "pg_version_unsupported": "PostgreSQL 13 or newer is required.",
       "pgvector_missing": "This PostgreSQL server doesn't have the pgvector extension. On Home Assistant OS use the TimescaleDB app (add-on), which includes it; with Docker use the pgvector/pgvector:pg17 image.",
       "insufficient_privilege": "This database user can't enable pgvector or create the auri_memory and auri_guest_memory schemas. Have an administrator run CREATE EXTENSION vector; in this database and grant the user CREATE on it.",
-      "vault_public": "That folder is inside www, which Home Assistant serves without a login. Choose a folder outside it, such as /share/MyVault.",
+      "vault_public": "That folder is inside www, which Home Assistant serves without a login. Choose a folder outside it, such as /share/AuriVault.",
       "vault_not_found": "That folder doesn't exist.",
       "vault_not_allowed": "Home Assistant isn't allowed to write there. Add the folder to allowlist_external_dirs in configuration.yaml.",
       "vault_not_writable": "Home Assistant can't write to that folder.",
@@ -122,7 +122,7 @@
         "data_description": {
           "memory_db_host": "For the TimescaleDB app on Home Assistant OS: 77b2833f-timescaledb.",
           "memory_db_password": "Leave empty to keep the saved password.",
-          "memory_vault_path": "Auri keeps a readable copy here (Auri/Daily notes and Auri/Memory.md), for example /share/MyVault. Edits made in the vault aren't read back.",
+          "memory_vault_path": "Auri keeps a readable copy here (Auri/Daily notes and Auri/Memory.md), for example /share/AuriVault. Edits made in the vault aren't read back.",
           "memory_day_boundary_hour": "Conversation before this hour counts toward the previous day. Each day is processed about 15 minutes after it ends.",
           "memory_archive_retention_days": "0 keeps it forever.",
           "memory_share_household": "Auri uses everyone's memories, private ones too, whoever is speaking, including an unknown speaker on a voice satellite. Anyone near a satellite could hear them, visitors too."

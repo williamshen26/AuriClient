@@ -49,6 +49,13 @@ MEMORY_OPTION_KEYS = frozenset(
 
 DEFAULT_MEMORY_DB_PORT = 5432
 DEFAULT_MEMORY_DB_SSLMODE = "prefer"
+# What the Memory form suggests before it's first saved (config_flow), never used
+# as settings: the TimescaleDB app's host on Home Assistant OS, the database and
+# user the README creates, and a vault folder (suggested only when it's ready).
+SUGGESTED_MEMORY_DB_HOST = "77b2833f-timescaledb"
+SUGGESTED_MEMORY_DB_NAME = "auri"
+SUGGESTED_MEMORY_DB_USER = "auri"
+SUGGESTED_MEMORY_VAULT_PATH = "/share/AuriVault"
 DEFAULT_MEMORY_DAY_BOUNDARY_HOUR = 4
 DEFAULT_MEMORY_ARCHIVE_RETENTION_DAYS = 365
 SSL_MODES = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")

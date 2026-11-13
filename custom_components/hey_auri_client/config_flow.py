@@ -15,6 +15,7 @@ from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.hassio import is_hassio
 from homeassistant.util import dt as dt_util
 
 from .bookings.calendar import CalendarError, bookings_only_feed, fetch_calendar, parse_bookings, valid_calendar_url
@@ -84,6 +85,10 @@ from .const import (
     DOMAIN,
     CONF_TTS_STREAM_ENDPOINT,
     SSL_MODES,
+    SUGGESTED_MEMORY_DB_HOST,
+    SUGGESTED_MEMORY_DB_NAME,
+    SUGGESTED_MEMORY_DB_USER,
+    SUGGESTED_MEMORY_VAULT_PATH,
 )
 from .memory.config import MemoryConfig
 from .memory.db import MemoryDbError, test_connection
@@ -622,6 +627,8 @@ class OptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(title="", data=data)
 
         values = {**self.config_entry.options, **(user_input or {})}
+        if user_input is None:
+            values = {**await self._async_memory_suggestions(), **values}
 
         def _suggested(key: str) -> dict[str, Any]:
             return {"suggested_value": str(values.get(key) or "")}
@@ -678,6 +685,30 @@ class OptionsFlow(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="memory", data_schema=schema, errors=errors)
+
+    async def _async_memory_suggestions(self) -> dict[str, str]:
+        """Starting values for the Memory text fields; saved values win over them, empty ones too.
+
+        The host is the TimescaleDB app's, so it's suggested only on Home Assistant OS (or Supervised),
+        and the vault folder only when it's ready, so it can't stop the first save.
+        """
+        suggestions: dict[str, str] = {
+            CONF_MEMORY_DB_NAME: SUGGESTED_MEMORY_DB_NAME,
+            CONF_MEMORY_DB_USER: SUGGESTED_MEMORY_DB_USER,
+        }
+        if is_hassio(self.hass):
+            suggestions[CONF_MEMORY_DB_HOST] = SUGGESTED_MEMORY_DB_HOST
+        problem = await self.hass.async_add_executor_job(
+            partial(
+                validate_vault,
+                SUGGESTED_MEMORY_VAULT_PATH,
+                config_dir=self.hass.config.config_dir,
+                is_allowed_path=self.hass.config.is_allowed_path,
+            )
+        )
+        if problem is None:
+            suggestions[CONF_MEMORY_VAULT_PATH] = SUGGESTED_MEMORY_VAULT_PATH
+        return suggestions
 
     async def _async_ask_logins_first(self, options: dict[str, Any]) -> bool:
         """Whether turning memory on asks Who uses each login first: once, and only with more than one login."""
