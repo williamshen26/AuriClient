@@ -41,7 +41,7 @@ The integration adds three things to Home Assistant:
    - **Client ID**: from your dashboard.
    - **Shared secret**: the **Client secret** from your dashboard.
 
-> Setup only checks that Home Assistant can reach the Auri cloud. Wrong credentials show up the first time you talk to Auri (see [Troubleshooting](#troubleshooting)).
+> Setup checks the Client ID and Shared secret with the Auri cloud, and stops with an error if they aren't accepted or the account isn't active. It also gives a new account its first [session page](#session-qr-code).
 
 ## Set up a voice assistant
 
@@ -298,7 +298,7 @@ The old tool could rate a preference at most important (4 of 5), and never priva
 The session QR code gives guests (or you) a page on their phone that lists the links Auri shares, such as Uber ride links and map locations.
 
 - The **Refresh Session** button (`button.refresh_session`) starts a new session with a new page. Press it between guests. Links shared after a refresh go to the new page, and every link expires after 7 days.
-- The **Session Link** sensor (`sensor.session_link`) holds the current page address. Until you press Refresh Session for the first time, it shows `https://hey-auri.com`.
+- The **Session Link** sensor (`sensor.session_link`) holds the current page address. Your account gets its first page when you add the integration, and the sensor shows it from the start. If it can't reach the Auri cloud then, it shows `https://hey-auri.com` until it next starts or you press Refresh Session.
 
 To show the code on a dashboard, add the bundled card. It loads automatically and appears in the card picker as **Auri Session QR Code**:
 
@@ -385,7 +385,7 @@ Guest details, timers and notes are stored in Home Assistant, and memories in yo
 | The satellite stopped listening after a few answers | After 10 answers in a row without the wake word, Auri waits for it again (see [Keeping the mic open](#keeping-the-mic-open)). Say the wake word to carry on. |
 | Auri didn't answer something said right after its reply | It was heard without the wake word and didn't sound like it was said to Auri. Say the wake word and ask again. |
 | The satellite answered its own reply | It opened its mic before its reply finished playing, a bug in ESPHome before 2026.11. Update the satellite's firmware. Auri doesn't answer speech that is mostly its own last reply. |
-| The QR code opens the Auri home page | Press **Refresh Session**. |
+| The QR code opens the Auri home page | Home Assistant couldn't get the session page from the Auri cloud (see the logs). Press **Refresh Session**. |
 | Auri says memory isn't set up | Set it up under **Configure → Memory** (see [Memory](#memory)). In guest mode, memory is off unless **Let guests use memory** is on in the Guest options (see [Guest memory](#guest-memory)). |
 | Saving the Memory options fails | The message says what to fix. Most often pgvector isn't enabled in the database: run `CREATE EXTENSION vector;` in it as an administrator. |
 | **Settings → Repairs** says some logins look like services, not people | Open the notice and check who uses each login. Auri counts each login's person as a household member, so a login that a service or a device uses should be **Not a person**. |

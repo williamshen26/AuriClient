@@ -165,6 +165,19 @@ class SaaSClient:
             timeout_seconds=timeout_seconds,
         )
 
+    async def request_session_url(self, *, if_missing: bool = False) -> str:
+        """Ask the backend for a session page (the QR code's) and return its URL.
+
+        A new session, or with ``if_missing`` the account's current one, which the backend
+        creates only when the account has none. Raises SaaSRequestError (status_code 401 when
+        the client ID and secret aren't accepted), aiohttp.ClientError or TimeoutError.
+        """
+        response = await self.post_json("/session/refresh", {"if_missing": True} if if_missing else {})
+        session_url = str(response.get("session_url") or "").strip()
+        if not session_url:
+            raise SaaSRequestError(f"Session response did not include a session_url: {response}")
+        return session_url
+
     async def post_raw(
         self,
         path: str,

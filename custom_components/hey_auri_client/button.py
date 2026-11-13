@@ -50,14 +50,9 @@ class AuriSessionRefreshButton(ButtonEntity):
     async def async_press(self) -> None:
         """Request a new session id from the backend and update the QR sensor."""
         try:
-            response = await self._client.post_json("/session/refresh", {})
+            session_url = await self._client.request_session_url()
         except SaaSRequestError:
             _LOGGER.exception("Failed to refresh session")
-            return
-
-        session_url = str(response.get("session_url") or "").strip()
-        if not session_url:
-            _LOGGER.error("Session refresh response did not include a session_url: %s", response)
             return
 
         runtime = self.hass.data.get(DOMAIN, {}).get("runtime", {})

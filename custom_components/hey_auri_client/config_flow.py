@@ -12,6 +12,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -90,8 +91,10 @@ from .const import (
     SUGGESTED_MEMORY_DB_USER,
     SUGGESTED_MEMORY_VAULT_PATH,
 )
+from .exceptions import SaaSRequestError
 from .memory.config import MemoryConfig
 from .memory.db import MemoryDbError, test_connection
+from .saas_client import SaaSClient
 from .memory.logins import answers, async_logins, logins_form, names_text, unanswered
 from .memory.obsidian import validate_vault
 
@@ -193,8 +196,16 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 )
 
 
-async def validate_input(data: dict[str, Any]) -> None:
-    """Validate that the backend is reachable and credentials are present."""
+class InvalidAuth(Exception):
+    """The backend didn't accept the client ID and secret, or the account isn't active."""
+
+
+async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
+    """Validate that the backend is reachable and accepts the credentials.
+
+    The check is a signed request for the account's session page, so a new account also gets
+    its first session here, and the QR code works without pressing Refresh Session.
+    """
     client_id = str(data[CONF_CLIENT_ID]).strip()
     shared_secret = str(data[CONF_SHARED_SECRET]).strip()
 
@@ -203,11 +214,17 @@ async def validate_input(data: dict[str, Any]) -> None:
     if not shared_secret:
         raise ValueError("Shared secret is required")
 
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(f"{API_ENDPOINT}/health") as response:
-            if response.status >= 400:
-                raise ConnectionError(f"Health check failed with status {response.status}")
+    client = SaaSClient(
+        hass, endpoint=API_ENDPOINT, timeout=10, client_id=client_id, shared_secret=str(data[CONF_SHARED_SECRET])
+    )
+    try:
+        await client.request_session_url(if_missing=True)
+    except SaaSRequestError as err:
+        if err.status_code in (401, 403):
+            raise InvalidAuth from err
+        raise ConnectionError(str(err)) from err
+    except (aiohttp.ClientError, TimeoutError) as err:
+        raise ConnectionError(str(err)) from err
 
 
 def _normalize_guest_phone_number(phone_number: Any) -> str | None:
@@ -266,7 +283,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         try:
-            await validate_input(user_input)
+            await validate_input(self.hass, user_input)
+        except InvalidAuth:
+            errors["base"] = "invalid_auth"
         except ConnectionError:
             errors["base"] = "cannot_connect"
         except Exception:
