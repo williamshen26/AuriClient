@@ -21,6 +21,7 @@ async def async_setup_entry(
     runtime["async_add_entities"] = async_add_entities
     await async_restore_sticky_notes(hass)
 
+    entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
     session_link_sensor = AuriSessionLinkSensor(
         entry,
         SaaSClient(
@@ -30,10 +31,11 @@ async def async_setup_entry(
             client_id=str(entry.data[CONF_CLIENT_ID]).strip(),
             shared_secret=str(entry.data[CONF_SHARED_SECRET]),
         ),
+        # A new session page at each check-in and check-out.
+        entry_data.get(DATA_BOOKINGS),
     )
     runtime["session_link_sensor"] = session_link_sensor
     entities = [session_link_sensor]
-    entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
     memory = entry_data.get(DATA_MEMORY)
     if memory is not None:
         entities.append(AuriMemorySensor(entry, memory))

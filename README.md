@@ -33,7 +33,7 @@ The integration adds three things to Home Assistant:
 
 ## Installation
 
-1. **Create your Auri account** at [hey-auri.com](https://hey-auri.com). After you finish checkout (or redeem an invitation code), your dashboard shows your Client ID and Client secret. You can come back to the dashboard to see them at any time.
+1. **Create your Auri account** at [hey-auri.com](https://hey-auri.com), and confirm your email with the code it sends. After you finish checkout (or redeem an invitation code), your dashboard shows your Client ID and Client secret. You can come back to the dashboard to see them at any time.
 2. **Install HACS** if you haven't already ([guide](https://hacs.xyz/docs/use/)).
 3. **Download Hey Auri Client**: in HACS, search for **Hey Auri Client** and select **Download**. If it doesn't appear, first add `https://github.com/williamshen26/AuriClient` as a custom repository with the type **Integration**.
 4. **Restart Home Assistant.**
@@ -297,7 +297,8 @@ The old tool could rate a preference at most important (4 of 5), and never priva
 
 The session QR code gives guests (or you) a page on their phone that lists the links Auri shares, such as Uber ride links and map locations. Each one has a button that opens it in its app: **Open Uber**, **Open Google Maps** or **Open Amap**.
 
-- The **Refresh Session** button (`button.refresh_session`) starts a new session with a new page. Press it between guests. Links shared after a refresh go to the new page, and every link expires after 7 days.
+- Each stay gets its own page: a new session starts at check-in and again at check-out (from the stay in Guest Settings, whether typed in or from the booking calendar), so a past guest who kept the old page doesn't see where later guests go. If Home Assistant was off at that moment, it starts one when it next starts. The `stay` attribute of `sensor.session_link` shows which stay the page is for.
+- The **Refresh Session** button (`button.refresh_session`) starts a new session with a new page at any time. Links shared after that go to the new page, and every link expires after 7 days.
 - The **Session Link** sensor (`sensor.session_link`) holds the current page address. Your account gets its first page when you add the integration, and the sensor shows it from the start. If it can't reach the Auri cloud then, it shows `https://hey-auri.com` until it next starts or you press Refresh Session.
 
 To show the code on a dashboard, add the bundled card. It loads automatically and appears in the card picker as **Auri Session QR Code**:

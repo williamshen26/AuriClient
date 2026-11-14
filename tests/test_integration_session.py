@@ -5,6 +5,7 @@ Uses pytest-homeassistant-custom-component (Linux only); the backend call is moc
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -15,13 +16,22 @@ pytest.importorskip("pytest_homeassistant_custom_component.common")
 from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
     MockEntityPlatform,
+    async_fire_time_changed,
     mock_restore_cache,
 )
 
 from homeassistant.core import HomeAssistant, State  # noqa: E402
 from homeassistant.data_entry_flow import FlowResultType  # noqa: E402
 
-from custom_components.hey_auri_client.const import CONF_CLIENT_ID, CONF_SHARED_SECRET, DOMAIN  # noqa: E402
+from custom_components.hey_auri_client.bookings.sync import BookingSync  # noqa: E402
+from custom_components.hey_auri_client.const import (  # noqa: E402
+    CONF_BOOKING_ID,
+    CONF_CHECK_IN,
+    CONF_CHECK_OUT,
+    CONF_CLIENT_ID,
+    CONF_SHARED_SECRET,
+    DOMAIN,
+)
 from custom_components.hey_auri_client.entities.session_link import AuriSessionLinkSensor  # noqa: E402
 from custom_components.hey_auri_client.exceptions import SaaSRequestError  # noqa: E402
 from custom_components.hey_auri_client.saas_client import SaaSClient  # noqa: E402
@@ -149,3 +159,122 @@ async def test_the_refresh_button_starts_a_new_session(hass: HomeAssistant) -> N
 
     post.assert_awaited_once_with("/session/refresh", {})
     assert hass.states.get("sensor.session_link").state == "https://hey-auri.com/s/new"
+
+
+# ── a new session page for each stay ────────────────────────────────────────
+
+STAY = {CONF_BOOKING_ID: "HMAAAAAAAA", CONF_CHECK_IN: "2026-10-20 15:00:00", CONF_CHECK_OUT: "2026-10-25 11:00:00"}
+
+
+class Sessions:
+    """The backend's /session/refresh: a new session each time, unless asked to keep the current one."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.fail = False
+
+    async def reply(self, path: str, body: dict) -> dict:
+        assert path == "/session/refresh"
+        self.calls.append(body)
+        if self.fail:
+            raise SaaSRequestError("bad gateway", status_code=502)
+        number = len(self.calls)
+        return {"session_id": f"s{number}", "session_url": f"https://hey-auri.com/s/{number}"}
+
+    @property
+    def new_ones(self) -> int:
+        return sum(1 for body in self.calls if body == {})
+
+
+@pytest.fixture
+async def stay_sensor(hass: HomeAssistant, freezer):
+    await hass.config.async_set_time_zone("America/Los_Angeles")
+    freezer.move_to("2026-10-19 09:00:00-07:00")  # the day before check-in
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_CLIENT_ID: "cli_1", CONF_SHARED_SECRET: "secret"}, options=STAY)
+    entry.add_to_hass(hass)
+    bookings = BookingSync(hass, entry)
+    sessions = Sessions()
+    client = SaaSClient(hass, endpoint="https://api.example", timeout=5, client_id="cli_1", shared_secret="secret")
+    sensor = AuriSessionLinkSensor(entry, client, bookings)
+    sensor.entity_id = "sensor.session_link"
+
+    async def add(restored: State | None = None) -> None:
+        if restored is not None:
+            mock_restore_cache(hass, [restored])
+        with patch.object(SaaSClient, "post_json", AsyncMock(side_effect=sessions.reply)):
+            await MockEntityPlatform(hass, domain="sensor").async_add_entities([sensor])
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+    async def at(moment: str) -> str:
+        freezer.move_to(moment)
+        with patch.object(SaaSClient, "post_json", AsyncMock(side_effect=sessions.reply)):
+            async_fire_time_changed(hass)
+            await hass.async_block_till_done(wait_background_tasks=True)
+        return hass.states.get("sensor.session_link").state
+
+    yield SimpleNamespace(entry=entry, bookings=bookings, sessions=sessions, add=add, at=at)
+    # As unloading the integration would: the sensor stops waiting for the next check-in or check-out.
+    if sensor.hass is not None:
+        await sensor.async_remove()
+
+
+async def test_each_check_in_and_check_out_gets_a_new_session_page(hass: HomeAssistant, stay_sensor) -> None:
+    await stay_sensor.add(State("sensor.session_link", "https://hey-auri.com/s/before"))
+    assert stay_sensor.sessions.calls == []  # before check-in, the page stays as it was
+
+    assert await stay_sensor.at("2026-10-20 15:00:01-07:00") == "https://hey-auri.com/s/1"
+    assert hass.states.get("sensor.session_link").attributes["stay"] == "HMAAAAAAAA:staying"
+    # A day into the stay, nothing changes.
+    assert await stay_sensor.at("2026-10-21 15:00:00-07:00") == "https://hey-auri.com/s/1"
+    # The guests leave: a past guest's link no longer shows what comes next.
+    assert await stay_sensor.at("2026-10-25 11:00:01-07:00") == "https://hey-auri.com/s/2"
+    assert stay_sensor.sessions.calls == [{}, {}]
+
+
+async def test_a_restart_during_the_stay_keeps_its_session_page(hass: HomeAssistant, stay_sensor, freezer) -> None:
+    freezer.move_to("2026-10-22 09:00:00-07:00")
+    await stay_sensor.add(State("sensor.session_link", "https://hey-auri.com/s/stay", {"stay": "HMAAAAAAAA:staying"}))
+    assert hass.states.get("sensor.session_link").state == "https://hey-auri.com/s/stay"
+    assert stay_sensor.sessions.calls == []
+
+
+async def test_a_check_in_missed_while_home_assistant_was_off_is_caught_up(
+    hass: HomeAssistant, stay_sensor, freezer
+) -> None:
+    freezer.move_to("2026-10-22 09:00:00-07:00")
+    await stay_sensor.add(State("sensor.session_link", "https://hey-auri.com/s/before"))
+    assert hass.states.get("sensor.session_link").state == "https://hey-auri.com/s/1"
+    assert stay_sensor.sessions.calls == [{}]
+
+
+async def test_a_stay_entered_by_hand_gets_its_session_page(hass: HomeAssistant, stay_sensor, freezer) -> None:
+    freezer.move_to("2026-10-22 09:00:00-07:00")
+    hass.config_entries.async_update_entry(stay_sensor.entry, options={})
+    await stay_sensor.add(State("sensor.session_link", "https://hey-auri.com/s/before"))
+    assert stay_sensor.sessions.calls == []
+
+    # The host types in a stay that's already under way (Guest Settings notify the booking sync's listeners).
+    hass.config_entries.async_update_entry(
+        stay_sensor.entry, options={CONF_CHECK_IN: "2026-10-21 15:00:00", CONF_CHECK_OUT: "2026-10-24 11:00:00"}
+    )
+    with patch.object(SaaSClient, "post_json", AsyncMock(side_effect=stay_sensor.sessions.reply)):
+        await stay_sensor.bookings.async_options_updated(dict(stay_sensor.entry.options))
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get("sensor.session_link").state == "https://hey-auri.com/s/1"
+    assert hass.states.get("sensor.session_link").attributes["stay"] == (
+        "2026-10-21T15:00:00-07:00-2026-10-24T11:00:00-07:00:staying"
+    )
+
+
+async def test_a_new_session_that_fails_is_tried_again(hass: HomeAssistant, stay_sensor, caplog) -> None:
+    await stay_sensor.add(State("sensor.session_link", "https://hey-auri.com/s/before"))
+    stay_sensor.sessions.fail = True
+    assert await stay_sensor.at("2026-10-20 15:00:01-07:00") == "https://hey-auri.com/s/before"
+    assert "Couldn't start a new session page for the stay" in caplog.text
+
+    stay_sensor.sessions.fail = False
+    with patch.object(SaaSClient, "post_json", AsyncMock(side_effect=stay_sensor.sessions.reply)):
+        await stay_sensor.bookings.async_options_updated(dict(stay_sensor.entry.options))
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get("sensor.session_link").attributes["stay"] == "HMAAAAAAAA:staying"
+    assert stay_sensor.sessions.new_ones == 2  # the failed try, then this one
