@@ -55,7 +55,7 @@ _LOGGER = logging.getLogger(__name__)
 # hallucination fallbacks are deliberately excluded: the former have no fixed
 # "success" shape to check, and the latter always carry a retry nudge the
 # model needs to see.
-_FAST_PATH_ACTION_TOOL_NAMES = frozenset(
+_DEVICE_ACTION_TOOL_NAMES = frozenset(
     {
         "turn_on_light",
         "turn_off_light",
@@ -88,7 +88,15 @@ _FAST_PATH_ACTION_TOOL_NAMES = frozenset(
         "transfer_music",
     }
 )
-_DEVICE_TOOL_NAMES = _FAST_PATH_ACTION_TOOL_NAMES | {"turn_on", "turn_off", "call_service"}
+# Actions answered with the fixed acknowledgement, without a second model call (about 650 ms):
+# device commands, and list and note actions whose reply would only confirm them.
+_FAST_PATH_ACTION_TOOL_NAMES = _DEVICE_ACTION_TOOL_NAMES | {
+    "add_shopping_list_item",
+    "mark_shopping_list_item_complete",
+    "remove_completed_shopping_list_item",
+    "create_sticky_note",
+}
+_DEVICE_TOOL_NAMES = _DEVICE_ACTION_TOOL_NAMES | {"turn_on", "turn_off", "call_service"}
 # What a reply that asks something ends with (as Home Assistant's own agents check).
 _QUESTION_MARKS = ("?", ";", "？")
 
@@ -357,10 +365,14 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                     )
                     intent_response = intent.IntentResponse(language=response_language)
                     intent_response.async_set_speech(ack_phrase)
+                    # Device commands as before; a list or note action is classified as it is
+                    # without the fast path (the nightly job drops short device commands).
+                    device_only = all(name in _DEVICE_TOOL_NAMES for name in tool_names)
                     self._log_turn(
-                        user_input, turn, reply=ack_phrase, tool_names=tool_names, kind="device_control"
+                        user_input, turn, reply=ack_phrase, tool_names=tool_names,
+                        kind="device_control" if device_only else None,
                     )
-                    # A device command isn't a back-and-forth: the mic closes.
+                    # A command isn't a back-and-forth: the mic closes.
                     self.follow_ups.finish_turn(conversation_id, listen=False, reply=ack_phrase)
                     self.hass.bus.async_fire(
                         EVENT_CONVERSATION_FINISHED,

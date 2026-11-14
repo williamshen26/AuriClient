@@ -212,6 +212,26 @@ async def test_a_device_command_closes_the_mic(hass: HomeAssistant, agent: ThinO
     assert "follow_up" not in agent.client.payloads[-1]["context"]
 
 
+async def test_adding_to_the_shopping_list_needs_no_second_model_call(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
+    """A list or note action is confirmed with the fixed acknowledgement, as a device command is."""
+    hass.states.async_set("todo.shopping_list", "0")
+    calls = async_mock_service(hass, "todo", "add_item")
+    add = {
+        "id": "t1", "type": "function",
+        "function": {"name": "add_shopping_list_item", "arguments": json.dumps({"entity_id": "todo.shopping_list", "item": "milk"})},
+    }
+    agent.client = ScriptedClient(
+        SaaSTurnResponse(response_type="tool_calls", conversation_id="c1", turn_id="r1", tool_calls=[add], mode="owner"),
+    )
+
+    result = await ask(agent, "Add milk to the shopping list")
+    await hass.async_block_till_done()  # the results go out in the background
+
+    assert len(calls) == 1
+    assert spoken(result) == "OK"
+    assert agent.client.payloads[-1]["skip_ai_response"] is True  # no reply asked for
+
+
 
 async def test_an_error_closes_the_mic(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
     class FailingOnce(ScriptedClient):
