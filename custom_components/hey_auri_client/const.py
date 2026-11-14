@@ -153,6 +153,9 @@ ERROR_NO_UPSTREAM_REPORTED_ERROR = "RT009"
 ERROR_NO_AIOHTTP_CLIENT = "RT010"
 ERROR_NO_CONNECTION = "RT011"
 ERROR_NO_AUTHENTICATION = "RT012"
+# OpenAI's final transcript came back empty: no words were said. Unlike RT004 (nothing
+# came in time), nothing to retry: the fallback upload would only make words up from noise.
+ERROR_NO_NO_SPEECH = "RT013"
 ERROR_NO_UNHANDLED = "RT999"
 
 VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE = "account_not_active"

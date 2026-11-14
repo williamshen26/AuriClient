@@ -20,6 +20,7 @@ from ..const import (
     DATA_MEMORY,
     DOMAIN,
     ERROR_NO_AUTHENTICATION,
+    ERROR_NO_NO_SPEECH,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
     CONF_SHARED_SECRET,
     CONF_STT_LANGUAGE,
@@ -163,6 +164,11 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
                         reason="realtime_success",
                     )
                 return stt.SpeechResult(streaming_result.transcript, stt.SpeechResultState.SUCCESS)
+            if streaming_result.error_no == ERROR_NO_NO_SPEECH:
+                # Nobody spoke (an open mic that wasn't answered, say). No fallback upload: on
+                # near-silence the upload's model makes words up ("六。" from 15 s of room noise).
+                # No text: Home Assistant ends the turn quietly, and the satellite goes back to waiting.
+                return stt.SpeechResult(None, stt.SpeechResultState.SUCCESS)
             _LOGGER.warning(
                 "Auri STT realtime streaming produced no transcript, falling back to multipart upload "
                 "(error_no=%s) session_id=%s: %s",

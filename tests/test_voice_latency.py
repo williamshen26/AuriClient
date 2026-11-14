@@ -20,7 +20,7 @@ pytest.importorskip("pytest_homeassistant_custom_component.common")
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: E402
 
-from homeassistant.components import conversation, tts  # noqa: E402
+from homeassistant.components import conversation, stt, tts  # noqa: E402
 from homeassistant.core import Context, HomeAssistant  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
 
@@ -32,12 +32,18 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     DATA_MEMORY,
     DOMAIN,
     ERROR_NO_AUTHENTICATION,
+    ERROR_NO_EMPTY_TRANSCRIPT,
+    ERROR_NO_NO_SPEECH,
     ERROR_NO_UPSTREAM_REPORTED_ERROR,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
 from custom_components.hey_auri_client.exceptions import SaaSRequestError  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApi, MemoryApiError  # noqa: E402
-from custom_components.hey_auri_client.saas_client import SaaSClient, SaaSTurnResponse  # noqa: E402
+from custom_components.hey_auri_client.saas_client import (  # noqa: E402
+    SaaSClient,
+    SaaSRealtimeSTTResult,
+    SaaSTurnResponse,
+)
 from custom_components.hey_auri_client.speech_to_text.stt import AuriSpeechToTextEntity  # noqa: E402
 from custom_components.hey_auri_client.text_to_speech.tts import AuriTextToSpeechEntity  # noqa: E402
 
@@ -470,3 +476,70 @@ async def test_speech_with_no_turn_logs_nothing(hass: HomeAssistant, caplog) -> 
         timeline.first_audio(hass)
 
     assert "Auri turn timeline" not in caplog.text
+
+
+# ── nobody spoke ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.usefixtures("socket_enabled")  # a local gateway on 127.0.0.1
+async def test_a_final_transcript_with_no_words_ends_the_listen_at_once(hass: HomeAssistant, aiohttp_client) -> None:
+    """OpenAI sends one with "" for silence or room noise (stt_check/silence_check.py)."""
+    result = await _listen(hass, aiohttp_client, FakeGateway(completed=""))
+
+    assert result.transcript is None
+    assert result.error_no == ERROR_NO_NO_SPEECH
+    # Not the 1.5 s the hub waits for words that might still come.
+    assert result.post_speech_latency_ms is not None and result.post_speech_latency_ms < 500
+
+
+class Transcriber:
+    """Auri's cloud for speech-to-text: a realtime result, and the fallback upload."""
+
+    def __init__(self, error_no: str) -> None:
+        self.error_no = error_no
+        self.uploads = 0
+
+    async def stream_realtime_transcription(self, **_kwargs) -> SaaSRealtimeSTTResult:
+        return SaaSRealtimeSTTResult(
+            transcript=None, buffered_audio=b"\x10\x00" * 16000 * 3, error="empty", error_no=self.error_no
+        )
+
+    async def post_multipart_audio(self, *_args, **_kwargs) -> dict[str, Any]:
+        self.uploads += 1
+        return {"text": "六。"}
+
+
+async def _transcribe(hass: HomeAssistant, transcriber: Transcriber) -> stt.SpeechResult:
+    entity = AuriSpeechToTextEntity(hass, _entry(hass))
+    entity.hass = hass
+    entity._client = transcriber
+    metadata = stt.SpeechMetadata(
+        language="en", format=stt.AudioFormats.WAV, codec=stt.AudioCodecs.PCM,
+        bit_rate=stt.AudioBitRates.BITRATE_16, sample_rate=stt.AudioSampleRates.SAMPLERATE_16000,
+        channel=stt.AudioChannels.CHANNEL_MONO,
+    )
+
+    async def nothing():
+        yield b""
+
+    return await entity.async_process_audio_stream(metadata, nothing())
+
+
+async def test_when_nobody_spoke_there_is_no_fallback_upload(hass: HomeAssistant) -> None:
+    """The upload's model makes words up from near-silence: "六。" from 15 s of an open mic."""
+    transcriber = Transcriber(ERROR_NO_NO_SPEECH)
+
+    result = await _transcribe(hass, transcriber)
+
+    assert result.text is None and result.result == stt.SpeechResultState.SUCCESS
+    assert transcriber.uploads == 0
+
+
+async def test_when_no_final_transcript_came_the_upload_still_runs(hass: HomeAssistant) -> None:
+    """Nothing within the hub's wait (OpenAI slow, once 6.9 s in stt_check): the upload is the retry."""
+    transcriber = Transcriber(ERROR_NO_EMPTY_TRANSCRIPT)
+
+    result = await _transcribe(hass, transcriber)
+
+    assert result.text == "六。"
+    assert transcriber.uploads == 1

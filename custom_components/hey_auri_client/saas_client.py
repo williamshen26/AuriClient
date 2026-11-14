@@ -28,6 +28,7 @@ from .const import (
     ERROR_NO_CONNECTION,
     ERROR_NO_EMPTY_TRANSCRIPT,
     ERROR_NO_NO_AUDIO_CHUNKS,
+    ERROR_NO_NO_SPEECH,
     ERROR_NO_NO_UPSTREAM_AUDIO,
     ERROR_NO_TIMEOUT,
     ERROR_NO_UNHANDLED,
@@ -436,6 +437,7 @@ class SaaSClient:
         final_completed_transcript: str | None = None
         completed_transcripts: list[str] = []
         transcript_chunks: list[str] = []
+        heard_no_words = False  # OpenAI's final transcript came back empty
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         path = _extract_path_from_url(endpoint)
         ws_auth_headers = self._build_websocket_auth_headers(path)
@@ -678,12 +680,15 @@ class SaaSClient:
                             if delta_fragment:
                                 saw_transcription_event = True
                                 last_transcription_event_at = perf_counter()
-                            completed = (completed_text or "").strip()
-                            if completed:
-                                completed_transcripts.append(completed)
+                            if completed_text is not None:
                                 # The gateway commits the audio once, with OpenAI's turn
                                 # detection off, so this is the whole transcript: no other
                                 # segment can follow. (It used to wait 300 ms more.)
+                                completed = completed_text.strip()
+                                if completed:
+                                    completed_transcripts.append(completed)
+                                else:
+                                    heard_no_words = True
                                 break
                             continue
 
@@ -716,14 +721,24 @@ class SaaSClient:
                     0,
                 )
 
-            if not transcript:
-                duration_ms = int(len(buffered_audio) / 32000 * 1000)
+            if transcript:
+                error, error_no = None, None
+            elif heard_no_words:
+                # Normal on an open mic that nobody answered.
+                error, error_no = "No words were said", ERROR_NO_NO_SPEECH
+                _LOGGER.debug(
+                    "Auri realtime STT: no words in %d ms of audio session_id=%s",
+                    int(len(buffered_audio) / 32000 * 1000),
+                    session_id,
+                )
+            else:
+                error, error_no = "Realtime transcript was empty", ERROR_NO_EMPTY_TRANSCRIPT
                 _LOGGER.warning(
                     "Auri realtime STT returned empty transcript after sending %d bytes and "
                     "buffering %d bytes (%d ms of 16k audio) session_id=%s",
                     realtime_bytes_sent,
                     len(buffered_audio),
-                    duration_ms,
+                    int(len(buffered_audio) / 32000 * 1000),
                     session_id,
                 )
 
@@ -731,8 +746,8 @@ class SaaSClient:
                 transcript=transcript or None,
                 buffered_audio=bytes(buffered_audio),
                 post_speech_latency_ms=post_speech_latency_ms,
-                error=None if transcript else "Realtime transcript was empty",
-                error_no=None if transcript else ERROR_NO_EMPTY_TRANSCRIPT,
+                error=error,
+                error_no=error_no,
             )
         except Exception as err:
             error_type = type(err).__name__
@@ -1063,7 +1078,8 @@ def _extract_realtime_transcript_fragment(
                             if part_text:
                                 fragment = part_text
                                 break
-        return False, None, fragment or None, None
+        # "" (not None): a final transcript with no words is an answer too, that nothing was said.
+        return False, None, fragment, None
 
     if event_type in {"response.done", "response.completed"}:
         return True, None, None, None
