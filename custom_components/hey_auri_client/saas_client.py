@@ -1,9 +1,10 @@
 """SaaS client transport and realtime STT helpers."""
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
 import asyncio
 import audioop
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -18,6 +19,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     ERROR_NO_AIOHTTP_CLIENT,
@@ -105,6 +107,30 @@ class SaaSClient:
             tts_stream_endpoint.strip() if tts_stream_endpoint else None
         )
         self.metrics_service = metrics_service
+
+    def _session(self) -> aiohttp.ClientSession:
+        """Home Assistant's shared session: its pool keeps connections to the API open between requests.
+
+        A new session per request paid for a new TCP and TLS connection each time: about 130 ms
+        from Vancouver to the API in Ohio, on every request of every turn. Never close it.
+        """
+        return async_get_clientsession(self.hass)
+
+    async def async_warm_up(self) -> None:
+        """Open a connection to the API before a turn's requests, so they skip TCP and TLS setup.
+
+        Called when Home Assistant starts listening (the agent's async_prepare). A HEAD on the
+        bare host, which API Gateway answers itself (404: no route, no Lambda, nothing billed but
+        the request). The connection then waits in the pool (Home Assistant keeps idle ones 15
+        seconds; API Gateway keeps them at least a minute).
+        """
+        try:
+            async with self._session().head(
+                f"{self.endpoint}/", timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                await response.read()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.debug("Couldn't open a connection to Auri's cloud ahead of the turn: %s", err)
 
     def _build_signed_headers(
         self,
@@ -194,31 +220,31 @@ class SaaSClient:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds or self.timeout)
         headers = self._build_signed_headers(path, body, content_type=content_type)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{self.endpoint}{path}",
-                    data=body,
-                    headers=headers,
-                ) as response:
-                    status_code = response.status
-                    body = await response.text()
-                    if response.status >= 400:
-                        error_type = "http_error"
-                        raise SaaSRequestError(
-                            f"SaaS request failed: {response.status} {body}",
-                            status_code=response.status,
-                            response_body=body,
-                        )
-                    try:
-                        parsed = json.loads(body)
-                        success = True
-                        return parsed
-                    except json.JSONDecodeError as err:
-                        error_type = "json_decode_error"
-                        raise SaaSRequestError(
-                            f"Invalid JSON response: {body}",
-                            response_body=body,
-                        ) from err
+            async with self._session().post(
+                f"{self.endpoint}{path}",
+                data=body,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                status_code = response.status
+                body = await response.text()
+                if response.status >= 400:
+                    error_type = "http_error"
+                    raise SaaSRequestError(
+                        f"SaaS request failed: {response.status} {body}",
+                        status_code=response.status,
+                        response_body=body,
+                    )
+                try:
+                    parsed = json.loads(body)
+                    success = True
+                    return parsed
+                except json.JSONDecodeError as err:
+                    error_type = "json_decode_error"
+                    raise SaaSRequestError(
+                        f"Invalid JSON response: {body}",
+                        response_body=body,
+                    ) from err
         except Exception as err:
             if error_type is None:
                 error_type = type(err).__name__
@@ -252,24 +278,24 @@ class SaaSClient:
         timeout = aiohttp.ClientTimeout(total=effective_timeout)
         headers = self._build_signed_headers(path, body, content_type=content_type)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{self.endpoint}{path}",
-                    data=body,
-                    headers=headers,
-                ) as response:
-                    status_code = response.status
-                    response_bytes = await response.read()
-                    if response.status >= 400:
-                        error_type = "http_error"
-                        raise SaaSRequestError(
-                            f"SaaS request failed: {response.status} {_extract_error_message(response_bytes)}",
-                            status_code=response.status,
-                            response_body=response_bytes.decode("utf-8", errors="ignore"),
-                        )
-                    success = True
-                    response_content_type = str(response.headers.get("Content-Type") or "application/octet-stream")
-                    return response_bytes, response_content_type
+            async with self._session().post(
+                f"{self.endpoint}{path}",
+                data=body,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                status_code = response.status
+                response_bytes = await response.read()
+                if response.status >= 400:
+                    error_type = "http_error"
+                    raise SaaSRequestError(
+                        f"SaaS request failed: {response.status} {_extract_error_message(response_bytes)}",
+                        status_code=response.status,
+                        response_body=response_bytes.decode("utf-8", errors="ignore"),
+                    )
+                success = True
+                response_content_type = str(response.headers.get("Content-Type") or "application/octet-stream")
+                return response_bytes, response_content_type
         except Exception as err:
             if error_type is None:
                 error_type = type(err).__name__
@@ -311,13 +337,13 @@ class SaaSClient:
         headers = self._build_signed_headers(path, body, content_type=content_type)
         url = request_url or f"{self.endpoint}{path}"
 
-        session = aiohttp.ClientSession(timeout=timeout)
         response: aiohttp.ClientResponse | None = None
         try:
-            response = await session.post(
+            response = await self._session().post(
                 url,
                 data=body,
                 headers=headers,
+                timeout=timeout,
             )
             status_code = response.status
             if response.status >= 400:
@@ -344,9 +370,9 @@ class SaaSClient:
         finally:
             try:
                 if response is not None:
+                    # Back to the shared pool, for the next request.
                     response.release()
             finally:
-                await session.close()
                 latency_ms = max(int((perf_counter() - started) * 1000), 0)
                 await self._record_request_latency(
                     path=path,
@@ -386,8 +412,14 @@ class SaaSClient:
         language: str,
         stream: AsyncIterable[bytes],
         client_session_id: str | None = None,
+        on_words: Callable[[str], None] | None = None,
     ) -> SaaSRealtimeSTTResult:
-        """Stream STT audio to realtime gateway and return transcript + buffered audio."""
+        """Stream STT audio to realtime gateway and return transcript + buffered audio.
+
+        ``on_words`` is called when the audio has ended, with the words streamed so far (maybe
+        none), then with all of them each time more arrive, until the transcript is final. Work
+        that needs the words (memory recall) can start before the final transcript.
+        """
         session_id = client_session_id or "unknown"
         post_speech_started: float | None = None
         post_speech_latency_ms: int | None = None
@@ -466,7 +498,10 @@ class SaaSClient:
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.ws_connect(endpoint, headers=ws_auth_headers, heartbeat=20) as ws:
+                async with (
+                    session.ws_connect(endpoint, headers=ws_auth_headers, heartbeat=20) as ws,
+                    _GatewayEvents(ws, transcript_chunks) as events,
+                ):
                     await ws.send_json(
                         {
                             "type": "session.update",
@@ -597,6 +632,8 @@ class SaaSClient:
 
                     await ws.send_json({"type": "audio.end"})
                     post_speech_started = perf_counter()
+                    if on_words is not None:
+                        events.report_words(on_words)
                     idle_timeout_seconds = 0.3
                     max_wait_seconds = 1.5
                     last_transcription_event_at = post_speech_started
@@ -613,9 +650,18 @@ class SaaSClient:
                             break
 
                         receive_timeout = min(idle_timeout_seconds, remaining_total)
+                        if saw_transcription_event:
+                            # 300 ms after the last words, not after the last event: the gateway
+                            # also relays OpenAI's committed, item.added and item.done meanwhile,
+                            # and they used to restart the wait (AuriServiceTest/stt_check,
+                            # flush_check.py: about 70 ms more a turn).
+                            words_wait_left = idle_timeout_seconds - (perf_counter() - last_transcription_event_at)
+                            if words_wait_left <= 0:
+                                break
+                            receive_timeout = min(words_wait_left, remaining_total)
 
                         try:
-                            message = await ws.receive(timeout=receive_timeout)
+                            kind, value = await events.next(receive_timeout)
                         except asyncio.TimeoutError:
                             if (
                                 saw_transcription_event
@@ -624,46 +670,37 @@ class SaaSClient:
                                 break
                             continue
 
-                        if message.type == aiohttp.WSMsgType.TEXT:
-                            done, delta_fragment, completed_text, error_message = _extract_realtime_transcript_fragment(
-                                message.data
-                            )
+                        if kind == "event":
+                            # The words themselves are already in transcript_chunks (_GatewayEvents).
+                            _, delta_fragment, completed_text, error_message = value
                             if error_message:
                                 raise ConnectionError(error_message)
                             if delta_fragment:
-                                transcript_chunks.append(delta_fragment)
                                 saw_transcription_event = True
                                 last_transcription_event_at = perf_counter()
-                            if completed_text:
-                                completed = completed_text.strip()
-                                if completed:
-                                    completed_transcripts.append(completed)
-                                    saw_transcription_event = True
-                                    last_transcription_event_at = perf_counter()
-                            if done:
-                                # Continue receiving until idle/max wait so paused speech segments can merge.
-                                continue
+                            completed = (completed_text or "").strip()
+                            if completed:
+                                completed_transcripts.append(completed)
+                                # The gateway commits the audio once, with OpenAI's turn
+                                # detection off, so this is the whole transcript: no other
+                                # segment can follow. (It used to wait 300 ms more.)
+                                break
                             continue
 
-                        if message.type in {
-                            aiohttp.WSMsgType.CLOSED,
-                            aiohttp.WSMsgType.CLOSING,
-                            aiohttp.WSMsgType.ERROR,
-                        }:
-                            _LOGGER.warning(
-                                "Auri realtime STT websocket ended type=%s close_code=%s",
-                                message.type,
-                                ws.close_code,
-                            )
-                            if not transcript_chunks:
-                                if ws.close_code == 1008:
-                                    raise AuthenticationError(
-                                        "Realtime websocket authentication failed (close_code=1008)"
-                                    )
-                                raise ConnectionError(
-                                    f"Realtime websocket closed without transcript (close_code={ws.close_code})"
+                        _LOGGER.warning(
+                            "Auri realtime STT websocket ended type=%s close_code=%s",
+                            value,
+                            ws.close_code,
+                        )
+                        if not transcript_chunks:
+                            if ws.close_code == 1008:
+                                raise AuthenticationError(
+                                    "Realtime websocket authentication failed (close_code=1008)"
                                 )
-                            break
+                            raise ConnectionError(
+                                f"Realtime websocket closed without transcript (close_code={ws.close_code})"
+                            )
+                        break
 
             if completed_transcripts:
                 final_completed_transcript = " ".join(completed_transcripts).strip()
@@ -920,6 +957,73 @@ def _extract_error_message(body: bytes) -> str:
             return str(message)
 
     return str(payload)[:300]
+
+
+_WS_ENDED = frozenset({aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR})
+
+
+class _GatewayEvents:
+    """The gateway's events for one listen, read from the moment it connects.
+
+    The words stream in while the person speaks. Reading them as they come means they're known
+    when speech ends, so work that needs them can start before the final transcript. A websocket
+    takes one reader at a time, so the listen gets its events from ``next``, never from
+    ``ws.receive``.
+    """
+
+    def __init__(self, ws: aiohttp.ClientWebSocketResponse, words: list[str]) -> None:
+        self._ws = ws
+        self._words = words  # each delta's text, in order
+        self._queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        self._task: asyncio.Task[None] | None = None
+        self._on_words: Callable[[str], None] | None = None
+        self._reported: str | None = None
+
+    async def __aenter__(self) -> _GatewayEvents:
+        self._task = asyncio.create_task(self._read())
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    async def next(self, timeout: float) -> tuple[str, Any]:
+        """("event", the parsed event) or ("ended", why), in arrival order; TimeoutError if none comes."""
+        return await asyncio.wait_for(self._queue.get(), timeout)
+
+    def report_words(self, on_words: Callable[[str], None]) -> None:
+        """Call on_words with the words so far now, then with all of them whenever more arrive."""
+        self._on_words = on_words
+        self._report()
+
+    def _report(self) -> None:
+        words = "".join(self._words).strip()
+        if self._on_words is None or words == self._reported:
+            return
+        self._reported = words
+        try:
+            self._on_words(words)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Auri realtime STT words callback failed")
+
+    async def _read(self) -> None:
+        try:
+            while True:
+                message = await self._ws.receive()
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    event = _extract_realtime_transcript_fragment(message.data)
+                    if event[1]:
+                        self._words.append(event[1])
+                        self._report()
+                    self._queue.put_nowait(("event", event))
+                elif message.type in _WS_ENDED:
+                    self._queue.put_nowait(("ended", message.type))
+                    return
+        except Exception as err:  # noqa: BLE001
+            # Whatever broke the connection, the listen ends as if it had closed.
+            self._queue.put_nowait(("ended", err))
 
 
 def _extract_realtime_transcript_fragment(

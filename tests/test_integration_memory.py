@@ -582,6 +582,33 @@ async def test_notes_by_meaning_are_only_for_messages_that_need_them(hass: HomeA
         embed.assert_awaited_once()
 
 
+async def test_words_heard_as_speech_ends_start_the_turns_embedding_call(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, client, _will = memory_setup
+    embedded: list[list[str]] = []
+    post_json = client.post_json
+
+    async def counting_post_json(path: str, payload: dict[str, Any], **kwargs) -> dict[str, Any]:
+        if path == "/memory/embed":
+            embedded.append(payload["texts"])
+        return await post_json(path, payload, **kwargs)
+
+    client.post_json = counting_post_json
+
+    # English on a hub set to English: the turn won't search by meaning, so nothing starts.
+    runtime.prefetch_turn("Turn on the kitchen light")
+    # In another language, each new word starts a call; the turn uses the one with all its words.
+    runtime.prefetch_turn("把灯调到")
+    runtime.prefetch_turn("把灯调到我喜欢的亮度")
+    await runtime.owner.async_turn_context("把灯调到我喜欢的亮度。", Speaker(), "p1")
+    assert embedded == [["把灯调到"], ["把灯调到我喜欢的亮度"]]
+
+    # Memory not allowed for the account: no call.
+    runtime.note_mode("owner", False)
+    runtime.prefetch_turn("家里有什么不能吃的吗")
+    await _settle(hass)
+    assert len(embedded) == 2
+
+
 @pytest.mark.parametrize("failure", ["slow", "error", "over_budget"])
 async def test_a_turn_goes_on_without_notes_by_meaning(hass: HomeAssistant, memory_setup, monkeypatch, failure) -> None:
     _agent, runtime, _client, _will = memory_setup

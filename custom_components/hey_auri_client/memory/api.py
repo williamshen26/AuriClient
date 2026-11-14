@@ -1,9 +1,13 @@
 """Signed calls to AuriService's /memory/* endpoints (embeddings and nightly processing)."""
 from __future__ import annotations
 
+import asyncio
 import json
+from time import monotonic
 from typing import Any, Sequence
 import uuid
+
+from homeassistant.core import HomeAssistant
 
 from ..const import LATENCY_MEASUREMENT_KEY_MEMORY
 from ..exceptions import SaaSRequestError
@@ -49,11 +53,69 @@ def embedding_tag(model: str, dimensions: int) -> str:
     return f"{model}@{dimensions}"
 
 
+# Query embeddings started before their turn (prefetch_query): each is kept this long, at most this many.
+_PREFETCH_TTL_SECONDS = 30.0
+_PREFETCH_MAX = 4
+
+
+def query_key(text: str) -> str:
+    """A message's words, to match the words heard as speech ended with the final transcript.
+
+    Case, spaces and punctuation are left out: the final transcript often only adds those.
+    """
+    return "".join(char for char in text.casefold() if char.isalnum())
+
+
+def _mark_retrieved(task: asyncio.Task) -> None:
+    """A prefetch no turn used needs no error report: its turn made its own call."""
+    if not task.cancelled():
+        task.exception()
+
+
 class MemoryApi:
     """Thin client for the stateless memory processing endpoints."""
 
-    def __init__(self, client: SaaSClient) -> None:
+    def __init__(self, client: SaaSClient, hass: HomeAssistant) -> None:
         self._client = client
+        self._hass = hass
+        # (scope, query_key) -> (when it started, the embedding call): see prefetch_query.
+        self._prefetched: dict[tuple[str, str], tuple[float, asyncio.Task]] = {}
+
+    def prefetch_query(self, text: str, *, scope: str) -> None:
+        """Start embedding a voice turn's words before its final transcript arrives.
+
+        The turn's recall by meaning waits on this call, so starting it while the transcript
+        finishes takes it off the time to the reply. The turn uses the result when its text has
+        the same words (embed); otherwise it makes its own call and this one goes unused.
+        """
+        key = (scope, query_key(text))
+        if not key[1]:
+            return
+        now = monotonic()
+        for old_key, (started, task) in list(self._prefetched.items()):
+            if now - started > _PREFETCH_TTL_SECONDS:
+                task.cancel()
+                del self._prefetched[old_key]
+        if key in self._prefetched:
+            return
+        while len(self._prefetched) >= _PREFETCH_MAX:
+            self._prefetched.pop(next(iter(self._prefetched)))[1].cancel()
+        task = self._hass.async_create_background_task(
+            self._embed_now([text], task_type="RETRIEVAL_QUERY", scope=scope),
+            "hey_auri_client prefetched query embedding",
+        )
+        task.add_done_callback(_mark_retrieved)
+        self._prefetched[key] = (now, task)
+
+    def _take_prefetched(self, text: str, scope: str) -> asyncio.Task | None:
+        entry = self._prefetched.pop((scope, query_key(text)), None)
+        if entry is None:
+            return None
+        started, task = entry
+        if monotonic() - started > _PREFETCH_TTL_SECONDS or task.cancelled():
+            task.cancel()
+            return None
+        return task
 
     async def _post(self, route: str, payload: dict[str, Any]) -> dict[str, Any]:
         # scope: "owner", or "guest" for a home-share stay (the payload says which).
@@ -81,7 +143,19 @@ class MemoryApi:
     async def embed(
         self, texts: Sequence[str], *, task_type: str, scope: str = "owner"
     ) -> tuple[list[list[float]], str]:
-        """Embed texts in batches of 100; returns (vectors in order, embedding tag)."""
+        """Embed texts in batches of 100; returns (vectors in order, embedding tag).
+
+        A query whose words were prefetched (prefetch_query) waits for that call instead.
+        """
+        if len(texts) == 1 and task_type == "RETRIEVAL_QUERY":
+            prefetched = self._take_prefetched(texts[0], scope)
+            if prefetched is not None:
+                return await prefetched
+        return await self._embed_now(texts, task_type=task_type, scope=scope)
+
+    async def _embed_now(
+        self, texts: Sequence[str], *, task_type: str, scope: str
+    ) -> tuple[list[list[float]], str]:
         vectors: list[list[float]] = []
         tag = embedding_tag("unknown", EMBEDDING_DIMENSIONS)
         for start in range(0, len(texts), EMBED_BATCH_SIZE):

@@ -91,7 +91,7 @@ class MemoryRuntime:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, client: SaaSClient, *, app_version: str) -> None:
         self.hass = hass
         self.entry = entry
-        self.api = MemoryApi(client)
+        self.api = MemoryApi(client, hass)
         self.app_version = app_version
         self.config = MemoryConfig.from_options(entry.options)
         self.state = MemoryState.DISABLED
@@ -391,6 +391,20 @@ class MemoryRuntime:
         if self.memory_allowed is False:
             return {"v": 1, "status": space.context_status, "scope": space.mode}
         return await space.async_turn_context(text, speaker, conversation_id)
+
+    @callback
+    def prefetch_turn(self, words: str) -> None:
+        """Start a voice turn's embedding call on the words heard so far, before the final transcript.
+
+        Speech-to-text calls this when speech ends, and again as more words arrive. The turn's
+        recall by meaning (async_turn_context) uses the result when its text has the same words.
+        Only for turns that would make the call: memory on and allowed, and not English.
+        """
+        if not words or self.memory_allowed is False:
+            return
+        space = self.space_for(self.last_known_mode)
+        if space.enabled and space.wants_meaning_recall(words):
+            self.api.prefetch_query(words, scope=space.mode)
 
     @callback
     def log_turn(

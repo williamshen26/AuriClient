@@ -1,7 +1,7 @@
 """Speech-to-text provider for Hey Auri cloud transcription."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Callable
 from datetime import datetime
 import io
 import json
@@ -13,9 +13,12 @@ from homeassistant.components import stt
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .. import timeline
 from ..const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
+    DATA_MEMORY,
+    DOMAIN,
     ERROR_NO_AUTHENTICATION,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
     CONF_SHARED_SECRET,
@@ -145,11 +148,13 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
                 stream=stream,
                 language=language,
                 client_session_id=session_id,
+                on_words=self._words_handler(),
             )
             buffered_audio.extend(streaming_result.buffered_audio)
             if streaming_result.error_no == ERROR_NO_AUTHENTICATION:
                 return stt.SpeechResult(VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE, stt.SpeechResultState.SUCCESS)
             if streaming_result.transcript:
+                timeline.mark(self.hass, "transcript")
                 if _should_save_debug_audio(success=True):
                     await _save_debug_audio(
                         metadata,
@@ -243,6 +248,7 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             # stt-no-text-recognized treatment as the too-short cases above.
             return stt.SpeechResult(None, stt.SpeechResultState.SUCCESS)
 
+        timeline.mark(self.hass, "transcript")
         if _should_save_debug_audio(success=True):
             await _save_debug_audio(
                 metadata,
@@ -252,6 +258,21 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             )
 
         return stt.SpeechResult(transcript, stt.SpeechResultState.SUCCESS)
+
+    def _words_handler(self) -> Callable[[str], None]:
+        """For the words heard as speech ends: note the moment, and start memory's recall on them."""
+        speech_ended = False
+
+        def on_words(words: str) -> None:
+            nonlocal speech_ended
+            if not speech_ended:
+                speech_ended = True
+                timeline.speech_ended(self.hass)
+            memory = (self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) or {}).get(DATA_MEMORY)
+            if words and memory is not None:
+                memory.prefetch_turn(words)
+
+        return on_words
 
 
 def _estimate_audio_duration_ms(metadata: stt.SpeechMetadata, audio_bytes_len: int) -> int | None:

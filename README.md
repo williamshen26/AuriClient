@@ -379,7 +379,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - with each request: the speaker's name, the names of the household's people and pets, and the memory notes and profile Home Assistant picked for that message;
   - the text of memories that need a search key (an embedding), such as preferences imported from an earlier version, so the cloud can compute it;
   - once, the text of preferences imported from an earlier version, so the cloud can rate how important and how private each one is;
-  - for a message that isn't in English: its text, also to compute a search key, so Home Assistant can look for memories by meaning;
+  - for a message that isn't in English: its text, also to compute a search key, so Home Assistant can look for memories by meaning. With Auri's speech-to-text, this starts as soon as you stop speaking, on the words heard so far, and again as each further word arrives; the key whose words match the final transcript is used, and the others are dropped;
   - every night: the day's conversations (with passwords, card numbers and similar removed), the names of the people, pets and subjects Auri knows, and, for each new fact (and each memory saved in conversation or imported), the few stored memories most like it, so the cloud can summarize the day and tell what's new. The cloud returns the summary and the facts and keeps none of it.
 
 Guest details, timers and notes are stored in Home Assistant, and memories in your own PostgreSQL database. The cloud uses conversation history for about 5 minutes, so that follow-up questions work. After that the history expires and is deleted automatically, usually within a few days. If memory debugging is turned on for your account, the memory notes and profile sent with each message are kept in that history too, and expire with it. See the [Privacy Policy](https://hey-auri.com/privacy.html).
@@ -418,6 +418,8 @@ logger:
   logs:
     custom_components.hey_auri_client: debug
 ```
+
+To see where a voice reply's time goes, log only `custom_components.hey_auri_client.timeline` at `debug`. Each reply then logs one line, `Auri turn timeline: …`, in milliseconds: from the end of your speech to the transcript, to Auri's agent, the memory lookup, the requests to the Auri cloud, the speech request, and the reply's first audio reaching Home Assistant. The satellite's own part (buffering and playback) isn't in it. Home Assistant's pipeline debug view times the stages from its side: **Settings → Voice assistants**, the assistant's **⋮** menu, **Debug**.
 
 ## Support
 

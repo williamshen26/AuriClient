@@ -15,6 +15,7 @@ from homeassistant.components import tts
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
+from .. import timeline
 from ..const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
@@ -172,6 +173,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         # ignored here -- see _build_payload for why.
         del language
         started = perf_counter()
+        timeline.mark(self.hass, "tts_request")
 
         payload = self._build_payload(
             message=message,
@@ -194,6 +196,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         if not audio:
             return None
 
+        timeline.first_audio(self.hass)
         return "wav", audio
 
     async def async_stream_tts_audio(
@@ -202,6 +205,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
     ) -> tts.TTSAudioResponse:
         """Generate stream-first TTS audio with stream-collected fallback."""
         # request.language is ignored -- see _build_payload for why.
+        timeline.mark(self.hass, "tts_request")
         message = await _collect_message(request.message_gen)
         payload = self._build_payload(
             message=message,
@@ -221,6 +225,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
                             "Auri TTS first stream chunk after %d ms",
                             int((perf_counter() - stream_started) * 1000),
                         )
+                        timeline.first_audio(self.hass)
 
                     stream_has_data = True
                     yield chunk
@@ -247,6 +252,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
                     len(fallback_audio),
                 )
                 if fallback_audio:
+                    timeline.first_audio(self.hass)
                     yield fallback_audio
                 return
 
@@ -262,6 +268,7 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
                     len(fallback_audio),
                 )
                 if fallback_audio:
+                    timeline.first_audio(self.hass)
                     yield fallback_audio
 
         return tts.TTSAudioResponse(

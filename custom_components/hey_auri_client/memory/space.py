@@ -433,6 +433,12 @@ class MemorySpace:
             _LOGGER.debug("Memory recall skipped this turn: %s", err)
             return [], []
 
+    def wants_meaning_recall(self, text: str) -> bool:
+        """Whether a turn with this text also looks for memories by meaning (an embedding call)."""
+        # The hub's language is the household's. Guests needn't speak it, so for them the words decide.
+        language = None if self.is_guest else str(self.entry.options.get(CONF_STT_LANGUAGE) or DEFAULT_STT_LANGUAGE)
+        return self.store is not None and should_auto_recall(text) and not reads_as_english(text, language)
+
     async def _async_meaning_recall(self, text: str, speaker_entity_id: int | None) -> list[RecallRow]:
         """Memories close in meaning to a message the keyword search can't read.
 
@@ -440,9 +446,7 @@ class MemorySpace:
         through names. Nothing on a timeout or an error: the turn goes on with the keyword notes.
         """
         store = self.store
-        # The hub's language is the household's. Guests needn't speak it, so for them the words decide.
-        language = None if self.is_guest else str(self.entry.options.get(CONF_STT_LANGUAGE) or DEFAULT_STT_LANGUAGE)
-        if store is None or not should_auto_recall(text) or reads_as_english(text, language):
+        if store is None or not self.wants_meaning_recall(text):
             return []
         try:
             async with asyncio.timeout(MEANING_NOTES_BUDGET_SECONDS):

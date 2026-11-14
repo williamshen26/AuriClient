@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 import logging
+from time import monotonic
 import uuid
 
 from typing import TYPE_CHECKING, Literal
@@ -26,6 +28,7 @@ from ..const import (
     MEMORY_EXAM_CONVERSATION_PREFIX,
     VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE,
 )
+from .. import timeline
 from ..bookings.automatic_mode import stay_context
 from ..bookings.guest_name import async_mark_asked
 from ..cache import reset_processed_entities
@@ -175,6 +178,25 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         """Return supported languages."""
         return MATCH_ALL
 
+    async def async_prepare(self, language: str | None = None) -> None:
+        """Home Assistant calls this when a voice turn starts listening.
+
+        Opens a connection to Auri's cloud in the background, while the person speaks, so the
+        turn's requests (the conversation, then speech, on the same host) skip TCP and TLS setup.
+        """
+        del language
+        self.hass.async_create_background_task(
+            self.client.async_warm_up(), "hey_auri_client connection warm-up"
+        )
+
+    async def _timed(self, request: Awaitable[SaaSTurnResponse]) -> SaaSTurnResponse:
+        """A request to Auri's cloud that the turn waits for, timed for the turn timeline."""
+        started = monotonic()
+        try:
+            return await request
+        finally:
+            timeline.cloud_request(self.hass, monotonic() - started)
+
     def _note_response(self, response: SaaSTurnResponse, turn: TurnMeta) -> None:
         """Track what the backend decided about mode and memory for this account."""
         turn.mode = response.mode
@@ -238,6 +260,15 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
         """Process one conversation turn via the SaaS backend."""
+        timeline.mark(self.hass, "agent_start")
+        try:
+            return await self._async_process_turn(user_input)
+        finally:
+            timeline.mark(self.hass, "agent_done")
+
+    async def _async_process_turn(
+        self, user_input: conversation.ConversationInput
+    ) -> conversation.ConversationResult:
         if user_input.text == VOICE_AGENT_ERROR_ACCOUNT_NOT_ACTIVE:
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_speech(
@@ -277,6 +308,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         turn = TurnMeta(mode=None, memory_allowed=False, conversation_id=conversation_id, speaker=speaker)
         if self.memory is not None:
             context["memory"] = await self.memory.async_turn_context(user_input.text, speaker, conversation_id)
+        timeline.mark(self.hass, "context_ready")
         tool_names: list[str] = []
         payload = {
             "type": "user_turn",
@@ -290,7 +322,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         }
 
         try:
-            response = await self.client.send_user_turn(payload)
+            response = await self._timed(self.client.send_user_turn(payload))
             self._note_response(response, turn)
             while response.response_type == "tool_calls":
                 tool_results = []
@@ -344,7 +376,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                         conversation_id=conversation_id,
                     )
 
-                response = await self.client.send_tool_results(tool_results_payload)
+                response = await self._timed(self.client.send_tool_results(tool_results_payload))
                 self._note_response(response, turn)
         except (SaaSRequestError, ToolExecutionError, HomeAssistantError) as err:
             _LOGGER.error("Thin frontend request failed: %s", err, exc_info=err)
