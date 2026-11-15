@@ -11,7 +11,7 @@ import hashlib
 import hmac
 import json
 import logging
-from time import perf_counter
+from time import monotonic, perf_counter
 import secrets
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +22,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    DOMAIN,
     ERROR_NO_AIOHTTP_CLIENT,
     ERROR_NO_AUDIO_TOO_SHORT,
     ERROR_NO_AUTHENTICATION,
@@ -48,6 +49,12 @@ from .exceptions import SaaSRequestError
 from .metric_service import RequestLatencyMetricService
 
 _LOGGER = logging.getLogger(__name__)
+
+# When this hub last reached each cloud function: hass.data[DOMAIN][_LAST_REQUEST_KEY].
+_LAST_REQUEST_KEY = "cloud_last_request"
+# After this long without a request, a function's caches and connections may have gone cold
+# (the account and voice-map caches last 60 s, provider connections 120 s): warm it up.
+_QUIET_SECONDS = 30.0
 
 
 @dataclass(slots=True)
@@ -117,14 +124,52 @@ class SaaSClient:
         """
         return async_get_clientsession(self.hass)
 
-    async def async_warm_up(self) -> None:
-        """Open a connection to the API before a turn's requests, so they skip TCP and TLS setup.
+    async def async_warm_up(self, tts_stream_endpoint: str | None = None) -> None:
+        """Get ready for a turn's requests while the person speaks. Called when Home Assistant
+        starts listening (the agent's async_prepare). Never raises.
 
-        Called when Home Assistant starts listening (the agent's async_prepare). A HEAD on the
-        bare host, which API Gateway answers itself (404: no route, no Lambda, nothing billed but
-        the request). The connection then waits in the pool (Home Assistant keeps idle ones 15
-        seconds; API Gateway keeps them at least a minute).
+        - A cloud function quiet for _QUIET_SECONDS gets a signed warm-up request: it refreshes its
+          caches and opens its connections to the model, the embedding API or Cartesia, which go
+          cold after a minute or two idle. The first turn after a quiet spell paid for that: about
+          0.3 s before the embedding and 0.2 to 0.4 s before the speech (AuriServiceTest/first_turn).
+        - Otherwise a HEAD on the bare host, which API Gateway answers itself (404: no route, no
+          Lambda), so this hub's own connection is open: Home Assistant's pool keeps idle ones
+          15 seconds, API Gateway at least a minute.
         """
+        last = self.hass.data.get(DOMAIN, {}).get(_LAST_REQUEST_KEY, {})
+        now = monotonic()
+        calls = []
+        if now - last.get("conversation", -_QUIET_SECONDS) >= _QUIET_SECONDS:
+            calls.append(self._async_warm_function(f"{self.endpoint}/conversation", "/conversation", {"type": "warm_up"}))
+        if now - last.get("speech", -_QUIET_SECONDS) >= _QUIET_SECONDS:
+            url, sign_path = (
+                _resolve_tts_stream_target(tts_stream_endpoint)
+                if tts_stream_endpoint
+                else (f"{self.endpoint}{TTS_STREAM_PATH}", TTS_STREAM_PATH)
+            )
+            calls.append(self._async_warm_function(url, sign_path, {"warm_up": True}))
+        if not calls:
+            calls.append(self._async_open_connection())
+        await asyncio.gather(*calls)
+
+    async def _async_warm_function(self, url: str, path: str, payload: dict[str, Any]) -> None:
+        """A signed warm-up request to one cloud function (it answers without a turn or speech)."""
+        body = json.dumps(payload, separators=(",", ":"))
+        try:
+            async with self._session().post(
+                url,
+                data=body,
+                headers=self._build_signed_headers(path, body, content_type="application/json"),
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                await response.read()
+            # Warm now, whatever it answered: an older backend refuses the request, after the
+            # same signature check and table reads a turn does.
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(_LAST_REQUEST_KEY, {})[_cloud_function(path) or path] = monotonic()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.debug("Couldn't warm up Auri's cloud (%s) ahead of the turn: %s", path, err)
+
+    async def _async_open_connection(self) -> None:
         try:
             async with self._session().head(
                 f"{self.endpoint}/", timeout=aiohttp.ClientTimeout(total=5)
@@ -783,7 +828,9 @@ class SaaSClient:
         status_code: int | None,
         error_type: str | None,
     ) -> None:
-        """Emit one request latency datapoint if metrics are enabled."""
+        """Emit one request latency datapoint if metrics are enabled (and note the request, see async_warm_up)."""
+        if (function := _cloud_function(path)) is not None:
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(_LAST_REQUEST_KEY, {})[function] = monotonic()
         if self.metrics_service is None or not self.metrics_service.enabled:
             return
 
@@ -934,6 +981,15 @@ def _build_multipart_body(
 def _extract_path_from_url(url: str) -> str:
     parsed = urlparse(url)
     return parsed.path or "/"
+
+
+def _cloud_function(path: str) -> str | None:
+    """Which of the cloud's functions a request path reaches: the two a voice turn waits for."""
+    if path == TTS_STREAM_PATH:
+        return "speech"
+    if path == "/conversation" or path.startswith("/memory/"):
+        return "conversation"  # the conversation function also answers /memory/embed
+    return None
 
 
 def _resolve_tts_stream_target(endpoint: str) -> tuple[str, str]:

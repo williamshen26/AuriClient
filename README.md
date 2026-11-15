@@ -373,7 +373,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - your home's location (latitude and longitude, time zone, country);
   - the current time, the Home Assistant user's name, the language, and which device and area you're speaking from;
   - whether a booking is under way, whether anyone from your household is home (yes or no, not who), and whether Auri should ask the guests their name.
-- **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech.
+- **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech. When a satellite starts listening after a quiet half-minute, two signed requests with nothing in them get the cloud ready while you speak.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.
 - **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):
   - with each request: the speaker's name, the names of the household's people and pets, and the memory notes and profile Home Assistant picked for that message;

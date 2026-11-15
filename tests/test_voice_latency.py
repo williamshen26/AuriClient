@@ -10,6 +10,7 @@ import asyncio
 import gc
 import json
 import logging
+from time import monotonic
 from typing import Any
 
 import aiohttp
@@ -40,6 +41,7 @@ from custom_components.hey_auri_client.conversation.agent_class import ThinOpenA
 from custom_components.hey_auri_client.exceptions import SaaSRequestError  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApi, MemoryApiError  # noqa: E402
 from custom_components.hey_auri_client.saas_client import (  # noqa: E402
+    _LAST_REQUEST_KEY,
     SaaSClient,
     SaaSRealtimeSTTResult,
     SaaSTurnResponse,
@@ -83,24 +85,80 @@ async def test_requests_share_home_assistants_connection_pool(hass: HomeAssistan
     assert aioclient_mock.call_count == 2
 
 
-async def test_listening_opens_a_connection_to_the_cloud(hass: HomeAssistant, aioclient_mock) -> None:
-    """Home Assistant prepares the agent when speech-to-text starts: a HEAD that API Gateway answers itself."""
-    await async_setup_component(hass, "homeassistant", {})
-    aioclient_mock.head(f"{API_ENDPOINT}/", status=404)
-    agent = ThinOpenAIAgent(hass, _entry(hass))
+def _calls(aioclient_mock, since: int = 0) -> list[tuple[str, str, Any]]:
+    return [
+        (method.upper(), str(url), json.loads(data) if isinstance(data, str) else data)
+        for method, url, data, _headers in aioclient_mock.mock_calls[since:]
+    ]
 
+
+async def _listening_starts(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
+    """Home Assistant prepares the agent when speech-to-text starts."""
     await agent.async_prepare("en")
     await hass.async_block_till_done(wait_background_tasks=True)
 
-    assert [(method.upper(), str(url)) for method, url, _data, _headers in aioclient_mock.mock_calls] == [
-        ("HEAD", f"{API_ENDPOINT}/")
+
+@pytest.fixture
+async def cloud(hass: HomeAssistant, aioclient_mock):
+    """The agent, and Auri's cloud: a turn, speech, the bare host, and the two warm-ups."""
+    await async_setup_component(hass, "homeassistant", {})
+    aioclient_mock.post(f"{API_ENDPOINT}/conversation", json={"type": "final", "conversation_id": "c1", "content": "Done."})
+    aioclient_mock.post(f"{API_ENDPOINT}/tts/stream", content=b"RIFF....WAVE")
+    aioclient_mock.head(f"{API_ENDPOINT}/", status=404)
+    return ThinOpenAIAgent(hass, _entry(hass))
+
+
+async def test_after_a_quiet_spell_listening_warms_up_the_conversation_and_speech(
+    hass: HomeAssistant, aioclient_mock, cloud: ThinOpenAIAgent
+) -> None:
+    """Their caches and provider connections go cold after a minute or two (AuriServiceTest/first_turn)."""
+    await _listening_starts(hass, cloud)
+
+    assert sorted(_calls(aioclient_mock)) == [
+        ("POST", f"{API_ENDPOINT}/conversation", {"type": "warm_up"}),
+        ("POST", f"{API_ENDPOINT}/tts/stream", {"warm_up": True}),
     ]
+    for _method, _url, _data, headers in aioclient_mock.mock_calls:
+        assert headers["X-Client-Id"] == "client" and headers["X-Signature"]  # signed like any request
+
+
+async def test_right_after_a_turn_listening_only_opens_the_connection(
+    hass: HomeAssistant, aioclient_mock, cloud: ThinOpenAIAgent
+) -> None:
+    """A HEAD that API Gateway answers itself (no function runs): this hub's pool keeps a connection 15 s."""
+    await cloud.client.send_user_turn({"type": "user_turn", "conversation_id": "c1"})
+    await cloud.client.request_tts_audio({"text": "Done.", "voice": "auri"})
+    since = len(aioclient_mock.mock_calls)
+
+    await _listening_starts(hass, cloud)
+
+    assert _calls(aioclient_mock, since) == [("HEAD", f"{API_ENDPOINT}/", None)]
+
+
+async def test_only_the_quiet_function_is_warmed_up(hass: HomeAssistant, aioclient_mock, cloud: ThinOpenAIAgent) -> None:
+    """A typed turn reached the conversation function but not speech."""
+    await cloud.client.send_user_turn({"type": "user_turn", "conversation_id": "c1"})
+    since = len(aioclient_mock.mock_calls)
+
+    await _listening_starts(hass, cloud)
+
+    assert _calls(aioclient_mock, since) == [("POST", f"{API_ENDPOINT}/tts/stream", {"warm_up": True})]
+    since = len(aioclient_mock.mock_calls)
+    await _listening_starts(hass, cloud)  # both warm now
+    assert _calls(aioclient_mock, since) == [("HEAD", f"{API_ENDPOINT}/", None)]
 
 
 @pytest.mark.parametrize("failure", [aiohttp.ClientConnectionError("offline"), TimeoutError()])
 async def test_a_failed_warm_up_is_harmless(hass: HomeAssistant, aioclient_mock, failure: Exception) -> None:
+    for path in ("/conversation", "/tts/stream"):
+        aioclient_mock.post(f"{API_ENDPOINT}{path}", exc=failure)
     aioclient_mock.head(f"{API_ENDPOINT}/", exc=failure)
-    await _client(hass).async_warm_up()
+    client = _client(hass)
+
+    await client.async_warm_up()  # the two warm-ups fail
+    assert len(aioclient_mock.mock_calls) == 2
+    hass.data.setdefault(DOMAIN, {})[_LAST_REQUEST_KEY] = {"conversation": monotonic(), "speech": monotonic()}
+    await client.async_warm_up()  # recent requests: the HEAD fails
 
 
 # ── the transcript, and the words as speech ends ────────────────────────────

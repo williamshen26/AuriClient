@@ -20,7 +20,9 @@ from ..const import (
     CONF_CLIENT_ID,
     CONF_MEMORY_LOGIN_PEOPLE,
     CONF_SHARED_SECRET,
+    CONF_TTS_STREAM_ENDPOINT,
     DATA_FRONTEND_CLIENT,
+    DEFAULT_TTS_STREAM_ENDPOINT,
     DOMAIN,
     EVENT_AURI_WAKE_WORD,
     EVENT_CONVERSATION_FINISHED,
@@ -189,12 +191,13 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
     async def async_prepare(self, language: str | None = None) -> None:
         """Home Assistant calls this when a voice turn starts listening.
 
-        Opens a connection to Auri's cloud in the background, while the person speaks, so the
-        turn's requests (the conversation, then speech, on the same host) skip TCP and TLS setup.
+        Gets Auri's cloud ready in the background, while the person speaks (SaaSClient.async_warm_up):
+        this hub's connection, and after a quiet spell the conversation and speech functions.
         """
         del language
+        tts_endpoint = str(self.entry.options.get(CONF_TTS_STREAM_ENDPOINT, DEFAULT_TTS_STREAM_ENDPOINT)).strip()
         self.hass.async_create_background_task(
-            self.client.async_warm_up(), "hey_auri_client connection warm-up"
+            self.client.async_warm_up(tts_endpoint), "hey_auri_client connection warm-up"
         )
 
     async def _timed(self, request: Awaitable[SaaSTurnResponse]) -> SaaSTurnResponse:
