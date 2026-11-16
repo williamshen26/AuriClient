@@ -10,6 +10,7 @@ from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
@@ -39,6 +40,7 @@ from .memory.legacy import relocate_legacy_user_data
 from .memory.logins import async_delete_logins_issue, async_update_logins_issue
 from .memory.names import async_delete_names_issue, async_update_names_issue
 from .memory.runtime import MemoryRuntime
+from .security import SECURITY_CHECK_INTERVAL, async_delete_security_issues, async_update_security_issues
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -157,6 +159,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Once the persons are loaded: a Repairs notice for logins that look like a service's.
     entry.async_on_unload(async_at_started(hass, _async_check_logins))
 
+    async def _async_check_security(*_: Any) -> None:
+        await async_update_security_issues(hass)
+
+    # With remote access: notices for accounts without two-factor and for unlimited failed
+    # logins. Hourly too, since turning two-factor on fires no event.
+    entry.async_on_unload(async_at_started(hass, _async_check_security))
+    entry.async_on_unload(async_track_time_interval(hass, _async_check_security, SECURITY_CHECK_INTERVAL))
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     ha_conversation.async_set_agent(hass, entry, agent)
     return True
@@ -217,3 +227,4 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove the integration's Repairs notices with it."""
     async_delete_logins_issue(hass, entry.entry_id)
     async_delete_names_issue(hass, entry.entry_id)
+    async_delete_security_issues(hass)

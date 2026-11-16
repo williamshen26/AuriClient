@@ -384,6 +384,19 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
 
 Guest details, timers and notes are stored in Home Assistant, and memories in your own PostgreSQL database. The cloud uses conversation history for about 5 minutes, so that follow-up questions work. After that the history expires and is deleted automatically, usually within a few days. If memory debugging is turned on for your account, the memory notes and profile sent with each message are kept in that history too, and expire with it. See the [Privacy Policy](https://hey-auri.com/privacy.html).
 
+## Remote access
+
+With remote access, through a tunnel such as the Cloudflared add-on, Home Assistant Cloud or another reverse proxy, Home Assistant's login page is on the internet. Two of its defaults matter then, and Auri raises a Repairs notice for each:
+
+- **Failed logins never lock anyone out.** Home Assistant allows unlimited attempts by default. In **Settings** → **System** → **Network**, under **HTTP server**, turn on **Enable IP banning** and set **Login attempts before ban**, for example to 5.
+  - Behind a tunnel or another reverse proxy, also turn on **Trust X-Forwarded-For** and add the proxy under **Trusted proxies** (`172.30.33.0/24` for the Cloudflared add-on). Otherwise every remote login seems to come from the proxy, and a ban would lock out everyone.
+  - To let a banned address in again, delete its line from `ip_bans.yaml` and restart.
+- **An account can sign in with a password alone.** Turn on two-factor login for every account that signs in from outside: the person's profile, **Security**, **Authenticator app**. Phones and browsers already signed in stay signed in; a new one asks for the code once. An account that never needs remote access can be set to **Local access only** under **Settings** → **People**.
+
+Auri only checks when Home Assistant looks reachable from outside: an external URL, Home Assistant Cloud's remote access, or a trusted reverse proxy. It checks when Home Assistant starts and every hour.
+
+For a holiday rental, also keep the guests' Wi-Fi apart from Home Assistant and the voice satellites (most routers call it a guest network or client isolation): anyone on the same network can reach Home Assistant directly, without going through the tunnel.
+
 ## Troubleshooting
 
 | What you see or hear | What to do |
