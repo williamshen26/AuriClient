@@ -165,7 +165,7 @@ Who uses each Home Assistant login: its own person, someone else, Shared, or Not
 
 **Auri support** (homes Auri set up)
 
-The Home Assistant account Auri support signs in with. Each time it signs in, the household is told, in Home Assistant and on the phones with the Home Assistant app, and each sign-in ends by itself 12 hours later. See [Auri support's account](#auri-supports-account). Leave it on None if Auri didn't set up your Home Assistant.
+The Home Assistant account Auri support signs in with. Each time it signs in, the household is told, in Home Assistant and on the phones with the Home Assistant app, and each sign-in ends by itself 12 hours later. See [Auri support's account](#auri-supports-account). Until something is chosen here, the account whose username is `support` counts as Auri support's: choose None if Auri didn't set up your Home Assistant and you have an account with that name.
 
 **Metrics** (optional)
 
@@ -406,7 +406,7 @@ Auri only checks when Home Assistant looks reachable from outside: an external U
 
 ### Auri support's account
 
-On a Home Assistant that Auri set up, Auri support has an account of its own to help you remotely, with two-factor login. Choose it under **Auri support** in the [options](#options) (Auri does this when it sets up your hub). Then:
+On a Home Assistant that Auri set up, Auri support has an account of its own to help you remotely, with two-factor login. It's the account whose username is `support`, unless another one (or None) is chosen under **Auri support** in the [options](#options). Then:
 
 - **You're told each time it signs in**: a notification in Home Assistant and on the phones with the Home Assistant app, saying whether it was in a browser or the app, and from which address. A long-lived access token made for it is announced the same way.
 - **Each sign-in ends 12 hours after it was made**, in use or not: the browser or app is signed out, and a long-lived access token stops working. Home Assistant would otherwise keep a sign-in for 90 days after its last use.

@@ -1,7 +1,8 @@
 """Auri support's account on a hub: each sign-in is announced, and each session ends after 12 hours.
 
-On hubs Auri sets up, Auri staff sign in remotely with one admin account, chosen under Auri
-support in the options. Home Assistant keeps a sign-in for 90 days after its last use, so a
+On hubs Auri sets up, Auri staff sign in remotely with one admin account: the one chosen under
+Auri support in the options or, until something is chosen there, the account whose username is
+`support` (the name Auri gives it on every hub it sets up; choosing None turns this off). Home Assistant keeps a sign-in for 90 days after its last use, so a
 staff member who signed in once could stay signed in for months. With the account chosen:
 - every new sign-in of that account, and every long-lived access token made for it, is
   announced to the household: a notification in Home Assistant and on their phones;
@@ -67,6 +68,22 @@ async def async_people_logins(hass: HomeAssistant) -> list[auth_models.User]:
     return sorted(users, key=lambda user: (user.name or "").casefold())
 
 
+async def async_default_support_user(hass: HomeAssistant) -> auth_models.User | None:
+    """The account Auri support uses when none was chosen: the active one whose username is `support`."""
+    for user in await async_people_logins(hass):
+        if (username_of(user) or "").casefold() == SUPPORT_USERNAME:
+            return user
+    return None
+
+
+async def async_support_user(hass: HomeAssistant, options: dict[str, Any]) -> auth_models.User | None:
+    """Auri support's account: the one chosen under Auri support, or by default the one named `support`."""
+    if CONF_SUPPORT_USER not in options:
+        return await async_default_support_user(hass)
+    user_id = support_user_id(options)
+    return None if user_id is None else await hass.auth.async_get_user(user_id)
+
+
 def _sessions(user: auth_models.User) -> list[auth_models.RefreshToken]:
     """The account's sign-ins and long-lived access tokens (copied: ending one changes the dict)."""
     return [token for token in user.refresh_tokens.values() if token.token_type != auth_models.TOKEN_TYPE_SYSTEM]
@@ -123,14 +140,9 @@ class SupportSessions:
     async def _async_tick(self, _now: datetime) -> None:
         await self.async_check()
 
-    @property
-    def user_id(self) -> str | None:
-        return support_user_id(dict(self.entry.options))
-
     async def async_user(self) -> auth_models.User | None:
-        """The account chosen under Auri support, when it still exists."""
-        user_id = self.user_id
-        return None if user_id is None else await self.hass.auth.async_get_user(user_id)
+        """Auri support's account (chosen, or by default the one named `support`), when it exists."""
+        return await async_support_user(self.hass, dict(self.entry.options))
 
     @property
     def last_sign_in(self) -> datetime | None:

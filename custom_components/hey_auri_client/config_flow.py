@@ -98,7 +98,7 @@ from .memory.db import MemoryDbError, test_connection
 from .saas_client import SaaSClient
 from .memory.logins import answers, async_logins, logins_form, names_text, unanswered
 from .memory.obsidian import validate_vault
-from .support import NO_SUPPORT_USER, SUPPORT_USERNAME, async_people_logins, support_user_id, username_of
+from .support import NO_SUPPORT_USER, async_default_support_user, async_people_logins, support_user_id, username_of
 
 _LOGGER = logging.getLogger(__name__)
 # Memory text fields an empty input clears (rather than keeping the old value).
@@ -793,10 +793,9 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         current = support_user_id(options)
         if CONF_SUPPORT_USER not in options:
-            # Never chosen: suggest the account Auri gives its support staff on the hubs it sets up.
-            current = next(
-                (user.id for user in users if (username_of(user) or "").casefold() == SUPPORT_USERNAME), None
-            )
+            # Never chosen: the account named support already counts as Auri support's.
+            default = await async_default_support_user(self.hass)
+            current = None if default is None else default.id
         choices = [selector.SelectOptionDict(value=NO_SUPPORT_USER, label="None")]
         for user in users:
             username = username_of(user)

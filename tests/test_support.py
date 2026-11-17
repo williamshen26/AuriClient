@@ -157,16 +157,36 @@ async def test_sign_ins_end_12_hours_after_they_were_made(hass: HomeAssistant, n
     assert await sessions.async_signed_in()
 
 
-async def test_nothing_happens_until_an_account_is_chosen(hass: HomeAssistant, notices, watcher, freezer) -> None:
+async def test_until_one_is_chosen_the_account_named_support_counts(hass: HomeAssistant, notices, watcher, freezer) -> None:
+    """Nobody opened Auri support in the options: the account Auri names support on its hubs is used."""
     staff = await _account(hass, "Auri support", "support")
+    earlier = await hass.auth.async_create_refresh_token(staff, BROWSER)  # staff setting up the hub
     sessions = await watcher(_entry(hass, {}))
+    assert notices == []
+
     token = await hass.auth.async_create_refresh_token(staff, BROWSER)
+    await sessions.async_check()
+    assert len(notices) == 1 and notices[0][2].endswith(token.id[:12])
+
+    freezer.tick(timedelta(hours=12))
+    await sessions.async_check()
+    assert earlier.id not in staff.refresh_tokens and token.id not in staff.refresh_tokens
+
+
+@pytest.mark.parametrize("options", [{}, {CONF_SUPPORT_USER: NO_SUPPORT_USER}])
+async def test_nothing_happens_with_none_chosen_or_no_account_named_support(
+    hass: HomeAssistant, notices, watcher, freezer, options: dict
+) -> None:
+    username = "support" if options else "helper"  # None chosen; or never chosen, and nobody named support
+    user = await _account(hass, "Someone", username)
+    sessions = await watcher(_entry(hass, options))
+    token = await hass.auth.async_create_refresh_token(user, BROWSER)
 
     freezer.tick(timedelta(hours=13))
     await sessions.async_check()
 
     assert notices == []
-    assert token.id in staff.refresh_tokens
+    assert token.id in user.refresh_tokens
     assert not await sessions.async_signed_in()
 
 
