@@ -278,3 +278,57 @@ async def test_a_satellite_woken_by_the_wake_word_starts_a_fresh_request(
     await ask(agent, "What's the weather tomorrow?")  # within the follow-up window, but said with the wake word
 
     assert "follow_up" not in agent.client.payloads[1]["context"]  # never treated as overheard
+
+
+ADD_AUTOMATION = {
+    "id": "a1", "type": "function",
+    "function": {"name": "add_automation", "arguments": json.dumps({"automation_config": {"alias": "Lights off at 11"}})},
+}
+
+
+async def _ask_to_automate(hass: HomeAssistant, agent: ThinOpenAIAgent, user_id: str | None, device_id: str | None):
+    """Asks for an automation as this user, or at a satellite; what the backend got back and was sent."""
+    agent.client = ScriptedClient(
+        SaaSTurnResponse(response_type="tool_calls", conversation_id="c1", turn_id="r1", tool_calls=[ADD_AUTOMATION], mode="owner"),
+        final("Done."),
+    )
+    ran: list[dict] = []
+
+    async def add_automation(arguments: dict) -> dict:
+        ran.append(arguments)
+        return {"success": True}
+
+    agent.tool_executor._handlers["add_automation"] = add_automation  # noqa: SLF001
+    await agent.async_process(
+        conversation.ConversationInput(
+            text="Turn the lights off every night at 11", context=Context(user_id=user_id), conversation_id="c1",
+            device_id=device_id, satellite_id=None, language="en", agent_id="hey_auri_client",
+        )
+    )
+    first, results = agent.client.payloads[0], agent.client.payloads[1]
+    return first["context"], results["tool_results"][0]["result"], ran
+
+
+async def test_a_signed_in_user_who_isnt_an_admin_cant_add_automations(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
+    await hass.auth.async_create_user("Will", group_ids=["system-admin"])  # the first account is the owner
+    kid = await hass.auth.async_create_user("Kid", group_ids=["system-users"])
+
+    context, result, ran = await _ask_to_automate(hass, agent, kid.id, None)
+
+    assert context["user_is_admin"] is False  # the backend then doesn't offer the automation skill
+    assert ran == []
+    assert "Only an administrator" in result["error"]
+
+
+@pytest.mark.parametrize("who", ["admin", "satellite"])
+async def test_admins_and_satellites_still_add_automations(hass: HomeAssistant, agent: ThinOpenAIAgent, who: str) -> None:
+    """A satellite has no signed-in user: unchanged, as before."""
+    if who == "admin":
+        user = await hass.auth.async_create_user("Will", group_ids=["system-admin"])
+        context, result, ran = await _ask_to_automate(hass, agent, user.id, None)
+        assert context["user_is_admin"] is True
+    else:
+        context, result, ran = await _ask_to_automate(hass, agent, None, "satellite-1")
+        assert context["user_is_admin"] is None
+
+    assert len(ran) == 1 and result == {"success": True}

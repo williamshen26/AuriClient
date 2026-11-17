@@ -120,7 +120,8 @@ async def build_context_snapshot(
     user_input: conversation.ConversationInput,
 ) -> dict[str, Any]:
     """Build the structured context payload sent to the SaaS backend."""
-    user_name = await get_user_name(hass, user_input.context.user_id)
+    user = await hass.auth.async_get_user(user_input.context.user_id) if user_input.context.user_id else None
+    user_name = None if user is None else user.name
     # Home Assistant's clock, in the time zone set in Home Assistant (the time_zone sent below).
     # Not the process's local time: its zone comes from the container's TZ or the host (UTC in
     # a container without TZ), and doesn't follow a change to Home Assistant's setting.
@@ -132,6 +133,9 @@ async def build_context_snapshot(
         "response_language": get_response_language(hass),
         "text": user_input.text,
         "user_name": user_name,
+        # Whether the signed-in user is an administrator; None without one (a satellite, an
+        # automation). The backend hides the automation skill from users who aren't.
+        "user_is_admin": None if user is None else bool(user.is_admin),
         "satellite_speaker": get_device_media_player(hass, user_input.device_id),
         "request_area": get_request_area(hass, user_input.device_id),
         "exposed_entities": get_exposed_entities(hass),
@@ -145,16 +149,6 @@ async def build_context_snapshot(
         "now": now.isoformat(),
         "day_of_week": now.strftime("%A"),
     }
-
-
-async def get_user_name(
-    hass: HomeAssistant, user_id: str | None
-) -> str | None:
-    """Resolve the current Home Assistant user's display name."""
-    if user_id is None:
-        return None
-    user = await hass.auth.async_get_user(user_id)
-    return None if user is None else user.name
 
 
 def get_response_language(hass: HomeAssistant) -> str:

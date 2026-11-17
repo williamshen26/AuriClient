@@ -316,7 +316,13 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             login_people=self.entry.options.get(CONF_MEMORY_LOGIN_PEOPLE),
         )
         # Filled in from each backend response: it alone decides mode and memory.
-        turn = TurnMeta(mode=None, memory_allowed=False, conversation_id=conversation_id, speaker=speaker)
+        turn = TurnMeta(
+            mode=None,
+            memory_allowed=False,
+            conversation_id=conversation_id,
+            speaker=speaker,
+            user_is_admin=context.get("user_is_admin"),
+        )
         if self.memory is not None:
             context["memory"] = await self.memory.async_turn_context(user_input.text, speaker, conversation_id)
         timeline.mark(self.hass, "context_ready")

@@ -23,6 +23,7 @@ from .bookings.calendar import CalendarError, bookings_only_feed, fetch_calendar
 from .bookings.guest_name import host_guest_name, stated_guest_name
 from .bookings.schedule import current_stay
 from .const import (
+    CONF_SUPPORT_USER,
     API_ENDPOINT,
     CONF_BOOKING_CALENDAR_SOURCE,
     CONF_BOOKING_CALENDAR_URL,
@@ -97,6 +98,7 @@ from .memory.db import MemoryDbError, test_connection
 from .saas_client import SaaSClient
 from .memory.logins import answers, async_logins, logins_form, names_text, unanswered
 from .memory.obsidian import validate_vault
+from .support import NO_SUPPORT_USER, SUPPORT_USERNAME, async_people_logins, support_user_id, username_of
 
 _LOGGER = logging.getLogger(__name__)
 # Memory text fields an empty input clears (rather than keeping the old value).
@@ -319,7 +321,7 @@ class OptionsFlow(config_entries.OptionsFlow):
         """Show options group menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["general", "guest", "booking_calendar", "memory", "logins", "metrics"],
+            menu_options=["general", "guest", "booking_calendar", "memory", "logins", "support", "metrics"],
         )
 
     async def async_step_general(
@@ -777,6 +779,39 @@ class OptionsFlow(config_entries.OptionsFlow):
             data_schema=schema,
             description_placeholders={"preselected": _preselected_text(preselected)},
         )
+
+    async def async_step_support(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Choose the account Auri support signs in with: its sign-ins are announced and end after 12 hours."""
+        users = await async_people_logins(self.hass)
+        options = dict(self.config_entry.options)
+        if user_input is not None:
+            chosen = str(user_input.get(CONF_SUPPORT_USER) or NO_SUPPORT_USER)
+            options[CONF_SUPPORT_USER] = chosen if chosen in {user.id for user in users} else NO_SUPPORT_USER
+            return self.async_create_entry(title="", data=options)
+
+        current = support_user_id(options)
+        if CONF_SUPPORT_USER not in options:
+            # Never chosen: suggest the account Auri gives its support staff on the hubs it sets up.
+            current = next(
+                (user.id for user in users if (username_of(user) or "").casefold() == SUPPORT_USERNAME), None
+            )
+        choices = [selector.SelectOptionDict(value=NO_SUPPORT_USER, label="None")]
+        for user in users:
+            username = username_of(user)
+            label = f"{user.name} ({username})" if username and username != user.name else str(user.name or user.id)
+            choices.append(selector.SelectOptionDict(value=user.id, label=label))
+        if current not in {user.id for user in users}:
+            current = NO_SUPPORT_USER
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_SUPPORT_USER, default=current): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=choices, mode=selector.SelectSelectorMode.DROPDOWN)
+                ),
+            }
+        )
+        return self.async_show_form(step_id="support", data_schema=schema)
 
     async def async_step_metrics(
         self, user_input: dict[str, Any] | None = None

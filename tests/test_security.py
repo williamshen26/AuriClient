@@ -5,6 +5,7 @@ Uses pytest-homeassistant-custom-component (Linux only).
 """
 from __future__ import annotations
 
+from datetime import timedelta
 import ipaddress
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -153,3 +154,93 @@ async def test_a_failing_check_never_raises(hass: HomeAssistant, monkeypatch, ca
     await security.async_update_security_issues(hass)
 
     assert "Couldn't check how Home Assistant's remote logins are protected" in caplog.text
+
+
+class _Backend:
+    """Hey Auri's API, keeping each summary sent (or failing while `down`)."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.down = False
+
+    async def post_json(self, path: str, payload: dict, **_kwargs) -> dict:
+        assert path == security.SECURITY_REPORT_PATH
+        if self.down:
+            raise ConnectionError("no route to host")
+        self.sent.append(payload)
+        return {"ok": True}
+
+
+async def test_the_summary_has_counts_and_yes_or_no_only(hass: HomeAssistant, two_factor, monkeypatch) -> None:
+    from pytest_homeassistant_custom_component.common import MockConfigEntry  # pylint: disable=import-outside-toplevel
+
+    from custom_components.hey_auri_client.const import CONF_SUPPORT_USER  # pylint: disable=import-outside-toplevel
+    from custom_components.hey_auri_client.support import SupportSessions  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setattr(hass, "http", _server(threshold=None, proxies=TUNNEL))
+    await _account(hass, "Will")
+    staff = await _account(hass, "Support")
+    await _account(hass, "Guest tablet", local_only=True)
+    two_factor.add("Will")
+    hass.states.async_set("update.home_assistant_core_update", "on")
+    hass.states.async_set("update.zigbee2mqtt_update", "on")
+    hass.states.async_set("update.home_assistant_operating_system_update", "off")
+    entry = MockConfigEntry(domain=DOMAIN, options={CONF_SUPPORT_USER: staff.id})
+    entry.add_to_hass(hass)
+    support = SupportSessions(hass, entry)
+    await support.async_start()
+    signed_in = await hass.auth.async_create_refresh_token(staff, "https://h-0a1b2c3d4e5f.hey-auri.com/")
+    await support.async_check()
+    support.async_stop()
+
+    summary = await security.async_security_summary(hass, support, "0.2.0")
+
+    from homeassistant.const import __version__  # pylint: disable=import-outside-toplevel
+
+    assert summary == {
+        "v": 1,
+        "ha_version": __version__,
+        "client_version": "0.2.0",
+        "remote_access": True,
+        "accounts_without_two_factor": 1,  # Support (the tablet is home-only)
+        "login_lockout": False,
+        "updates_waiting": 2,
+        "support_account": True,
+        "support_two_factor": False,
+        "support_signed_in": True,
+        "support_last_sign_in": signed_in.created_at.isoformat(),
+    }
+    assert "Will" not in str(summary) and "Support" not in str(summary)
+
+    none_chosen = await security.async_security_summary(hass, None, "0.2.0")
+    assert none_chosen["support_account"] is False
+    assert none_chosen["support_two_factor"] is None and none_chosen["support_last_sign_in"] is None
+
+
+async def test_the_summary_is_sent_when_it_changes_and_daily(hass: HomeAssistant, freezer) -> None:
+    backend = _Backend()
+    reporter = security.SecurityReporter(backend)
+    summary = {"v": 1, "accounts_without_two_factor": 1}
+
+    assert await reporter.async_report(summary) is True
+    freezer.tick(timedelta(hours=1))
+    assert await reporter.async_report(dict(summary)) is False  # the same, an hour later
+    assert await reporter.async_report({**summary, "accounts_without_two_factor": 0}) is True
+    freezer.tick(timedelta(hours=23, minutes=59))
+    assert await reporter.async_report({**summary, "accounts_without_two_factor": 0}) is False
+    freezer.tick(timedelta(minutes=1))
+    assert await reporter.async_report({**summary, "accounts_without_two_factor": 0}) is True  # a day on
+
+    assert [sent["accounts_without_two_factor"] for sent in backend.sent] == [1, 0, 0]
+
+
+async def test_a_failed_send_is_tried_again_at_the_next_check(hass: HomeAssistant) -> None:
+    backend = _Backend()
+    reporter = security.SecurityReporter(backend)
+    backend.down = True
+
+    assert await reporter.async_report({"v": 1}) is False  # never raises
+
+    backend.down = False
+    assert await reporter.async_report({"v": 1}) is True
+    assert backend.sent == [{"v": 1}]

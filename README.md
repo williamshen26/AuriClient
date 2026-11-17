@@ -69,7 +69,7 @@ When Auri expects an answer right away, it keeps listening, so you don't need th
 
 Choose the mode on your dashboard at hey-auri.com:
 
-- **Owner**: everything described above, including automations and [memory](#memory).
+- **Owner**: everything described above, including automations and [memory](#memory). Only Home Assistant administrators can add, change or remove automations through Auri, as in Home Assistant itself: Auri doesn't offer it to a signed-in user who isn't one. Requests from a voice satellite have no signed-in user, and can.
 - **Guest**: for rental guests.
   - Automation editing is turned off, and Auri never uses what it remembers about your household. Guests get memory of their own only if you turn on [guest memory](#guest-memory); otherwise nothing they say is saved.
   - Auri answers questions using the [Guest options](#options) and can send you a notification.
@@ -162,6 +162,10 @@ Connects Auri's long-term memory to your PostgreSQL database. See [Memory](#memo
 **Who uses each login** (with memory)
 
 Who uses each Home Assistant login: its own person, someone else, Shared, or Not a person. See [Who is speaking](#who-is-speaking).
+
+**Auri support** (homes Auri set up)
+
+The Home Assistant account Auri support signs in with. Each time it signs in, the household is told, in Home Assistant and on the phones with the Home Assistant app, and each sign-in ends by itself 12 hours later. See [Auri support's account](#auri-supports-account). Leave it on None if Auri didn't set up your Home Assistant.
 
 **Metrics** (optional)
 
@@ -374,6 +378,11 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - the current time, the Home Assistant user's name, the language, and which device and area you're speaking from;
   - whether a booking is under way, whether anyone from your household is home (yes or no, not who), and whether Auri should ask the guests their name.
 - **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech. When a satellite starts listening after a quiet half-minute, two signed requests with nothing in them get the cloud ready while you speak.
+- **Whether the signed-in user is an administrator** (yes or no), so automations are offered only to administrators.
+- **Hourly, when something changed, and once a day anyway: your hub's security, as counts and yes or no only**, shown under Hub security on your dashboard at hey-auri.com, and to Auri support to see which hubs need attention:
+  - the Home Assistant and Hey Auri Client versions, and how many updates are waiting;
+  - whether Home Assistant is reachable from outside the home, whether failed logins lock anyone out, and how many accounts can sign in from outside without two-factor login (the number, not who);
+  - whether Auri support's account is chosen, has two-factor login and is signed in now, and when it last signed in.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.
 - **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):
   - with each request: the speaker's name, the names of the household's people and pets, and the memory notes and profile Home Assistant picked for that message;
@@ -394,6 +403,15 @@ With remote access, through a tunnel such as the Cloudflared add-on, Home Assist
 - **An account can sign in with a password alone.** Turn on two-factor login for every account that signs in from outside: the person's profile, **Security**, **Authenticator app**. Phones and browsers already signed in stay signed in; a new one asks for the code once. An account that never needs remote access can be set to **Local access only** under **Settings** → **People**.
 
 Auri only checks when Home Assistant looks reachable from outside: an external URL, Home Assistant Cloud's remote access, or a trusted reverse proxy. It checks when Home Assistant starts and every hour.
+
+### Auri support's account
+
+On a Home Assistant that Auri set up, Auri support has an account of its own to help you remotely, with two-factor login. Choose it under **Auri support** in the [options](#options) (Auri does this when it sets up your hub). Then:
+
+- **You're told each time it signs in**: a notification in Home Assistant and on the phones with the Home Assistant app, saying whether it was in a browser or the app, and from which address. A long-lived access token made for it is announced the same way.
+- **Each sign-in ends 12 hours after it was made**, in use or not: the browser or app is signed out, and a long-lived access token stops working. Home Assistant would otherwise keep a sign-in for 90 days after its last use.
+
+Auri checks the account's sign-ins every minute. Sign-ins already there when the account is chosen aren't announced, but they end 12 hours after they were made too. To stop Auri support signing in at all, turn off **Active** for its user under **Settings** → **People** → **Users**.
 
 For a holiday rental, also keep the guests' Wi-Fi apart from Home Assistant and the voice satellites (most routers call it a guest network or client isolation): anyone on the same network can reach Home Assistant directly, without going through the tunnel.
 

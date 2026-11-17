@@ -28,6 +28,8 @@ from .const import (
     DATA_AGENT,
     DATA_BOOKINGS,
     DATA_MEMORY,
+    DATA_SECURITY_REPORT,
+    DATA_SUPPORT,
     DOMAIN,
     LEGACY_USER_DATA_DIR,
     MEDIA_PLAYER_MACS_STORAGE_KEY,
@@ -40,7 +42,14 @@ from .memory.legacy import relocate_legacy_user_data
 from .memory.logins import async_delete_logins_issue, async_update_logins_issue
 from .memory.names import async_delete_names_issue, async_update_names_issue
 from .memory.runtime import MemoryRuntime
-from .security import SECURITY_CHECK_INTERVAL, async_delete_security_issues, async_update_security_issues
+from .security import (
+    SECURITY_CHECK_INTERVAL,
+    SecurityReporter,
+    async_delete_security_issues,
+    async_security_summary,
+    async_update_security_issues,
+)
+from .support import SupportSessions
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,15 +151,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     agent.attach_memory(memory)
 
     bookings = BookingSync(hass, entry)
+    # The account Auri support signs in with (Auri support in the options): its sign-ins are
+    # announced, and each ends after 12 hours.
+    support = SupportSessions(hass, entry)
+    reporter = SecurityReporter(agent.client)
+    client_version = str(integration.version or "unknown")
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     data[DATA_AGENT] = agent
     data[DATA_MEMORY] = memory
     data[DATA_BOOKINGS] = bookings
+    data[DATA_SUPPORT] = support
+    data[DATA_SECURITY_REPORT] = reporter
 
     # Connects in the background; conversations work (without memory) meanwhile.
     await memory.async_start()
     await bookings.async_start()
+    await support.async_start()
+    entry.async_on_unload(support.async_stop)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     async def _async_check_logins(hass: HomeAssistant) -> None:
@@ -161,15 +179,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _async_check_security(*_: Any) -> None:
         await async_update_security_issues(hass)
+        await _async_report_security(hass, entry, client_version)
 
     # With remote access: notices for accounts without two-factor and for unlimited failed
-    # logins. Hourly too, since turning two-factor on fires no event.
+    # logins. Hourly too, since turning two-factor on fires no event. The same checks go to
+    # Hey Auri as counts (the dashboard's Hub security) when they change.
     entry.async_on_unload(async_at_started(hass, _async_check_security))
     entry.async_on_unload(async_track_time_interval(hass, _async_check_security, SECURITY_CHECK_INTERVAL))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     ha_conversation.async_set_agent(hass, entry, agent)
     return True
+
+
+async def _async_report_security(hass: HomeAssistant, entry: ConfigEntry, client_version: str) -> None:
+    """Send the hub's security summary to Hey Auri if it changed. Never raises."""
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    reporter: SecurityReporter | None = data.get(DATA_SECURITY_REPORT)
+    if reporter is None:
+        return
+    try:
+        summary = await async_security_summary(hass, data.get(DATA_SUPPORT), client_version)
+    except Exception:  # noqa: BLE001 (a report must never break the integration)
+        _LOGGER.exception("Couldn't put together the hub security summary")
+        return
+    await reporter.async_report(summary)
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -185,6 +219,10 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     await async_update_logins_issue(hass, entry)
     # And memory off removes the one about names spelled two ways.
     await async_update_names_issue(hass, entry, memory)
+    # Another account chosen under Auri support: from now on, its sign-ins are announced.
+    support: SupportSessions | None = data.get(DATA_SUPPORT)
+    if support is not None:
+        await support.async_check()
 
 
 async def _async_relocate_legacy_user_data(hass: HomeAssistant) -> None:

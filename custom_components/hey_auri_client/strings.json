@@ -46,6 +46,7 @@
           "booking_calendar": "Booking calendar",
           "memory": "Memory",
           "logins": "Who uses each login",
+          "support": "Auri support",
           "metrics": "Metrics"
         }
       },
@@ -132,6 +133,13 @@
       "logins": {
         "title": "Who uses each login",
         "description": "When someone uses Assist signed in to Home Assistant, Auri uses the memories of the person their login is linked to. Choose someone else if another person uses a login (for example, you sign in as admin). Choose Shared for a login the household shares, like a wall tablet: Auri then treats the speaker as unknown, as on a voice satellite. Choose Not a person for a login a service uses, like Zigbee2MQTT's MQTT login: its person isn't counted as a household member. Nothing changes in Home Assistant.{preselected}"
+      },
+      "support": {
+        "title": "Auri support",
+        "description": "On a Home Assistant that Auri set up for you, Auri support has an account of its own, to help you remotely. Choose it here, and each time it signs in, you're told: a notification here in Home Assistant and on the phones with the Home Assistant app. Each sign-in also ends by itself 12 hours later, so nobody at Auri stays signed in.\n\nChoose None if Auri didn't set up this Home Assistant.",
+        "data": {
+          "support_user_id": "Auri support's account"
+        }
       },
       "metrics": {
         "title": "Metrics settings",

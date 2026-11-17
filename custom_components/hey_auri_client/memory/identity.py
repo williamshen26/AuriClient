@@ -46,6 +46,8 @@ class TurnMeta:
     memory_allowed: bool
     conversation_id: str | None
     speaker: Speaker | None = None
+    # Whether the signed-in user is an administrator; None without one (a satellite, an automation).
+    user_is_admin: bool | None = None
 
 
 def household_persons(hass: HomeAssistant, login_people: Mapping[str, str] | None = None) -> list[dict[str, Any]]:

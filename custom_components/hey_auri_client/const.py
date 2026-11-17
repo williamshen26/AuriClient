@@ -211,6 +211,12 @@ DATA_AGENT = "agent"
 DATA_BOOKINGS = "bookings"
 DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
+DATA_SUPPORT = "support"
+DATA_SECURITY_REPORT = "security_report"
+
+# The Home Assistant account Auri support signs in with (a user id), set under Auri support in
+# the options. Unset: no account is treated as Auri support's.
+CONF_SUPPORT_USER = "support_user_id"
 
 # Long-term memory (owner mode). Option keys live next to MemoryConfig so the
 # memory package doesn't depend on this module.

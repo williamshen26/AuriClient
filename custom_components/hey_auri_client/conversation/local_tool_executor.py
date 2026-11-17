@@ -27,6 +27,16 @@ if TYPE_CHECKING:
     from ..memory.runtime import MemoryRuntime
 
 MEMORY_TOOL_NAMES = frozenset({"recall_memory", "remember_memory", "forget_memory"})
+# Read and change Home Assistant's automations: administrators only, as in Home Assistant itself.
+AUTOMATION_TOOL_NAMES = frozenset(
+    {"get_automation_metadata_service", "add_automation", "update_automation", "remove_automation"}
+)
+ADMIN_ONLY_RESULT = {
+    "error": (
+        "Only an administrator of this Home Assistant can see, add, change or remove its automations, "
+        "and the person signed in isn't one. Tell them that, and don't try to do it another way."
+    )
+}
 
 
 class LocalToolExecutor:
@@ -154,7 +164,11 @@ class LocalToolExecutor:
             arguments["_turn"] = turn
             arguments["_memory_embedding"] = function_payload.get("memory_embedding")
 
-        if function_name in self._handlers:
+        if function_name in AUTOMATION_TOOL_NAMES and turn is not None and turn.user_is_admin is False:
+            # The backend doesn't offer these to a signed-in user who isn't an administrator;
+            # refused here too, in case they're called anyway.
+            result = dict(ADMIN_ONLY_RESULT)
+        elif function_name in self._handlers:
             result = await self._handlers[function_name](arguments)
         else:
             result = {
