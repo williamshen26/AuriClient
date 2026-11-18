@@ -1,6 +1,9 @@
 start_auri_timer:
-  name: Start AURI timer
-  description: Start a thin-integration AURI timer.
+  name: Start Auri timer
+  description: >-
+    Start a timer, shown on the dashboard. It rings on the device given (a voice satellite, or a phone
+    with the Home Assistant app). Without one, the phones of whoever started it get a notification
+    when it ends, or everyone's.
   fields:
     duration:
       required: true
@@ -10,6 +13,16 @@ start_auri_timer:
           min: 1
           max: 86400
           mode: box
+          unit_of_measurement: s
+    name:
+      required: false
+      example: Pasta
+      selector:
+        text:
+    device_id:
+      required: false
+      selector:
+        device:
     satellite_speaker:
       required: false
       example: media_player.kitchen
@@ -18,8 +31,8 @@ start_auri_timer:
           domain: media_player
 
 get_auri_timers:
-  name: Get AURI timers
-  description: Return all currently running thin-integration AURI timers.
+  name: Get Auri timers
+  description: Return every timer running or paused on this Home Assistant.
 
 create_auri_sticky_note:
   name: Create AURI sticky note

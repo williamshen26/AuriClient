@@ -177,7 +177,8 @@ ATTR_REMAINING = "remaining"
 ATTR_TIMER_ID = "timer_id"
 ATTR_ENTITY_ID = "entity_id"
 ATTR_SATELLITE_SPEAKER = "satellite_speaker"
-ATTR_SATELLITE_TIMER_RING = "satellite_timer_ring"
+ATTR_NAME = "name"
+ATTR_DEVICE_ID = "device_id"
 ATTR_NOTE_ID = "note_id"
 ATTR_TITLE = "title"
 ATTR_MARKDOWN = "markdown"
@@ -198,7 +199,12 @@ SERVICE_ASSIGN_MAC = "assign_mac"
 MEDIA_PLAYER_MACS_STORAGE_VERSION = 1
 MEDIA_PLAYER_MACS_STORAGE_KEY = f"{DOMAIN}_media_player_macs"
 
-EVENT_AURI_TIMER_FINISHED = f"{DOMAIN}.auri_timer_finished"
+# Fired when one of Auri's timers finishes (timers.py), for custom automations. The device it
+# was on rang by itself; Auri's own timers (set where nothing can ring) notified phones.
+EVENT_TIMER_FINISHED = f"{DOMAIN}.timer_finished"
+# What clients before 0.2.8 fired instead, for the "DO NOT DELETE" automation that rang the
+# satellite and notified every phone. No longer fired; a Repairs notice offers to delete it.
+OLD_TIMER_FINISHED_EVENT = f"{DOMAIN}.auri_timer_finished"
 EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"
 # A satellite's firmware fires this when the user starts a request: the wake word or the button.
 # Home Assistant doesn't tell an agent how a request started; this resets the follow-up count.
@@ -213,6 +219,7 @@ DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
 DATA_SUPPORT = "support"
 DATA_SECURITY_REPORT = "security_report"
+DATA_TIMERS = "timers"
 DATA_UPDATER = "updater"
 
 # The Home Assistant account Auri support signs in with (a user id), set under Auri support in
@@ -267,7 +274,6 @@ MEMORY_EXAM_CONVERSATION_PREFIX = "auri-exam-"
 LEGACY_USER_DATA_DIR = "hey_auri_client_legacy_user_data"
 
 ROOT_RUNTIME = {
-    "timers": {},
     "sticky_notes": {},
     "async_add_entities": None,
 }

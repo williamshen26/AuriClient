@@ -25,7 +25,6 @@ MAX_STICKY_NOTE_CONTENT_LENGTH = 8000
 def _get_runtime(hass: HomeAssistant) -> dict[str, Any]:
     """Return the integration runtime state bucket."""
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})
-    runtime.setdefault("timers", {})
     runtime.setdefault("sticky_notes", {})
     runtime.setdefault("async_add_entities", None)
     return runtime

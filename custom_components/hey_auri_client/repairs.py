@@ -1,5 +1,6 @@
 """The fixes for the integration's Repairs notices: logins that look like a service's (memory/logins.py),
-and names that may be one pet or person spelled two ways (memory/names.py)."""
+names that may be one pet or person spelled two ways (memory/names.py), and the automation that rang
+timers before 0.2.8 (timer_automation.py)."""
 from __future__ import annotations
 
 from typing import Any
@@ -17,6 +18,12 @@ from .memory.names import (
     async_update_names_issue,
     names_form,
     names_text as pairs_text,
+)
+from .timer_automation import (
+    OLD_TIMER_AUTOMATION_ISSUE,
+    async_delete_old_timer_automations,
+    async_old_timer_automations,
+    async_update_old_timer_automation_issue,
 )
 
 
@@ -78,11 +85,33 @@ class SimilarNamesRepairFlow(RepairsFlow):
         )
 
 
+class OldTimerAutomationRepairFlow(RepairsFlow):
+    """Delete the automation that rang Auri's timers before they rang on their own device."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> RepairsFlowResult:
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(self, user_input: dict[str, Any] | None = None) -> RepairsFlowResult:
+        found = await async_old_timer_automations(self.hass)
+        if not found:
+            await async_update_old_timer_automation_issue(self.hass)
+            return self.async_abort(reason="gone")
+        if user_input is not None:
+            await async_delete_old_timer_automations(self.hass)
+            return self.async_create_entry(data={})
+        return self.async_show_form(
+            step_id="confirm",
+            description_placeholders={"automations": ", ".join(f"“{item['name']}”" for item in found)},
+        )
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict[str, Any] | None
 ) -> RepairsFlow:
     """The fix for one of the integration's notices, by the notice's id."""
     entry_id = str((data or {}).get("entry_id") or "")
+    if issue_id == OLD_TIMER_AUTOMATION_ISSUE:
+        return OldTimerAutomationRepairFlow()
     if issue_id.startswith(SIMILAR_NAMES_ISSUE):
         return SimilarNamesRepairFlow(entry_id)
     return ServiceLoginsRepairFlow(entry_id)

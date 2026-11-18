@@ -1,4 +1,5 @@
-"""Registers this integration's bundled frontend assets (custom Lovelace cards)."""
+"""Registers this integration's bundled frontend assets: the session QR card, and the Home dashboard's
+strategies (dashboard/ in the repository, built into www/auri-dashboard.js), on every page."""
 from __future__ import annotations
 
 import hashlib
@@ -11,8 +12,9 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 
 _WWW_DIR = Path(__file__).parent / "www"
-_SESSION_QR_CARD_FILE = _WWW_DIR / "session-qr-card.js"
-_SESSION_QR_CARD_URL = f"/{DOMAIN}/session-qr-card.js"
+# Served at /hey_auri_client/<file>. The dashboard used to be copied to /config/www/dashboards and
+# added as a resource by hand; it now updates with the client.
+_ASSET_FILES = ("session-qr-card.js", "auri-dashboard.js")
 
 
 def _asset_version(path: Path) -> str:
@@ -29,16 +31,13 @@ def _asset_version(path: Path) -> str:
 
 
 async def async_register_frontend_resources(hass: HomeAssistant) -> None:
-    """Serve session-qr-card.js and register it to auto-load on every dashboard."""
+    """Serve the assets and register each to load on every dashboard."""
     await hass.http.async_register_static_paths(
         [
-            StaticPathConfig(
-                _SESSION_QR_CARD_URL,
-                str(_SESSION_QR_CARD_FILE),
-                cache_headers=False,
-            )
+            StaticPathConfig(f"/{DOMAIN}/{name}", str(_WWW_DIR / name), cache_headers=False)
+            for name in _ASSET_FILES
         ]
     )
-    version = await hass.async_add_executor_job(_asset_version, _SESSION_QR_CARD_FILE)
-    versioned_url = f"{_SESSION_QR_CARD_URL}?v={version}"
-    add_extra_js_url(hass, versioned_url)
+    for name in _ASSET_FILES:
+        version = await hass.async_add_executor_job(_asset_version, _WWW_DIR / name)
+        add_extra_js_url(hass, f"/{DOMAIN}/{name}?v={version}")

@@ -333,6 +333,9 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             conversation_id=conversation_id,
             speaker=speaker,
             user_is_admin=context.get("user_is_admin"),
+            device_id=user_input.device_id,
+            user_id=user_input.context.user_id,
+            language=user_input.language,
         )
         if self.memory is not None:
             context["memory"] = await self.memory.async_turn_context(user_input.text, speaker, conversation_id)

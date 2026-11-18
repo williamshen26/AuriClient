@@ -13,6 +13,7 @@ from homeassistant.helpers.typing import ConfigType
 from ..const import (
     ATTR_DATE,
     ATTR_DAYS_BACK,
+    ATTR_DEVICE_ID,
     ATTR_DURATION,
     ATTR_ENTITY_ID,
     ATTR_FILE,
@@ -20,6 +21,7 @@ from ..const import (
     ATTR_MAC,
     ATTR_SATELLITE_SPEAKER,
     ATTR_MARKDOWN,
+    ATTR_NAME,
     ATTR_NOTE_ID,
     ATTR_TITLE,
     DATA_BOOKINGS,
@@ -73,6 +75,10 @@ DELETE_STICKY_NOTE_SCHEMA = vol.Schema(
 START_TIMER_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_DURATION): vol.Any(int, float, str),
+        vol.Optional(ATTR_NAME): vol.All(str, vol.Length(max=100)),
+        # Where it rings: a satellite or a phone with the app. Without one (or on a device that can't
+        # ring), Auri's own timer notifies the caller's phones, or everyone's.
+        vol.Optional(ATTR_DEVICE_ID): vol.All(str, vol.Length(min=1, max=64)),
         vol.Optional(ATTR_SATELLITE_SPEAKER): vol.All(str, vol.Length(min=1, max=255)),
     }
 )
@@ -151,6 +157,9 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
                 hass,
                 duration=call.data[ATTR_DURATION],
                 satellite_speaker=call.data.get(ATTR_SATELLITE_SPEAKER),
+                name=call.data.get(ATTR_NAME),
+                device_id=call.data.get(ATTR_DEVICE_ID),
+                user_id=call.context.user_id,
             )
         except (HomeAssistantError, ValueError, vol.error.MultipleInvalid) as err:
             raise HomeAssistantError(str(err)) from err

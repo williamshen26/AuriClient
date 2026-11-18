@@ -195,6 +195,20 @@
     "remote_login_lockout_off": {
       "title": "Failed logins never lock anyone out",
       "description": "Home Assistant can be reached from outside your home (remote access), and anyone can try passwords on its login page without limit: no address is banned after failed logins.\n\nIn **Settings** → **System** → **Network**, under **HTTP server**, turn on **Enable IP banning** and set **Login attempts before ban**, for example to 5.\n\nBehind a tunnel or another reverse proxy, also turn on **Trust X-Forwarded-For** and add the proxy under **Trusted proxies** (for the Cloudflared add-on, 172.30.33.0/24). Otherwise Home Assistant sees every remote login as coming from the proxy, and a ban would lock out everyone using remote access.\n\nBanned addresses are listed in ip_bans.yaml in the configuration folder: delete a line and restart Home Assistant to let that address in again."
+    },
+    "old_timer_automation": {
+      "title": "The automation that rang Auri's timers isn't needed anymore",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Delete the old timer automation",
+            "description": "Hey Auri Client now rings timers by itself: a voice satellite rings with its LED countdown, and a timer set from the phone app notifies that phone. The automation that rang them before, {automations}, no longer runs, since the event it waits for isn't sent anymore.\n\nSubmit to delete it. Your other automations stay as they are."
+          }
+        },
+        "abort": {
+          "gone": "The old timer automation has been deleted already."
+        }
+      }
     }
   }
 }

@@ -19,7 +19,7 @@ from .custom_services.light_services import LightToolService
 from .custom_services.media_player_services import MediaPlayerToolService
 from .custom_services.shopping_list_services import ShoppingListToolService
 from .custom_services.sticky_note_services import StickyNoteToolService
-from .custom_services.timer_services import TimerToolService
+from .custom_services.timer_services import TIMER_TOOL_NAMES, TimerToolService
 from .custom_services.weather_services import WeatherToolService
 from ..exceptions import ToolExecutionError
 
@@ -118,6 +118,10 @@ class LocalToolExecutor:
             "update_automation": self.automation.update_automation,
             "remove_automation": self.automation.remove_automation,
             "start_timer": self.timer.start_timer,
+            "cancel_timer": self.timer.cancel_timer,
+            "change_timer": self.timer.change_timer,
+            "pause_timer": self.timer.pause_timer,
+            "resume_timer": self.timer.resume_timer,
             "get_calendar_events": self.calendar.get_calendar_events,
             "add_calendar_event": self.calendar.add_calendar_event,
         }
@@ -163,6 +167,9 @@ class LocalToolExecutor:
         if function_name in MEMORY_TOOL_NAMES:
             arguments["_turn"] = turn
             arguments["_memory_embedding"] = function_payload.get("memory_embedding")
+        elif function_name in TIMER_TOOL_NAMES:
+            # A timer rings on the device that asked; Auri's own timer notifies the asker's phones.
+            arguments["_turn"] = turn
 
         if function_name in AUTOMATION_TOOL_NAMES and turn is not None and turn.user_is_admin is False:
             # The backend doesn't offer these to a signed-in user who isn't an administrator;

@@ -48,6 +48,11 @@ class TurnMeta:
     speaker: Speaker | None = None
     # Whether the signed-in user is an administrator; None without one (a satellite, an automation).
     user_is_admin: bool | None = None
+    # The request's device (a satellite, the phone app), its signed-in user and its language, as
+    # Home Assistant gave them: timers ring on that device (timers.py).
+    device_id: str | None = None
+    user_id: str | None = None
+    language: str | None = None
 
 
 def household_persons(hass: HomeAssistant, login_people: Mapping[str, str] | None = None) -> list[dict[str, Any]]:

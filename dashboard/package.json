@@ -1,0 +1,12 @@
+{
+  "name": "auri-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The Home dashboard's strategies, bundled into Hey Auri Client (www/auri-dashboard.js)",
+  "scripts": {
+    "build": "esbuild index.js --bundle --format=esm --outfile=../custom_components/hey_auri_client/www/auri-dashboard.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

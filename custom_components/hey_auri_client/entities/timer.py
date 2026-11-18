@@ -1,196 +1,68 @@
-"""Standalone timer entity for the thin frontend integration."""
+"""A timer's sensor, for the dashboard's timer bars (sensor.auri_timer_<id>); timers.py keeps it current.
 
+Its state is active or paused, and it changes only when the timer does: the timer bar counts down
+by itself, as it does for Home Assistant's own timer entities. The bar takes `remaining` as the
+seconds left when the state last changed, so while the timer runs, `remaining` is measured from
+then.
+"""
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-import logging
-import uuid
+from collections.abc import Callable
+import math
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.util import dt as dt_util
 
-from ..const import (
-    ATTR_DURATION,
-    ATTR_REMAINING,
-    ATTR_SATELLITE_SPEAKER,
-    ATTR_SATELLITE_TIMER_RING,
-    ATTR_TIMER_ID,
-    DOMAIN,
-    EVENT_AURI_TIMER_FINISHED,
-)
-
-# Must match the switch's `name:` in the satellite's ESPHome YAML.
-_TIMER_RINGING_ENTITY_NAME = "Timer Ringing"
-
-
-def _derive_satellite_timer_ring_entity_id(
-    hass: HomeAssistant, satellite_speaker: str | None
-) -> str | None:
-    """Find the switch entity named 'Timer Ringing' on the same device as satellite_speaker."""
-    if not satellite_speaker:
-        return None
-
-    entity_registry = er.async_get(hass)
-    speaker_entry = entity_registry.async_get(satellite_speaker)
-    if speaker_entry is None or speaker_entry.device_id is None:
-        return None
-
-    for entry in er.async_entries_for_device(entity_registry, speaker_entry.device_id):
-        if entry.domain != "switch":
-            continue
-        if (entry.name or entry.original_name) == _TIMER_RINGING_ENTITY_NAME:
-            return entry.entity_id
-
-    return None
-
-
-_LOGGER = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from ..timers import TimerRecord
 
 
 class AuriTimerEntity(SensorEntity):
-    """Dynamic AURI timer entity."""
+    """One running or paused timer."""
 
     _attr_should_poll = False
     _attr_icon = "mdi:timer-outline"
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
-        self,
-        hass: HomeAssistant,
-        timer_id: str,
-        duration_seconds: int,
-        satellite_speaker: str | None = None,
+        self, record: TimerRecord, entity_id: str, device_name: Callable[[str | None], str | None]
     ) -> None:
-        self.hass = hass
-        self.timer_id = timer_id
-        self._duration_seconds = duration_seconds
-        self._remaining_seconds = duration_seconds
-        self._satellite_speaker = satellite_speaker
-
-        self._started_at: datetime | None = None
-        self._ends_at: datetime | None = None
-        self._tick_unsub = None
-        self._running = False
-
-        self._attr_name = f"AURI Timer {timer_id}"
+        self._record = record
+        self._device_name = device_name
+        self.entity_id = entity_id
 
     @property
-    def native_value(self) -> int:
-        """Return remaining time in seconds."""
-        return self._remaining_seconds
+    def name(self) -> str:
+        # The bar's label: the timer's name when it has one.
+        return self._record.name or "Timer"
 
     @property
-    def extra_state_attributes(self) -> dict:
-        """Return extra attributes."""
+    def native_value(self) -> str:
+        return "paused" if self._record.paused else "active"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        record = self._record
+        now = dt_util.utcnow()
         return {
-            ATTR_TIMER_ID: self.timer_id,
-            ATTR_DURATION: self._duration_seconds,
-            ATTR_REMAINING: self._remaining_seconds,
-            ATTR_SATELLITE_SPEAKER: self._satellite_speaker,
-            "started_at": self._started_at.isoformat() if self._started_at else None,
-            "ends_at": self._ends_at.isoformat() if self._ends_at else None,
-            "running": self._running,
+            "timer_id": record.id,
+            "name": record.name,
+            "duration": record.duration,
+            "remaining": self._bar_remaining(now),
+            "finishes_at": record.finishes_at.isoformat() if record.finishes_at else None,
+            "device_id": record.device_id,
+            "device": self._device_name(record.device_id),
         }
 
-    async def async_start(self) -> None:
-        """Start the timer."""
-        now = datetime.now(UTC)
-        self._started_at = now
-        self._ends_at = now + timedelta(seconds=self._duration_seconds)
-        self._remaining_seconds = self._duration_seconds
-        self._running = True
-        self._schedule_next_tick()
-        self.async_write_ha_state()
-
-    def get_remaining_seconds(self) -> int:
-        """Get current remaining seconds."""
-        if not self._running or self._ends_at is None:
-            return self._remaining_seconds
-
-        now = datetime.now(UTC)
-        return max(0, int((self._ends_at - now).total_seconds()))
-
-    @callback
-    def _schedule_next_tick(self) -> None:
-        """Schedule next tick."""
-        if not self._running or self._ends_at is None:
-            return
-
-        if self._tick_unsub is not None:
-            self._tick_unsub()
-            self._tick_unsub = None
-
-        next_tick = datetime.now(UTC) + timedelta(seconds=1)
-        self._tick_unsub = async_track_point_in_utc_time(
-            self.hass,
-            self._async_tick,
-            next_tick,
-        )
-
-    @callback
-    def _async_tick(self, _now: datetime) -> None:
-        """Handle timer tick."""
-        if not self._running:
-            return
-
-        self._remaining_seconds = self.get_remaining_seconds()
-
-        if self._remaining_seconds <= 0:
-            self._remaining_seconds = 0
-            self._running = False
-
-            if self._tick_unsub is not None:
-                self._tick_unsub()
-                self._tick_unsub = None
-
-            self.async_write_ha_state()
-
-            satellite_timer_ring_entity_id = _derive_satellite_timer_ring_entity_id(
-                self.hass, self._satellite_speaker
-            )
-
-            _LOGGER.info(
-                "AURI timer %s finished. Satellite speaker: %s, Satellite timer ring entity: %s",
-                self.timer_id,
-                self._satellite_speaker,
-                satellite_timer_ring_entity_id,
-            )
-
-            self.hass.bus.async_fire(
-                EVENT_AURI_TIMER_FINISHED,
-                {
-                    ATTR_TIMER_ID: self.timer_id,
-                    "entity_id": self.entity_id,
-                    ATTR_DURATION: self._duration_seconds,
-                    ATTR_SATELLITE_SPEAKER: self._satellite_speaker,
-                    ATTR_SATELLITE_TIMER_RING: satellite_timer_ring_entity_id,
-                },
-            )
-
-            self.hass.async_create_task(self._async_remove_self())
-            return
-
-        self.async_write_ha_state()
-        self._schedule_next_tick()
-
-    async def _async_remove_self(self) -> None:
-        """Remove timer from runtime store and HA."""
-        runtime = self.hass.data[DOMAIN]["runtime"]
-        runtime["timers"].pop(self.timer_id, None)
-        await self.async_remove()
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Clean up before removal."""
-        if self._tick_unsub is not None:
-            self._tick_unsub()
-            self._tick_unsub = None
+    def _bar_remaining(self, now) -> float:
+        """Paused: the seconds left. Running: the seconds left when the state last changed."""
+        record = self._record
+        if record.finishes_at is None:
+            return math.ceil(record.remaining(now))
+        current = self.hass.states.get(self.entity_id) if self.hass is not None else None
+        since = current.last_changed if current is not None and current.state == "active" else now
+        return max(0.0, round((record.finishes_at - since).total_seconds(), 1))
 
 
-def generate_timer_id() -> str:
-    """Generate a short timer id."""
-    return uuid.uuid4().hex[:8]
-
-
-__all__ = ["AuriTimerEntity", "generate_timer_id"]
+__all__ = ["AuriTimerEntity"]

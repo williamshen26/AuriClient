@@ -1,0 +1,89 @@
+/**
+ * Main dashboard strategy
+ * Generates a "Home" view with fixed cards (header/clock/weather/calendar/todo)
+ * and auto-generated Area cards grouped by Floor.
+ */
+import { sortByName } from "../helpers/utils.js";
+import { fetchAreas, fetchFloors } from "../helpers/HomeAssistantAPI.js";
+import { createFloorMap, groupAreasByFloor } from "../helpers/AreaHelper.js";
+import {
+  buildFixedStack,
+  buildAreaGridSection,
+} from "../helpers/CardBuilder.js";
+
+export class AuriHomeDashboardStrategy {
+  static async generate(config, hass) {
+    const dashPath = config?.dashboard_path ?? "auri-home";
+
+    const weatherEntity = config?.weather_entity ?? "weather.forecast_home";
+    const calendarEntity = config?.calendar_entity ?? "calendar.home_calendar";
+    const todoEntity = config?.todo_entity ?? "todo.shopping_list";
+
+    // Fetch registries
+    const [areas, floors] = await Promise.all([
+      fetchAreas(hass),
+      fetchFloors(hass),
+    ]);
+
+    const sortedAreas = sortByName(areas);
+    const floorsById = createFloorMap(floors);
+
+    // Group areas by floor
+    const { groups, other } = groupAreasByFloor(sortedAreas, floorsById);
+
+    // Build fixed left stack
+    const fixedStack = buildFixedStack(
+      weatherEntity,
+      calendarEntity,
+      todoEntity
+    );
+
+    // Build floor sections (sorted by level descending)
+    const floorSections = [];
+    const sortedFloors = [...groups.entries()].sort((a, b) =>
+      b[1].level - a[1].level  // Descending order (highest level first)
+    );
+    
+    for (const [floorKey, floorInfo] of sortedFloors) {
+      const section = buildAreaGridSection(floorInfo.name, floorInfo.areas, dashPath);
+      if (section) floorSections.push(section);
+    }
+
+    // Other areas section
+    const otherSection = buildAreaGridSection("Other areas", other, dashPath);
+    if (otherSection) floorSections.push(otherSection);
+
+    // Assemble the Home view
+    const homeView = {
+      title: "Home",
+      path: "home",
+      type: "masonry",
+      badges: [],
+      header: {
+        card: {
+          type: "markdown",
+          content: "# Hello {{ user }}",
+          text_only: true,
+        },
+      },
+      cards: [fixedStack, ...floorSections],
+    };
+
+    // Add one subview per area
+    const areaSubviews = sortedAreas.map((area) => ({
+      title: area.name,
+      path: area.area_id,
+      subview: true,
+      back_path: `/${dashPath}/home`,
+      strategy: {
+        type: "custom:auri-home-area",
+        area,
+      },
+    }));
+
+    return {
+      title: config?.title ?? "Auri Home",
+      views: [homeView, ...areaSubviews],
+    };
+  }
+}

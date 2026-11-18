@@ -336,24 +336,35 @@ Now and then Hey Auri has something to tell you, such as planned maintenance or 
 - A device command that carries a message gets a spoken reply instead of the quick "OK".
 - Messages aren't saved in your household's memory.
 
-## Timers and sticky notes
+## The Home dashboard
 
-**Timers.** Each running timer appears as a sensor (`sensor.auri_timer_<id>`) that shows the seconds remaining. When a timer finishes, the integration fires the `hey_auri_client.auri_timer_finished` event and removes the sensor. The integration does not ring anything by itself.
+Hey Auri Client includes the Home dashboard that Auri sets up on its hubs. It builds itself from your areas and floors: a sidebar with the timers, a clock, the weather, the calendar and the shopping list, a tile for each area, and a page for each area. It loads with the client and updates with it, so there's nothing to copy or add as a resource.
 
-To ring the satellite that started the timer, add an automation like the one below. It uses the satellite's **Timer Ringing** switch, which the event includes when the satellite has one (Voice Preview Edition does):
+To use it, create a dashboard, open it, choose **Edit dashboard**, then **Raw configuration editor** in the menu, and replace everything with:
 
 ```yaml
-triggers:
-  - trigger: event
-    event_type: hey_auri_client.auri_timer_finished
-conditions:
-  - condition: template
-    value_template: "{{ trigger.event.data.satellite_timer_ring is not none }}"
-actions:
-  - action: switch.turn_on
-    target:
-      entity_id: "{{ trigger.event.data.satellite_timer_ring }}"
+strategy:
+  type: custom:auri-home
+  dashboard_path: auri-home  # the dashboard's URL
 ```
+
+It uses three custom cards: **timer-bar-card** and **auto-entities**, both in the Marketplace, and **Auri Sticky Note Card**. The source is in `dashboard/` in this repository; see its README to change and rebuild it.
+
+## Timers and sticky notes
+
+**Timers.** Ask Auri for a timer ("set a pasta timer for 10 minutes"), and it rings on the device you asked:
+
+- **A voice satellite** rings by itself and counts down on its light ring. Say "stop" or press its button to stop the ringing.
+- **The Home Assistant app on a phone** gets a notification on that phone when the timer ends (the app must be allowed to send notifications).
+- **Anywhere else** (the web page, an automation, or a satellite whose firmware has no timers), your phones get the notification, or everyone's when you have none on your login. Auri support's account never gets them.
+
+These are Home Assistant's own timers, so the satellite rings with no automation. You can also ask Auri how long is left, to cancel a timer (or all of them), to add or take off time, and to pause or resume one. Name them ("the pasta timer") to tell several apart.
+
+Each timer is a sensor, `sensor.auri_timer_<id>`, which the Home dashboard shows as a timer bar. Its state is `active` or `paused`, with `duration`, `remaining` (the seconds left when the state last changed, as the timer bar reads it), `finishes_at` and the `device` it rings on. Timers set through Home Assistant's own agent show up too.
+
+Timers survive restarts, including the nightly update's. Once Home Assistant is back and the timer's device has reconnected, each one carries on with the time it had left, and one that ran out meanwhile rings at once. A timer whose device doesn't come back within 15 minutes is dropped.
+
+**Before 0.2.8,** the client fired `hey_auri_client.auri_timer_finished` and left the ringing to an automation (the master hub's "DO NOT DELETE" one). That event is gone, so the automation does nothing now: a Repairs notice offers to delete it. To do something else when a timer ends, such as flashing a light, use `hey_auri_client.timer_finished` (see [Events](#events)).
 
 **Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card. Notes are kept across restarts.
 
@@ -372,8 +383,8 @@ Every other account, including one that set up Home Assistant itself, gets no ve
 
 | Service | What it does |
 |---|---|
-| `hey_auri_client.start_auri_timer` | Starts a timer. Takes `duration` in seconds and an optional `satellite_speaker`. |
-| `hey_auri_client.get_auri_timers` | Returns the running timers. |
+| `hey_auri_client.start_auri_timer` | Starts a timer. Takes `duration` in seconds, an optional `name`, and where it rings: a `device_id` (a voice satellite, or a phone with the app) or a satellite's `satellite_speaker`. Without one, the caller's phones get a notification when it ends, or everyone's. |
+| `hey_auri_client.get_auri_timers` | Returns every timer, running or paused. |
 | `hey_auri_client.create_auri_sticky_note` | Creates a note. Takes `markdown`, plus optional `title` and `note_id`. Fails if the `note_id` already exists. |
 | `hey_auri_client.delete_auri_sticky_note` | Deletes the note with the given `note_id`. |
 | `hey_auri_client.get_auri_sticky_notes` | Returns all notes. |
@@ -387,7 +398,7 @@ Every other account, including one that set up Home Assistant itself, gets no ve
 | Event | Data |
 |---|---|
 | `hey_auri_client.conversation_finished` | `conversation_id`, `client_id` (the config entry ID), `user_input`, `response` |
-| `hey_auri_client.auri_timer_finished` | `timer_id`, `entity_id`, `duration`, `satellite_speaker`, `satellite_timer_ring` |
+| `hey_auri_client.timer_finished` | `timer_id`, `entity_id`, `name`, `duration`, and the `device_id` it rang on (none for a timer that notified phones) |
 | `hey_auri_client.memory_run_finished` | `day`, `scope` (`owner` or `guest`), `status` (`succeeded`, `failed` or `skipped`), `reason`, and when it succeeded `digest`, `exchanges`, `facts_added`, `facts_updated` and `facts_confirmed` |
 
 The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `disabled` (not set up), `starting`, `enabled`, `unavailable` (the database can't be reached; Auri keeps working without memory and catches up later) or `error` (a setup problem; see its `error` attribute). Its attributes also show the last nightly run, guest memory's state (`guest_memory`: `on`, `off`, or `closed` after a stay has ended), and when it was last reset or erased.

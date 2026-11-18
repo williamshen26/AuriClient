@@ -9,7 +9,7 @@ import homeassistant.components.conversation as ha_conversation
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
@@ -30,6 +30,7 @@ from .const import (
     DATA_MEMORY,
     DATA_SECURITY_REPORT,
     DATA_SUPPORT,
+    DATA_TIMERS,
     DATA_UPDATER,
     DOMAIN,
     LEGACY_USER_DATA_DIR,
@@ -37,6 +38,7 @@ from .const import (
     MEDIA_PLAYER_MACS_STORAGE_VERSION,
     ROOT_RUNTIME,
 )
+from .conversation.custom_services.timer_services import RUNTIME_TIMERS
 from .conversation.services import async_setup_services
 from .frontend import async_register_frontend_resources
 from .memory.legacy import relocate_legacy_user_data
@@ -51,6 +53,12 @@ from .security import (
     async_update_security_issues,
 )
 from .support import SupportSessions
+from .timer_automation import (
+    EVENT_AUTOMATION_RELOADED,
+    OLD_TIMER_AUTOMATION_ISSUE,
+    async_update_old_timer_automation_issue,
+)
+from .timers import AuriTimers
 from .updates import AutoUpdater
 
 _LOGGER = logging.getLogger(__name__)
@@ -159,6 +167,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     reporter = SecurityReporter(agent.client)
     # Hubs Auri set up install the Hey Auri Client version a manager approved, at night.
     updater = AutoUpdater(hass, entry, agent.client)
+    # Timers ring on the device that asked, show on the dashboard and survive restarts.
+    timers = AuriTimers(hass, entry)
     client_version = str(integration.version or "unknown")
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -168,6 +178,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data[DATA_SUPPORT] = support
     data[DATA_SECURITY_REPORT] = reporter
     data[DATA_UPDATER] = updater
+    data[DATA_TIMERS] = timers
+    hass.data[DOMAIN].setdefault("runtime", dict(ROOT_RUNTIME))[RUNTIME_TIMERS] = timers
 
     # Connects in the background; conversations work (without memory) meanwhile.
     await memory.async_start()
@@ -193,6 +205,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Hey Auri as counts (the dashboard's Hub security) when they change.
     entry.async_on_unload(async_at_started(hass, _async_check_security))
     entry.async_on_unload(async_track_time_interval(hass, _async_check_security, SECURITY_CHECK_INTERVAL))
+
+    async def _async_check_timer_automation(*_: Any) -> None:
+        await async_update_old_timer_automation_issue(hass)
+
+    # Timers ring by themselves now: a notice offers to delete the automation that rang them,
+    # and goes once it's deleted (here or in the automation editor).
+    entry.async_on_unload(async_at_started(hass, _async_check_timer_automation))
+    entry.async_on_unload(hass.bus.async_listen(EVENT_AUTOMATION_RELOADED, _async_check_timer_automation))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     ha_conversation.async_set_agent(hass, entry, agent)
@@ -262,6 +282,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     data = hass.data[DOMAIN].pop(entry.entry_id, None) or {}
+    timers: AuriTimers | None = data.get(DATA_TIMERS)
+    if timers is not None:
+        await timers.async_stop()
+        runtime = hass.data[DOMAIN].get("runtime") or {}
+        if runtime.get(RUNTIME_TIMERS) is timers:
+            runtime.pop(RUNTIME_TIMERS)
     ha_conversation.async_unset_agent(hass, entry)
     bookings: BookingSync | None = data.get(DATA_BOOKINGS)
     if bookings is not None:
@@ -277,3 +303,4 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     async_delete_logins_issue(hass, entry.entry_id)
     async_delete_names_issue(hass, entry.entry_id)
     async_delete_security_issues(hass)
+    ir.async_delete_issue(hass, DOMAIN, OLD_TIMER_AUTOMATION_ISSUE)
