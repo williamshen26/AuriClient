@@ -1,6 +1,8 @@
 """Service setup for the thin frontend integration prototype."""
 from __future__ import annotations
 
+from typing import Any
+
 import voluptuous as vol
 
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
@@ -32,6 +34,8 @@ from ..const import (
     SERVICE_RUN_MEMORY_JOB,
     SERVICE_START_AURI_TIMER,
     SERVICE_SYNC_BOOKINGS,
+    SERVICE_CHECK_FOR_UPDATE,
+    DATA_UPDATER,
 )
 from ..bookings.sync import BookingSync
 from ..memory.api import MemoryApiError
@@ -112,6 +116,14 @@ def _booking_sync(hass: HomeAssistant) -> BookingSync:
     for data in hass.data.get(DOMAIN, {}).values():
         if isinstance(data, dict) and isinstance(data.get(DATA_BOOKINGS), BookingSync):
             return data[DATA_BOOKINGS]
+    raise HomeAssistantError("Hey Auri Client isn't set up")
+
+
+def _updater(hass: HomeAssistant) -> Any:
+    """The automatic updater of the (single) loaded config entry."""
+    for data in hass.data.get(DOMAIN, {}).values():
+        if isinstance(data, dict) and data.get(DATA_UPDATER) is not None:
+            return data[DATA_UPDATER]
     raise HomeAssistantError("Hey Auri Client isn't set up")
 
 
@@ -198,6 +210,17 @@ async def async_setup_services(hass: HomeAssistant, config: ConfigType) -> None:
             raise HomeAssistantError("Add the booking calendar link under Hey Auri Client → Configure → Booking calendar first")
         return await sync.async_sync()
 
+    async def _handle_check_for_update(call: ServiceCall) -> dict[str, object]:
+        del call
+        return await _updater(hass).async_check()
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CHECK_FOR_UPDATE,
+        _handle_check_for_update,
+        schema=vol.Schema({}),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_SYNC_BOOKINGS,

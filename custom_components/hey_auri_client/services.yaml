@@ -82,6 +82,14 @@ run_memory_job:
           max: 30
           mode: box
 
+check_for_update:
+  name: Check for an update
+  description: >-
+    Do now what Hey Auri Client does every night: ask Hey Auri which version
+    this hub should run (only hubs Auri set up get one), install it from the
+    Marketplace if it isn't installed, and restart Home Assistant if it was.
+    Returns what happened.
+
 sync_bookings:
   name: Check the booking calendar
   description: >-

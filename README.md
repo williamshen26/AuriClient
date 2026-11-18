@@ -357,6 +357,17 @@ actions:
 
 **Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card. Notes are kept across restarts.
 
+## Automatic updates (homes Auri set up)
+
+On a home Auri set up, Hey Auri Client keeps itself on the version Auri support approved:
+
+- Once a night, at a random minute between 03:00 and 03:30 (the first half of the hour before memory's night job, which moves with **A day ends at**), it asks Hey Auri which version to run.
+- If that version isn't installed, it installs it through Home Assistant's Marketplace (its Hey Auri Client update), then restarts Home Assistant, which new code needs. Nothing restarts on a night with nothing to install.
+- It waits for another night while a voice satellite is in a conversation, and stops trying a version after 3 failed nights. Auri support sees that.
+- Auri approves a version for a few homes first, then for everyone. An older approved version rolls back.
+
+Every other account, including one that set up Home Assistant itself, gets no version from Hey Auri, so nothing happens: update from the Marketplace as usual. A Hey Auri Client copied into `custom_components` by hand can't update itself this way.
+
 ## Services
 
 | Service | What it does |
@@ -367,6 +378,7 @@ actions:
 | `hey_auri_client.delete_auri_sticky_note` | Deletes the note with the given `note_id`. |
 | `hey_auri_client.get_auri_sticky_notes` | Returns all notes. |
 | `hey_auri_client.assign_mac` | Adds MAC addresses to a media player for Wake-on-LAN. Use it when a device has more than one network interface and Home Assistant only knows one of them. |
+| `hey_auri_client.check_for_update` | Does now what happens every night on homes Auri set up (see [Automatic updates](#automatic-updates-homes-auri-set-up)): asks Hey Auri which version to run, installs it from the Marketplace if it isn't installed, and restarts Home Assistant if it was. Returns what happened (`off`, `current`, `installed`, `busy`, `install_failed`, `failed`, `no_entity` or `unreachable`). |
 | `hey_auri_client.sync_bookings` | Reads the booking calendar now, rather than waiting for the next 30-minute check, and returns what it found: the number of bookings, the next booking, and whether the Guest options changed. |
 | `hey_auri_client.run_memory_job` | Runs the nightly memory processing now, for your memory and then the guests' (when guest memory is on). Without `date`, processes the days that were missed (`days_back`, default 7). With a `date`, processes that day, which must be over; add `force: true` to process a day again. Returns what was learned. Without `date`, it also rates imported preferences not rated yet, in your memory only (`rated_imports`: how many were rated, raised and made private; see [Old saved preferences](#old-saved-preferences)), and in each memory compares what was saved in conversation or imported since the last run (`compared_saves`: how many, what the comparison said about the ones with a close memory, and each one retired, with the memory that already says it). |
 
@@ -393,7 +405,9 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
 - **Hourly, when something changed, and once a day anyway: your hub's security, as counts and yes or no only**, shown under Hub security on your dashboard at hey-auri.com, and to Auri support to see which hubs need attention:
   - the Home Assistant and Hey Auri Client versions, and how many updates are waiting;
   - whether Home Assistant is reachable from outside the home, whether failed logins lock anyone out, and how many accounts can sign in from outside without two-factor login (the number, not who);
-  - whether Auri support's account is chosen, has two-factor login and is signed in now, and when it last signed in.
+  - whether Auri support's account is chosen, has two-factor login and is signed in now, and when it last signed in;
+  - on homes Auri set up, the version Hey Auri Client should run and whether its automatic update worked.
+- **Once a night**, the question of which Hey Auri Client version to run (a signed request with nothing in it).
 - **When you answer a message from Hey Auri** (see [Messages from Hey Auri](#messages-from-hey-auri)): your choice, your words, and the speaker's name if Auri knows it, kept with your account's email so Auri support can contact you.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.
 - **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):

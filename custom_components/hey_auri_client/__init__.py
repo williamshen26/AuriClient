@@ -30,6 +30,7 @@ from .const import (
     DATA_MEMORY,
     DATA_SECURITY_REPORT,
     DATA_SUPPORT,
+    DATA_UPDATER,
     DOMAIN,
     LEGACY_USER_DATA_DIR,
     MEDIA_PLAYER_MACS_STORAGE_KEY,
@@ -50,6 +51,7 @@ from .security import (
     async_update_security_issues,
 )
 from .support import SupportSessions
+from .updates import AutoUpdater
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,6 +157,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # announced, and each ends after 12 hours.
     support = SupportSessions(hass, entry)
     reporter = SecurityReporter(agent.client)
+    # Hubs Auri set up install the Hey Auri Client version a manager approved, at night.
+    updater = AutoUpdater(hass, entry, agent.client)
     client_version = str(integration.version or "unknown")
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -163,12 +167,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data[DATA_BOOKINGS] = bookings
     data[DATA_SUPPORT] = support
     data[DATA_SECURITY_REPORT] = reporter
+    data[DATA_UPDATER] = updater
 
     # Connects in the background; conversations work (without memory) meanwhile.
     await memory.async_start()
     await bookings.async_start()
     await support.async_start()
     entry.async_on_unload(support.async_stop)
+    await updater.async_start()
+    entry.async_on_unload(updater.async_stop)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     async def _async_check_logins(hass: HomeAssistant) -> None:
@@ -199,7 +206,7 @@ async def _async_report_security(hass: HomeAssistant, entry: ConfigEntry, client
     if reporter is None:
         return
     try:
-        summary = await async_security_summary(hass, data.get(DATA_SUPPORT), client_version)
+        summary = await async_security_summary(hass, data.get(DATA_SUPPORT), client_version, data.get(DATA_UPDATER))
     except Exception:  # noqa: BLE001 (a report must never break the integration)
         _LOGGER.exception("Couldn't put together the hub security summary")
         return
@@ -223,6 +230,10 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     support: SupportSessions | None = data.get(DATA_SUPPORT)
     if support is not None:
         await support.async_check()
+    # The night job's hour may have moved, and the update check goes the hour before it.
+    updater: AutoUpdater | None = data.get(DATA_UPDATER)
+    if updater is not None:
+        updater.async_schedule()
 
 
 async def _async_relocate_legacy_user_data(hass: HomeAssistant) -> None:

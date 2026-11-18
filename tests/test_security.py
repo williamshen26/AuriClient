@@ -209,6 +209,8 @@ async def test_the_summary_has_counts_and_yes_or_no_only(hass: HomeAssistant, tw
         "support_two_factor": False,
         "support_signed_in": True,
         "support_last_sign_in": signed_in.created_at.isoformat(),
+        "update_status": None,  # no automatic updater given
+        "update_target": None,
     }
     assert "Will" not in str(summary) and "Support" not in str(summary)
 

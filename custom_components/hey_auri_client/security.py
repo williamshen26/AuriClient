@@ -30,6 +30,7 @@ from .memory.logins import names_text
 if TYPE_CHECKING:
     from .saas_client import SaaSClient
     from .support import SupportSessions
+    from .updates import AutoUpdater
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -148,7 +149,10 @@ def updates_waiting(hass: HomeAssistant) -> int:
 
 
 async def async_security_summary(
-    hass: HomeAssistant, support: SupportSessions | None, client_version: str
+    hass: HomeAssistant,
+    support: SupportSessions | None,
+    client_version: str,
+    updater: AutoUpdater | None = None,
 ) -> dict[str, Any]:
     """This hub's security, as counts and yes/no only: what's sent to Hey Auri."""
     support_user = await support.async_user() if support is not None else None
@@ -167,6 +171,8 @@ async def async_security_summary(
         ),
         "support_signed_in": bool(support_user is not None and support is not None and await support.async_signed_in()),
         "support_last_sign_in": last_sign_in.isoformat() if last_sign_in else None,
+        # Automatic updates (updates.py): off, current, pending, failed or no_entity.
+        **(updater.summary() if updater is not None else {"update_status": None, "update_target": None}),
     }
 
 

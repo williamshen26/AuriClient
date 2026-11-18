@@ -213,6 +213,7 @@ DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
 DATA_SUPPORT = "support"
 DATA_SECURITY_REPORT = "security_report"
+DATA_UPDATER = "updater"
 
 # The Home Assistant account Auri support signs in with (a user id), set under Auri support in
 # the options. Unset: no account is treated as Auri support's.
@@ -252,6 +253,7 @@ from .memory.config import (  # noqa: E402
 SERVICE_RUN_MEMORY_JOB = "run_memory_job"
 SERVICE_RUN_MEMORY_EXAM = "run_memory_exam"
 SERVICE_SYNC_BOOKINGS = "sync_bookings"
+SERVICE_CHECK_FOR_UPDATE = "check_for_update"
 ATTR_DATE = "date"
 ATTR_FORCE = "force"
 ATTR_DAYS_BACK = "days_back"
