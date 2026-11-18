@@ -115,6 +115,17 @@ def _turn_kind(user_input: conversation.ConversationInput, tool_names: list[str]
     return "chat"
 
 
+def _without_announcement(response: SaaSTurnResponse) -> str | None:
+    """The reply without the message from Hey Auri at its end, for the memory archive."""
+    content, announcement = response.content, response.announcement
+    if not content or not announcement:
+        return content
+    trimmed = content.rstrip()
+    if trimmed.endswith(announcement.strip()):
+        return trimmed[: -len(announcement.strip())].rstrip()
+    return content
+
+
 def _is_fast_path_eligible(
     tool_calls: list[dict] | None,
     tool_results: list[dict],
@@ -361,7 +372,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                     "tool_results": tool_results,
                 }
 
-                if _is_fast_path_eligible(response.tool_calls, tool_results):
+                # Unless the reply after these tools passes on a message from Hey Auri.
+                if response.fast_path is not False and _is_fast_path_eligible(response.tool_calls, tool_results):
                     self.hass.async_create_task(
                         self._send_tool_results_fire_and_forget(
                             {**tool_results_payload, "skip_ai_response": True}
@@ -429,7 +441,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
 
         intent_response = intent.IntentResponse(language=get_response_language(self.hass))
         intent_response.async_set_speech(response.content or "")
-        self._log_turn(user_input, turn, reply=response.content, tool_names=tool_names)
+        # Without a message from Hey Auri it passed on: that isn't about the household.
+        self._log_turn(user_input, turn, reply=_without_announcement(response), tool_names=tool_names)
         # This reply was to ask the guests their name: that's once for the stay.
         if stay["ask_name"] and turn.mode == "guest":
             async_mark_asked(self.hass, self.entry)

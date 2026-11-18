@@ -325,6 +325,17 @@ Uber and Google Maps don't work in mainland China, so there Auri's links open **
 
 This happens by itself when Home Assistant's country is China (**Settings → System → General**, called **Home information** in newer versions, then **Country**). Moving the home's location doesn't change the country. To choose either way, use **Rides and maps** on your Hey Auri dashboard: **Automatic**, **Uber and Google Maps**, or **Amap (China)**. Hong Kong, Macau and Taiwan keep Uber and Google Maps.
 
+## Messages from Hey Auri
+
+Now and then Hey Auri has something to tell you, such as planned maintenance or that your Hey Auri Client is out of date. Auri passes it on at the end of a normal reply, in its own words and your language, for example: "It's 12:45. By the way, Auri will be down for maintenance tomorrow from 11 PM to 1 AM."
+
+- At most one message every 5 hours, never between 21:00 and 08:00 your time, and never in a reply that asks you something.
+- Some messages ask a question, such as whether you'd like to update the client yourself or book a time with Auri support. Just answer: Auri records your choice, with your words, so support can get in touch if you asked them to. Something else, or "not now", records nothing, and the message may come back later (at most 3 times).
+- A message that has expired (a maintenance window that's over) is never passed on.
+- In guest mode, only messages meant for guests too are passed on, and never ones that ask a question.
+- A device command that carries a message gets a spoken reply instead of the quick "OK".
+- Messages aren't saved in your household's memory.
+
 ## Timers and sticky notes
 
 **Timers.** Each running timer appears as a sensor (`sensor.auri_timer_<id>`) that shows the seconds remaining. When a timer finishes, the integration fires the `hey_auri_client.auri_timer_finished` event and removes the sensor. The integration does not ring anything by itself.
@@ -383,6 +394,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - the Home Assistant and Hey Auri Client versions, and how many updates are waiting;
   - whether Home Assistant is reachable from outside the home, whether failed logins lock anyone out, and how many accounts can sign in from outside without two-factor login (the number, not who);
   - whether Auri support's account is chosen, has two-factor login and is signed in now, and when it last signed in.
+- **When you answer a message from Hey Auri** (see [Messages from Hey Auri](#messages-from-hey-auri)): your choice, your words, and the speaker's name if Auri knows it, kept with your account's email so Auri support can contact you.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.
 - **With memory set up**, in owner mode (and in guest mode with guest memory on, for the guests' memory):
   - with each request: the speaker's name, the names of the household's people and pets, and the memory notes and profile Home Assistant picked for that message;

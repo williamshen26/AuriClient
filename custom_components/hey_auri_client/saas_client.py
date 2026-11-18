@@ -76,6 +76,12 @@ class SaaSTurnResponse:
     listen: bool | None = None
     # Heard from an open mic and not said to Auri: no answer at all.
     ignored: bool = False
+    # False on a tool_calls response whose reply passes on a message from Hey Auri: no canned
+    # "OK" this time, the reply is needed. None from older backends.
+    fast_path: bool | None = None
+    # The part of a final reply that passed on a message from Hey Auri (also in content), kept
+    # out of the household's memory archive.
+    announcement: str | None = None
 
 
 @dataclass(slots=True)
@@ -926,6 +932,8 @@ def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
 
     mode = response.get("mode")
     listen = response.get("listen")
+    fast_path = response.get("fast_path")
+    announcement = response.get("announcement")
     return SaaSTurnResponse(
         response_type=response_type,
         conversation_id=response["conversation_id"],
@@ -936,6 +944,8 @@ def normalize_turn_response(response: dict[str, Any]) -> SaaSTurnResponse:
         memory_allowed=response.get("memory_allowed") is True,
         listen=listen if isinstance(listen, bool) else None,
         ignored=response.get("ignored") is True,
+        fast_path=fast_path if isinstance(fast_path, bool) else None,
+        announcement=announcement if isinstance(announcement, str) and announcement.strip() else None,
     )
 
 

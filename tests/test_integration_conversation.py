@@ -332,3 +332,85 @@ async def test_admins_and_satellites_still_add_automations(hass: HomeAssistant, 
         assert context["user_is_admin"] is None
 
     assert len(ran) == 1 and result == {"success": True}
+
+
+async def test_a_reply_that_passes_on_a_message_skips_the_canned_ok(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
+    """The backend asks for the full reply (fast_path false): "Done. By the way, …" instead of "OK"."""
+    hass.states.async_set("light.kitchen", "off")
+    calls = async_mock_service(hass, "light", "turn_on")
+    turn_on = {
+        "id": "t1", "type": "function",
+        "function": {"name": "turn_on_light", "arguments": json.dumps({"entity_id": "light.kitchen"})},
+    }
+    agent.client = ScriptedClient(
+        SaaSTurnResponse(response_type="tool_calls", conversation_id="c1", turn_id="r1", tool_calls=[turn_on],
+                         mode="owner", fast_path=False),
+        SaaSTurnResponse(response_type="final", conversation_id="c1", mode="owner",
+                         content="Done. By the way, Auri will be down tomorrow night.",
+                         announcement="By the way, Auri will be down tomorrow night."),
+    )
+
+    result = await ask(agent, "Turn on the kitchen light")
+
+    assert len(calls) == 1
+    assert spoken(result) == "Done. By the way, Auri will be down tomorrow night."
+    assert "skip_ai_response" not in agent.client.payloads[-1]
+
+
+@pytest.mark.parametrize(
+    ("fields", "fast_path", "announcement"),
+    [
+        ({"fast_path": False, "announcement": "By the way, …"}, False, "By the way, …"),
+        ({}, None, None),  # an older backend
+        ({"fast_path": "no", "announcement": "  "}, None, None),
+    ],
+)
+def test_the_backends_broadcast_fields_are_read(fields, fast_path, announcement) -> None:
+    response = normalize_turn_response({"type": "final", "conversation_id": "c1", "content": "Hi", **fields})
+
+    assert response.fast_path is fast_path
+    assert response.announcement == announcement
+
+
+def test_the_memory_archive_leaves_out_a_message_from_hey_auri() -> None:
+    from custom_components.hey_auri_client.conversation.agent_class import _without_announcement  # pylint: disable=import-outside-toplevel
+
+    told = SaaSTurnResponse(
+        response_type="final", conversation_id="c1",
+        content="It's 12:45. By the way, maintenance tomorrow night.", announcement="By the way, maintenance tomorrow night.",
+    )
+    assert _without_announcement(told) == "It's 12:45."
+    assert _without_announcement(SaaSTurnResponse(response_type="final", conversation_id="c1", content="It's 12:45.")) == "It's 12:45."
+
+
+
+class _ArchivingMemory:
+    """The memory runtime, as far as a turn uses it: the context it adds, and what it archives."""
+
+    def __init__(self) -> None:
+        self.archived: list[dict] = []
+
+    async def async_turn_context(self, text, speaker, conversation_id):
+        return {"status": "enabled"}
+
+    def note_mode(self, mode, memory_allowed):
+        pass
+
+    def log_turn(self, **fields):
+        self.archived.append(fields)
+
+
+async def test_the_households_memory_doesnt_keep_a_message_from_hey_auri(hass: HomeAssistant, agent: ThinOpenAIAgent) -> None:
+    memory = _ArchivingMemory()
+    agent.memory = memory
+    agent.client = ScriptedClient(
+        SaaSTurnResponse(
+            response_type="final", conversation_id="c1", mode="owner", memory_allowed=True,
+            content="It's 12:45. By the way, maintenance tomorrow night.", announcement="By the way, maintenance tomorrow night.",
+        ),
+    )
+
+    result = await ask(agent, "What time is it?")
+
+    assert spoken(result) == "It's 12:45. By the way, maintenance tomorrow night."  # said in full
+    assert [entry["reply"] for entry in memory.archived] == ["It's 12:45."]  # archived without it
