@@ -101,6 +101,18 @@ def parse_duration(value: Any) -> int:
     return int(round(seconds))
 
 
+async def async_push_to_phone(hass: HomeAssistant, device_id: str, message: str) -> None:
+    """Push a timer's end to one phone, as Home Assistant pushes its own timers' (mobile_app/timers.py).
+
+    The mobile app integration is imported only here, once there's a phone to push to.
+    """
+    from homeassistant.components.mobile_app import device_action  # noqa: PLC0415
+
+    await device_action.async_call_action_from_config(
+        hass, {CONF_DEVICE_ID: device_id, "message": message, "data": PHONE_PUSH_DATA}, {}, None
+    )
+
+
 def _split(seconds: int) -> tuple[int | None, int | None, int | None]:
     """Hours, minutes and seconds, as Home Assistant keeps a timer's spoken length (None for none)."""
     hours, rest = divmod(seconds, 3600)
@@ -580,21 +592,17 @@ class AuriTimers:
 
     async def _async_notify_phones(self, record: TimerRecord) -> None:
         """An own timer's finish, pushed as Home Assistant pushes its own timers' to the phone that set them."""
-        from homeassistant.components.mobile_app import device_action  # noqa: PLC0415 (only when phones are set up)
-
+        phones = await self._async_phones(record.user_id)
+        if not phones:
+            return
         if record.name:
             message = f"{record.name} finished"
         else:
             message = f"{timedelta(seconds=record.duration)} timer finished"
-        for device_id in await self._async_phones(record.user_id):
+        for device_id in phones:
             try:
-                await device_action.async_call_action_from_config(
-                    self.hass,
-                    {CONF_DEVICE_ID: device_id, "message": message, "data": PHONE_PUSH_DATA},
-                    {},
-                    None,
-                )
-            except HomeAssistantError as err:
+                await async_push_to_phone(self.hass, device_id, message)
+            except (HomeAssistantError, ImportError) as err:
                 _LOGGER.warning("Couldn't send the timer notification to a phone: %s", err)
 
     async def _async_phones(self, user_id: str | None) -> list[str]:

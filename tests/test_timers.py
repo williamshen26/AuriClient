@@ -50,7 +50,13 @@ from custom_components.hey_auri_client.timer_automation import (  # noqa: E402
     OLD_TIMER_AUTOMATION_ISSUE,
     async_update_old_timer_automation_issue,
 )
-from custom_components.hey_auri_client.timers import RESTORE_WAIT, AuriTimers, parse_duration  # noqa: E402
+from custom_components.hey_auri_client.timers import (  # noqa: E402
+    PHONE_PUSH_DATA,
+    RESTORE_WAIT,
+    AuriTimers,
+    async_push_to_phone,
+    parse_duration,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -394,24 +400,42 @@ async def test_auris_own_timer_notifies_the_askers_phones(hass: HomeAssistant, h
         phone.connect()  # takes notifications, so Home Assistant rings its own timers there
         phones[name] = phone.id
     hass.config_entries.async_update_entry(hub.entry, options={"support_user_id": support.id})
-    sent: list[dict] = []
+    sent: list[tuple[str, str]] = []
 
-    async def push(hass: HomeAssistant, config: dict, variables: dict, context: Any) -> None:
-        sent.append(config)
+    async def push(hass: HomeAssistant, device_id: str, message: str) -> None:
+        sent.append((device_id, message))
 
-    with patch("homeassistant.components.mobile_app.device_action.async_call_action_from_config", push):
+    with patch("custom_components.hey_auri_client.timers.async_push_to_phone", push):
         await call(hass, "start_timer", user_id=owner.id, duration="60", name="Pizza")
         assert (await call(hass, "list_timers"))["timers"][0]["device"] is None
         await hub.advance(freezer, 61)
-        assert [(item["device_id"], item["message"]) for item in sent] == [(phones["Owner's phone"], "Pizza finished")]
-        assert sent[0]["data"]["push"] == {"interruption-level": "time-sensitive"}
+        assert sent == [(phones["Owner's phone"], "Pizza finished")]
 
         sent.clear()
         await call(hass, "start_timer", duration="90")  # an automation: nobody asked
         await hub.advance(freezer, 91)
-        assert sorted(item["device_id"] for item in sent) == sorted([phones["Owner's phone"], phones["Partner's phone"]])
-        assert sent[0]["message"] == "0:01:30 timer finished"
+        assert sorted(device_id for device_id, _ in sent) == sorted([phones["Owner's phone"], phones["Partner's phone"]])
+        assert {message for _, message in sent} == {"0:01:30 timer finished"}
     assert hub.states() == {}
+
+
+async def test_the_push_is_home_assistants_own_timer_push(hass: HomeAssistant) -> None:
+    """The same time-sensitive push Home Assistant sends for its own timers (mobile_app/timers.py).
+
+    Needs the mobile app integration's own packages, which the Home Assistant image has and CI doesn't.
+    """
+    device_action = pytest.importorskip("homeassistant.components.mobile_app.device_action")
+    sent: list[dict] = []
+
+    async def call_action(hass: HomeAssistant, config: dict, variables: dict, context: Any) -> None:
+        sent.append(config)
+
+    with patch.object(device_action, "async_call_action_from_config", call_action):
+        await async_push_to_phone(hass, "phone-1", "Pizza finished")
+
+    assert sent == [{"device_id": "phone-1", "message": "Pizza finished", "data": PHONE_PUSH_DATA}]
+    assert PHONE_PUSH_DATA["push"] == {"interruption-level": "time-sensitive"}
+    assert PHONE_PUSH_DATA["channel"] == "Timers" and PHONE_PUSH_DATA["importance"] == "high"
 
 
 async def test_own_timers_survive_a_restart(hass: HomeAssistant, hub: Hub, freezer) -> None:
