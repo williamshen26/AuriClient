@@ -1,0 +1,44 @@
+name: Release version
+
+# A release's tag (v0.2.6) must match the version in manifest.json (0.2.6). The Marketplace
+# installs by tag, but Home Assistant shows, and the hub's security summary reports, the manifest's
+# version: when they differ, staff see the wrong version and broadcasts aimed at older clients
+# pick the wrong hubs. A release that doesn't match is turned back into a draft, so no hub is
+# offered it; fix manifest.json, move the tag to the fixed commit, and publish it again.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release's commit
+        uses: actions/checkout@v5
+
+      - name: Compare the tag and manifest.json
+        id: compare
+        env:
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          manifest_version=$(python3 -c "import json; print(json.load(open('custom_components/hey_auri_client/manifest.json'))['version'])")
+          tag_version="${TAG#v}"
+          echo "Tag: $TAG, manifest.json: $manifest_version"
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error file=custom_components/hey_auri_client/manifest.json::The release tag $TAG doesn't match manifest.json's version $manifest_version. Set \"version\": \"$tag_version\" in manifest.json, then release again."
+            exit 1
+          fi
+
+      - name: Turn a mismatched release back into a draft
+        if: failure() && steps.compare.outcome == 'failure' && github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release edit "$TAG" --draft=true --repo "$GITHUB_REPOSITORY"
+          echo "::error::$TAG is a draft again, so the Marketplace won't offer it."
