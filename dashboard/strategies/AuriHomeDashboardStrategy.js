@@ -23,7 +23,12 @@ export class AuriHomeDashboardStrategy {
       guest: mode?.attributes?.guest_calendar ?? null,
       modeEntity: mode ? "sensor.auri_mode" : null,
     };
-    const todoEntity = config?.todo_entity ?? "todo.shopping_list";
+    // The household's shopping list, and the guests' once the home hosts (from the mode sensor too).
+    const todoEntity = {
+      home: config?.todo_entity ?? mode?.attributes?.home_shopping_list ?? "todo.shopping_list",
+      guest: mode?.attributes?.guest_shopping_list ?? null,
+      modeEntity: calendars.modeEntity,
+    };
 
     // Fetch registries
     const [areas, floors] = await Promise.all([

@@ -79,10 +79,86 @@ export function buildCalendarCards(calendars) {
 }
 
 /**
+ * The shopping list card(s), as for the calendars: the Guest Shopping List while the mode sensor says
+ * guest, the household's list otherwise (it switches live). Otherwise one card.
+ * @param {string|{home: string, guest?: string, modeEntity?: string}} lists - To-do entity ID, or both lists
+ * @returns {Object[]} Card configurations
+ */
+export function buildTodoCards(lists) {
+    const { home, guest, modeEntity } = typeof lists === "string" ? { home: lists } : lists;
+    const card = (entity) => ({ type: "todo-list", entity, title: "Shopping list" });
+    if (!guest || !modeEntity) {
+        return [card(home)];
+    }
+    return [
+        {
+            type: "conditional",
+            conditions: [{ condition: "state", entity: modeEntity, state: "guest" }],
+            card: card(guest),
+        },
+        {
+            type: "conditional",
+            conditions: [{ condition: "state", entity: modeEntity, state_not: "guest" }],
+            card: card(home),
+        },
+    ];
+}
+
+/**
+ * Hey Auri Client's alarms: on while set. Tapping the icon turns one off or on; the line under its
+ * name is its time, its days and where it rings. With the mode sensor, guests see only their own
+ * alarms and the household only theirs.
+ * @param {string|null} modeEntity - The mode sensor, or null
+ * @returns {Object[]} Card configurations
+ */
+export function buildAlarmCards(modeEntity) {
+    const alarms = (attributes) => ({
+        type: "custom:auto-entities",
+        card: {
+            type: "vertical-stack",
+        },
+        card_param: "cards",
+        filter: {
+            include: [
+                {
+                    entity_id: "switch.auri_alarm_*",
+                    ...(attributes ? { attributes } : {}),
+                    options: {
+                        type: "tile",
+                        state_content: ["summary"],
+                        vertical: false,
+                    },
+                },
+            ],
+        },
+        sort: {
+            method: "attribute",
+            attribute: "time",
+        },
+        show_empty: false,
+    });
+    if (!modeEntity) {
+        return [alarms(null)];
+    }
+    return [
+        {
+            type: "conditional",
+            conditions: [{ condition: "state", entity: modeEntity, state: "guest" }],
+            card: alarms({ guest: true }),
+        },
+        {
+            type: "conditional",
+            conditions: [{ condition: "state", entity: modeEntity, state_not: "guest" }],
+            card: alarms({ guest: false }),
+        },
+    ];
+}
+
+/**
  * Build fixed left stack with time, weather, calendar, and todo
  * @param {string} weatherEntity - Weather entity ID
  * @param {string|{home: string, guest?: string, modeEntity?: string}} calendars - Calendar entity ID, or both calendars
- * @param {string} todoEntity - Todo entity ID
+ * @param {string|{home: string, guest?: string, modeEntity?: string}} todoEntity - To-do entity ID, or both lists
  * @returns {Object} Vertical stack card configuration
  */
 export function buildFixedStack(weatherEntity, calendars, todoEntity) {
@@ -122,32 +198,7 @@ export function buildFixedStack(weatherEntity, calendars, todoEntity) {
             },
             show_empty: false,
         },
-        {
-            type: "custom:auto-entities",
-            card: {
-                type: "vertical-stack",
-            },
-            card_param: "cards",
-            filter: {
-                include: [
-                    {
-                        // Hey Auri Client's alarms: on while set. Tapping the icon turns one off or
-                        // on; the line under its name is its time, its days and where it rings.
-                        entity_id: "switch.auri_alarm_*",
-                        options: {
-                            type: "tile",
-                            state_content: ["summary"],
-                            vertical: false,
-                        },
-                    },
-                ],
-            },
-            sort: {
-                method: "attribute",
-                attribute: "time",
-            },
-            show_empty: false,
-        },
+        ...buildAlarmCards(calendars?.modeEntity ?? null),
         {
             type: "horizontal-stack",
             cards: [
@@ -185,11 +236,7 @@ export function buildFixedStack(weatherEntity, calendars, todoEntity) {
             forecast_type: "daily",
         },
         ...buildCalendarCards(calendars),
-        {
-            type: "todo-list",
-            entity: todoEntity,
-            title: "Shopping list",
-        },
+        ...buildTodoCards(todoEntity),
     ];
 
     return {

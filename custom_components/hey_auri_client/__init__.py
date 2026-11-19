@@ -179,8 +179,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Alarms ring on satellites at a time of day (Home Assistant has no alarm clock); kept here.
     alarms = AuriAlarms(hass, entry, timers)
     # The Home and Guest Calendars, chosen by the account's mode, which every backend answer carries.
-    calendars = AuriCalendars(hass, entry, bookings)
+    calendars = AuriCalendars(hass, entry, bookings, check_account=agent.client.async_check_account)
     agent.client.on_account_mode = calendars.note_account_mode
+    # The household's alarms don't ring while Auri is in guest mode, and their switches say so.
+    alarms.mode = calendars.mode
+    entry.async_on_unload(calendars.async_add_listener(alarms.mode_changed))
     client_version = str(integration.version or "unknown")
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -209,10 +212,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     async def _async_start_calendars(hass: HomeAssistant) -> None:
-        # Once Home Assistant runs: setting up a Local Calendar loads that integration. Then the
-        # account's mode setting, for the calendar the dashboard shows before the first turn.
+        # Once Home Assistant runs: setting up a Local Calendar loads that integration. It also asks
+        # for the account's mode setting, then and every few minutes, for the calendar the dashboard shows.
         await calendars.async_start()
-        entry.async_create_background_task(hass, agent.client.async_check_account(), "hey_auri_client account mode")
 
     entry.async_on_unload(async_at_started(hass, _async_start_calendars))
     entry.async_on_unload(calendars.async_stop)

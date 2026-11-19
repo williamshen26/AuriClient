@@ -509,6 +509,45 @@ async def test_guests_see_only_their_own_alarms_and_they_go_at_check_out(hass: H
     assert [a.id for a in home.alarms.alarms()] == [owners["alarm_id"]]
 
 
+async def test_the_households_alarms_pause_while_guests_stay(hass: HomeAssistant, home: Home, freezer) -> None:
+    """Guests aren't woken by the owner's alarm: a household alarm doesn't ring in guest mode."""
+    hass.config_entries.async_update_entry(
+        home.entry, options={CONF_BOOKING_ID: "B1", CONF_CHECK_OUT: "2026-11-25T11:00:00"}
+    )
+    mode = ["guest"]
+    home.alarms.mode = lambda: mode[0]
+    bedroom = home.satellite("Bedroom satellite", area="Bedroom")
+    rang = async_capture_events(hass, EVENT_ALARM_RINGING)
+    owners = (await home.call("set_alarm", turn(bedroom.id), time="06:00", days="daily"))["alarm"]
+    once = (await home.call("set_alarm", turn(bedroom.id), time="06:30"))["alarm"]
+    guests = (await home.call("set_alarm", turn(bedroom.id, mode="guest"), time="07:00", days="daily"))["alarm"]
+    switch = f"switch.auri_alarm_{owners['alarm_id']}"
+    home.alarms.mode_changed()
+    await hass.async_block_till_done()
+    state = hass.states.get(switch)
+    assert state.attributes["paused"] is True
+    assert state.attributes["summary"].endswith("paused while guests stay")
+    assert hass.states.get(f"switch.auri_alarm_{guests['alarm_id']}").attributes["paused"] is False
+
+    # Thursday in guest mode: only the guests' alarm rings.
+    await home.advance_to(freezer, "2026-11-19T07:00:01-08:00")
+    assert [event.data["alarm_id"] for event in rang] == [guests["alarm_id"]]
+    assert bedroom.rings() == 1
+    # The household's repeating alarm waits for its next day; the one-time one is let go.
+    await home.advance(freezer, timedelta(minutes=40))
+    remaining = {a.id for a in home.alarms.alarms()}
+    assert owners["alarm_id"] in remaining and once["alarm_id"] not in remaining
+    assert hass.states.get(switch).state == "on"
+
+    # Back to owner mode: it rings again, and the switch says so.
+    mode[0] = "owner"
+    home.alarms.mode_changed()
+    await hass.async_block_till_done()
+    assert hass.states.get(switch).attributes["paused"] is False
+    await home.advance_to(freezer, "2026-11-20T06:00:01-08:00")
+    assert owners["alarm_id"] in [event.data["alarm_id"] for event in rang]
+
+
 async def test_change_and_cancel_by_time_or_name(home: Home) -> None:
     bedroom = home.satellite("Bedroom satellite", area="Bedroom")
     work = (await home.call("set_alarm", turn(bedroom.id), time="07:00", days="weekdays", name="work"))["alarm"]

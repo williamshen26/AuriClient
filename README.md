@@ -350,9 +350,9 @@ strategy:
 
 It uses three custom cards: **timer-bar-card** and **auto-entities**, both in the Marketplace, and **Auri Sticky Note Card**. The source is in `dashboard/` in this repository; see its README to change and rebuild it.
 
-The calendar on the dashboard follows the mode (see [Calendars](#calendars)): the Guest Calendar while Auri is in guest mode, the Home Calendar otherwise.
+The calendar, the shopping list and the alarms on the dashboard follow the mode (see [Calendars and the shopping list](#calendars-and-the-shopping-list)): the guests' while Auri is in guest mode, the household's otherwise.
 
-## Calendars
+## Calendars and the shopping list
 
 Auri keeps two Home Assistant **Local Calendars**, and sets them up itself:
 - **Home Calendar**, the household's. It's set up when Hey Auri Client starts.
@@ -365,7 +365,7 @@ Both show on Home Assistant's Calendar page. For now Auri uses only these two; G
 - **In guest mode,** the Guest Calendar only: guests never see or change the household's.
 - **With Automatic,** the same rule as the mode: the Home Calendar only when no stay is under way and someone from the household is home.
 
-The **Auri Mode** sensor (`sensor.auri_mode`) shows the mode between turns: `owner` or `guest`, with your account's setting and both calendars as attributes. The dashboard's calendar switches with it.
+The **Auri Mode** sensor (`sensor.auri_mode`) shows the mode between turns: `owner` or `guest`, with your account's setting and both calendars as attributes. The dashboard's calendar switches with it. A mode setting changed on hey-auri.com reaches your hub within 5 minutes, or at once when someone talks to Auri. With Automatic, the switch follows check-in, check-out and who's home within a minute.
 
 **What Auri can do with events:**
 - read them;
@@ -376,6 +376,13 @@ The **Auri Mode** sensor (`sensor.auri_mode`) shows the mode between turns: `own
 For an event that repeats, Auri asks whether you mean only that one, that one and the ones after it, or all of them. All-day events work too.
 
 **The Guest Calendar is emptied after each stay,** so every guest starts with a clean calendar: when the stay's guest memory is erased (an hour after check-out), or when a new booking replaces a stay before then. Everything on it goes, including what the household added for those guests. What the household puts there before a booking arrives stays until that stay ends. Keep the house's own events, such as cleaning days, on the Home Calendar.
+
+**The shopping list follows the same rule.** The household keeps Home Assistant's own Shopping list (`todo.shopping_list`). Guests get a **Guest Shopping List**, a Local To-do that Auri sets up together with the Guest Calendar:
+- **In guest mode,** Auri reads and changes only the guests' list.
+- **In owner mode,** the household's list, or the guests' when you name it ("put towels on the guests' shopping list").
+- **It's emptied with the Guest Calendar,** an hour after check-out.
+
+The Home dashboard's shopping list switches with the mode, as the calendar does. The Auri Mode sensor's attributes include both lists.
 
 ## Timers, alarms and sticky notes
 
@@ -406,7 +413,7 @@ Alarms use Home Assistant's time zone and survive restarts. An alarm that falls 
 
 The ring plays at the satellite's volume: a satellite turned down to 0, or whose media player is muted, rings silently. Its microphone Mute switch doesn't silence the ring, but voice can't stop it then (the button still can).
 
-**Guests** can set alarms too. They see only the alarms set during their stay, and those are removed at check-out.
+**Guests** can set alarms too. They see only the alarms set during their stay, and those are removed at check-out. The household's own alarms don't ring while Auri is in guest mode, so guests aren't woken by them: a repeating alarm rings again on its next day in owner mode, and a one-time alarm whose time passes during the stay is removed. Its switch's `paused` attribute is `true` meanwhile. The Home dashboard shows guests only their alarms, and the household only theirs.
 
 To do something when an alarm goes off, such as turning on the bedroom lights, use the `hey_auri_client.alarm_ringing` event (see [Events](#events)).
 

@@ -1,4 +1,5 @@
-"""The home's two calendars: the household's Home Calendar and the guests' Guest Calendar.
+"""The home's two calendars, the household's Home Calendar and the guests' Guest Calendar, and the
+guests' own shopping list.
 
 Both are Home Assistant Local Calendars, which can add, change and remove events and keep repeating
 ones (Local Calendar only for now; other calendars may come later). Hey Auri Client sets up whichever
@@ -9,16 +10,21 @@ renaming its entity doesn't lose it.
 The mode decides which calendar Auri and the dashboard use, by the backend's rule for the account's
 setting: owner, the Home Calendar; guest, the Guest Calendar; Automatic, owner only when no stay is
 under way and someone from the household is home (bookings/automatic_mode.py), guest otherwise. The
-backend sends the account's setting with every answer (account_mode); a turn uses the mode the backend
+backend sends the account's setting with every answer (account_mode), and the hub asks for it every
+5 minutes (a setting changed on hey-auri.com reaches no hub by itself); a turn uses the mode the backend
 decided for it. The "Auri Mode" sensor shows the mode between turns, for the dashboard.
 
 The Guest Calendar is emptied once per stay, so every guest starts with a clean calendar: when the
 stay's guest memory is erased (an hour after check-out), or when a new stay takes over before that.
+
+The shopping list follows the same rule. The household keeps Home Assistant's own Shopping list
+(todo.shopping_list); the guests get a Local To-do, the Guest Shopping List, set up and emptied with
+the Guest Calendar.
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 import logging
 from typing import TYPE_CHECKING, Any
@@ -46,10 +52,19 @@ GUEST = "guest"
 # Each calendar's name, and the Local Calendar storage key its name gives (Local Calendar's slugify).
 CALENDARS = {HOME: ("Home Calendar", "home_calendar"), GUEST: ("Guest Calendar", "guest_calendar")}
 LOCAL_CALENDAR = "local_calendar"
+# The guests' shopping list: its name, and the Local To-do storage key its name gives (slugify).
+GUEST_LIST = ("Guest Shopping List", "guest_shopping_list")
+LOCAL_TODO = "local_todo"
+# The household's list: Home Assistant's Shopping list integration (found by its platform).
+HOME_LIST = "todo.shopping_list"
 ACCOUNT_MODES = frozenset({"owner", "guest", "auto"})
 STORAGE_VERSION = 1
 # How often the stay, the time and the mode are looked at (presence changes are followed at once).
 TICK = timedelta(minutes=1)
+# How often the hub asks Hey Auri for the account's mode setting. Nothing tells the hub when it's
+# changed on hey-auri.com, and only answers carry it, so without this a home set to Guest by hand kept
+# showing the Home Calendar on its dashboard until someone spoke to Auri.
+ACCOUNT_CHECK_INTERVAL = timedelta(minutes=5)
 # Emptying the Guest Calendar: every event from this long ago to this far ahead.
 _CLEAR_BACK = timedelta(days=5 * 365)
 _CLEAR_AHEAD = timedelta(days=10 * 365)
@@ -69,19 +84,41 @@ def calendar_entity(hass: HomeAssistant, entity_id: str | None) -> Any:
     return component.get_entity(entity_id) if component is not None else None
 
 
+def todo_entity(hass: HomeAssistant, entity_id: str | None) -> Any:
+    """The to-do list entity object, or None."""
+    if not entity_id:
+        return None
+    try:
+        from homeassistant.components.todo import DATA_COMPONENT  # noqa: PLC0415
+    except ImportError:
+        return None
+    component = hass.data.get(DATA_COMPONENT)
+    return component.get_entity(entity_id) if component is not None else None
+
+
 class AuriCalendars:
     """Finds and sets up the two calendars, follows the account's mode, and empties the Guest Calendar."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, bookings: BookingSync | None) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        bookings: BookingSync | None,
+        check_account: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.hass = hass
         self.entry = entry
         self.bookings = bookings
+        # Asks Hey Auri for the account's mode setting (SaaSClient.async_check_account), which then
+        # comes back through note_account_mode: at start and every ACCOUNT_CHECK_INTERVAL.
+        self._check_account = check_account
         self.account_mode: str | None = None  # the account's setting, as the backend last said
         self._marker: dict[str, Any] = {}  # {"stay": the stay the Guest Calendar is for, "cleared": bool}
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}_calendars_{entry.entry_id}")
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[CALLBACK_TYPE] = []
         self._locks = {HOME: asyncio.Lock(), GUEST: asyncio.Lock()}
+        self._list_lock = asyncio.Lock()
         self._refreshing = asyncio.Lock()  # the minute's check and a change's never overlap
         self._shown_mode: str | None = None
         self._started = False
@@ -100,6 +137,9 @@ class AuriCalendars:
         if self.bookings is not None:
             self._unsubs.append(self.bookings.async_add_listener(self._changed))
         self._unsubs.append(async_track_time_interval(self.hass, self._async_tick, TICK))
+        if self._check_account is not None:
+            self._unsubs.append(async_track_time_interval(self.hass, self._async_ask_account, ACCOUNT_CHECK_INTERVAL))
+            self.entry.async_create_background_task(self.hass, self._check_account(), "hey_auri_client account mode")
         self._unsubs.append(
             self.hass.bus.async_listen(EVENT_STATE_CHANGED, self._presence_changed, event_filter=_is_person)
         )
@@ -157,6 +197,10 @@ class AuriCalendars:
         mode = turn_mode if turn_mode in ("owner", "guest") else self.mode()
         return {GUEST} if mode == "guest" else {HOME, GUEST}
 
+    def list_role_for_turn(self, turn_mode: str | None, requested: Any = None) -> str:
+        """The shopping list a turn uses: the same rule as the calendars."""
+        return self.role_for_turn(turn_mode, requested)
+
     def _hosting(self) -> bool:
         """Whether the home hosts guests: the account is set to guest or Automatic, or a stay is set."""
         if self.account_mode in ("guest", "auto"):
@@ -198,7 +242,57 @@ class AuriCalendars:
                     _LOGGER.warning("Couldn't set up the %s: %s", name, err)
                     return None
                 self._notify()
-            return self.entity_for(role)
+        if role == GUEST:
+            await self.async_ensure_list()
+        return self.entity_for(role)
+
+    # ── the guests' shopping list (Local To-do) ──────────────────────────────
+
+    def _list_entry(self) -> ConfigEntry | None:
+        return next(
+            (
+                entry
+                for entry in self.hass.config_entries.async_entries(LOCAL_TODO)
+                if entry.data.get("storage_key") == GUEST_LIST[1]
+            ),
+            None,
+        )
+
+    def list_for(self, role: str) -> str | None:
+        """The shopping list's entity id: Home Assistant's Shopping list for the household, the Guest
+        Shopping List for guests (None when it isn't set up)."""
+        registry = er.async_get(self.hass)
+        if role != GUEST:
+            return next(
+                (
+                    item.entity_id
+                    for item in registry.entities.values()
+                    if item.platform == "shopping_list" and item.domain == "todo"
+                ),
+                HOME_LIST,
+            )
+        entry = self._list_entry()
+        if entry is None:
+            return None
+        return next(
+            (item.entity_id for item in er.async_entries_for_config_entry(registry, entry.entry_id) if item.domain == "todo"),
+            None,
+        )
+
+    async def async_ensure_list(self) -> str | None:
+        """The Guest Shopping List's entity id, setting it up first when it's missing. Never raises."""
+        async with self._list_lock:
+            if self._list_entry() is None:
+                try:
+                    await self.hass.config_entries.flow.async_init(
+                        LOCAL_TODO, context={"source": SOURCE_USER}, data={"todo_list_name": GUEST_LIST[0]}
+                    )
+                    _LOGGER.info("Set up the %s (Local To-do)", GUEST_LIST[0])
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("Couldn't set up the %s: %s", GUEST_LIST[0], err)
+                    return None
+                self._notify()
+        return self.list_for(GUEST)
 
     # ── emptying the Guest Calendar, once per stay ───────────────────────────
 
@@ -218,12 +312,16 @@ class AuriCalendars:
             self._shown_mode = mode
             self._notify()
 
+    async def _async_ask_account(self, _now: Any) -> None:
+        if self._check_account is not None:
+            await self._check_account()
+
     async def _async_tick(self, _now: Any) -> None:
         await self._async_refresh()
 
     async def _async_refresh(self) -> None:
         async with self._refreshing:
-            if self._hosting() and self._local_entry(GUEST) is None:
+            if self._hosting() and (self._local_entry(GUEST) is None or self._list_entry() is None):
                 await self.async_ensure(GUEST)
             await self._async_check_stay()
         self._show_mode_if_changed()
@@ -248,6 +346,7 @@ class AuriCalendars:
             self._save()
 
     async def _async_clear_guest(self, why: str) -> None:
+        await self._async_clear_guest_list(why)
         entity = calendar_entity(self.hass, self.entity_for(GUEST))
         if entity is None:
             return
@@ -261,6 +360,19 @@ class AuriCalendars:
             _LOGGER.warning("Couldn't empty the Guest Calendar (%s): %s", why, err)
             return
         _LOGGER.info("Emptied the Guest Calendar (%s): %s event(s)", why, len(uids))
+
+    async def _async_clear_guest_list(self, why: str) -> None:
+        entity = todo_entity(self.hass, self.list_for(GUEST))
+        if entity is None:
+            return
+        try:
+            uids = [item.uid for item in entity.todo_items or [] if item.uid]
+            if uids:
+                await entity.async_delete_todo_items(uids)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Couldn't empty the %s (%s): %s", GUEST_LIST[0], why, err)
+            return
+        _LOGGER.info("Emptied the %s (%s): %s item(s)", GUEST_LIST[0], why, len(uids))
 
     @callback
     def _save(self) -> None:

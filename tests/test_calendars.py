@@ -12,7 +12,9 @@ import pytest
 
 pytest.importorskip("pytest_homeassistant_custom_component.common")
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry  # noqa: E402
+from datetime import timedelta  # noqa: E402
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed  # noqa: E402
 
 from homeassistant.core import HomeAssistant  # noqa: E402
 from homeassistant.helpers import entity_registry as er  # noqa: E402
@@ -32,6 +34,9 @@ from custom_components.hey_auri_client.conversation.custom_services.calendar_ser
     CalendarToolService,
     build_rrule,
     describe_rrule,
+)
+from custom_components.hey_auri_client.conversation.custom_services.shopping_list_services import (  # noqa: E402
+    ShoppingListToolService,
 )
 from custom_components.hey_auri_client.conversation.local_tool_executor import LocalToolExecutor  # noqa: E402
 from custom_components.hey_auri_client.entities.mode import AuriModeSensor  # noqa: E402
@@ -56,6 +61,10 @@ async def home(hass: HomeAssistant, freezer, tmp_path):
     freezer.move_to(NOW)
     await hass.config.async_set_time_zone("America/Phoenix")
     await async_setup_component(hass, "homeassistant", {})
+    # The household's list: Home Assistant's Shopping list, as its onboarding adds it.
+    shopping = MockConfigEntry(domain="shopping_list")
+    shopping.add_to_hass(hass)
+    await hass.config_entries.async_setup(shopping.entry_id)
     entry = MockConfigEntry(domain=DOMAIN, data={CONF_CLIENT_ID: "client", CONF_SHARED_SECRET: "secret"})
     entry.add_to_hass(hass)
     calendars = AuriCalendars(hass, entry, None)
@@ -63,9 +72,14 @@ async def home(hass: HomeAssistant, freezer, tmp_path):
     await calendars.async_start()
     await hass.async_block_till_done()
     tools = CalendarToolService(hass)
+    shopping_tools = ShoppingListToolService(hass)
 
     async def call(name: str, turn=OWNER, **arguments):
         return await getattr(tools, name)({"entity_id": HOME_ENTITY, **arguments, "_turn": turn})
+
+    async def shop(name: str, turn=OWNER, **arguments):
+        # The model's entity_id, which the client ignores.
+        return await getattr(shopping_tools, name)({"entity_id": "todo.shopping_list", **arguments, "_turn": turn})
 
     async def hosting(**options) -> None:
         hass.config_entries.async_update_entry(entry, options=options)
@@ -73,7 +87,7 @@ async def home(hass: HomeAssistant, freezer, tmp_path):
         await hass.async_block_till_done()
         await calendars._async_refresh()  # noqa: SLF001
 
-    yield SimpleNamespace(entry=entry, calendars=calendars, call=call, hosting=hosting, freezer=freezer)
+    yield SimpleNamespace(entry=entry, calendars=calendars, call=call, shop=shop, hosting=hosting, freezer=freezer)
     calendars.async_stop()
 
 
@@ -145,6 +159,7 @@ async def test_the_mode_sensor_shows_the_mode_and_both_calendars(hass: HomeAssis
     assert sensor.native_value == "guest"
     assert sensor.extra_state_attributes == {
         "account_mode": "guest", "home_calendar": HOME_ENTITY, "guest_calendar": "calendar.guest_calendar",
+        "home_shopping_list": "todo.shopping_list", "guest_shopping_list": "todo.guest_shopping_list",
     }
 
 
@@ -159,6 +174,40 @@ async def test_turns_and_the_startup_check_bring_the_account_mode(hass: HomeAssi
         "type": "final", "conversation_id": "c1", "content": "OK", "mode": "owner", "account_mode": "auto"})
     await client.send_user_turn({"type": "user_turn", "conversation_id": "c1", "message": {"content": "hi"}, "context": {}})
     assert seen == ["guest", "auto"]
+
+
+async def test_the_hub_asks_for_the_account_mode_at_start_and_every_five_minutes(hass: HomeAssistant, home) -> None:
+    # Nothing tells the hub when the setting changes on hey-auri.com: without asking, a home set to
+    # Guest by hand kept showing the Home Calendar until someone spoke to Auri.
+    answers = iter(["owner", "owner", "guest"])
+    asked: list[str] = []
+
+    async def check_account() -> None:
+        mode = next(answers)
+        asked.append(mode)
+        calendars.note_account_mode(mode)
+
+    home.calendars.async_stop()
+    calendars = AuriCalendars(hass, home.entry, None, check_account=check_account)
+    await calendars.async_start()
+    await hass.async_block_till_done()
+    sensor = AuriModeSensor(home.entry, calendars)
+    assert asked == ["owner"] and sensor.native_value == "owner"
+
+    async def later(minutes: int) -> None:
+        home.freezer.tick(timedelta(minutes=minutes))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+
+    await later(4)
+    assert asked == ["owner"]  # not yet
+    await later(1)
+    assert asked == ["owner", "owner"]
+    await later(5)
+    assert asked == ["owner", "owner", "guest"]
+    assert sensor.native_value == "guest"
+    assert sensor.extra_state_attributes["guest_calendar"] == "calendar.guest_calendar"  # set up for the guests
+    calendars.async_stop()
 
 
 def test_the_account_mode_comes_with_the_backends_answers(hass: HomeAssistant) -> None:
@@ -329,3 +378,78 @@ async def test_every_thursday_must_start_on_a_thursday(home) -> None:
                                                            repeat="weekly", repeat_days=["thu"]))
     assert "Friday" in wrong["retry"] and "Thursday" in wrong["retry"]
     assert await _read(home) == []
+
+
+# ── the shopping lists ───────────────────────────────────────────────────────
+
+
+async def _items(home, turn=OWNER, **arguments) -> list[str]:
+    answer = await home.shop("get_shopping_list", turn, status=["needs_action", "completed"], **arguments)
+    assert answer["success"], answer
+    return sorted(item["summary"] for list_ in answer.values() if isinstance(list_, dict) for item in list_.get("items", []))
+
+
+async def test_the_guest_shopping_list_is_set_up_once_the_home_hosts(hass: HomeAssistant, home) -> None:
+    assert home.calendars.list_for(HOME) == "todo.shopping_list"
+    assert home.calendars.list_for(GUEST) is None  # a household that doesn't host gets no extra list
+    await home.hosting()
+    assert home.calendars.list_for(GUEST) == "todo.guest_shopping_list"
+    # Found by its Local To-do entry, whatever its entity is called; set up only once.
+    er.async_get(hass).async_update_entity("todo.guest_shopping_list", new_entity_id="todo.visitors")
+    assert home.calendars.list_for(GUEST) == "todo.visitors"
+    await home.calendars._async_refresh()  # noqa: SLF001
+    assert len(hass.config_entries.async_entries("local_todo")) == 1
+
+
+async def test_guests_have_only_their_own_shopping_list(home) -> None:
+    await home.hosting()
+    added = await home.shop("add_shopping_list_item", OWNER, item="Milk")
+    assert added == {"success": True, "list": "home"}
+    # A guest gets their own list, even asking for the household's and naming its entity.
+    assert (await home.shop("add_shopping_list_item", GUEST_TURN, item="Sunscreen", list="home"))["list"] == "guest"
+    assert await _items(home, GUEST_TURN, list="home") == ["Sunscreen"]
+    assert await _items(home) == ["Milk"]
+    # The household can add to the guests' list by naming it.
+    assert (await home.shop("add_shopping_list_item", OWNER, item="Towels", list="guest"))["list"] == "guest"
+    assert await _items(home, OWNER, list="guest") == ["Sunscreen", "Towels"]
+    # A guest can't tick off the household's items.
+    milk_uid = (await home.shop("get_shopping_list", OWNER, status=["needs_action"]))["todo.shopping_list"]["items"][0]["uid"]
+    refused = await home.shop("mark_shopping_list_item_complete", GUEST_TURN, uid=milk_uid)
+    assert "retry" in refused
+    assert await _items(home) == ["Milk"]
+
+
+async def test_the_tool_executor_gives_shopping_list_tools_the_turn(hass: HomeAssistant, home) -> None:
+    await home.hosting()
+    hass.states.async_set("person.sam", "home", {"friendly_name": "Sam"})
+    assert home.calendars.mode() == "owner"  # so only the turn itself can make it the guests' list
+    executor = LocalToolExecutor(hass)
+    call = {"id": "c1", "function": {"name": "add_shopping_list_item", "arguments": json.dumps(
+        {"entity_id": "todo.shopping_list", "item": "Ice"})}}
+    answer = await executor.execute_tool_call(call, conversation_id="conv", turn=SimpleNamespace(mode="guest", user_is_admin=None))
+    assert "guest" in json.dumps(answer)
+    assert await _items(home) == []
+
+
+async def test_the_guest_shopping_list_is_emptied_with_the_guest_calendar(home) -> None:
+    await home.hosting()
+    # Before the first booking: what the household puts there stays.
+    await home.shop("add_shopping_list_item", OWNER, item="Welcome wine", list="guest")
+    await home.hosting(**{CONF_BOOKING_ID: "B1", CONF_CHECK_IN: "2026-11-17T15:00:00", CONF_CHECK_OUT: "2026-11-19T11:00:00"})
+    assert await _items(home, GUEST_TURN) == ["Welcome wine"]
+    await home.shop("add_shopping_list_item", GUEST_TURN, item="Sunscreen")
+    await home.shop("add_shopping_list_item", OWNER, item="Milk")
+
+    home.freezer.move_to("2026-11-19T11:30:00-07:00")
+    await home.calendars._async_refresh()  # noqa: SLF001
+    assert await _items(home, GUEST_TURN) == ["Sunscreen", "Welcome wine"]
+    home.freezer.move_to("2026-11-19T12:01:00-07:00")
+    await home.calendars._async_refresh()  # noqa: SLF001
+    assert await _items(home, GUEST_TURN) == []
+    assert await _items(home) == ["Milk"]  # the household's list is never touched
+
+    # A stay replaced before it ended: its list is emptied at the takeover.
+    await home.hosting(**{CONF_BOOKING_ID: "B2", CONF_CHECK_IN: "2026-11-21T15:00:00", CONF_CHECK_OUT: "2026-11-23T11:00:00"})
+    await home.shop("add_shopping_list_item", GUEST_TURN, item="Coffee")
+    await home.hosting(**{CONF_BOOKING_ID: "B3", CONF_CHECK_IN: "2026-11-24T15:00:00", CONF_CHECK_OUT: "2026-11-26T11:00:00"})
+    assert await _items(home, GUEST_TURN) == []

@@ -2,8 +2,9 @@
 
 By the backend's rule for the account's setting (calendars.py): owner or guest as set, or for an
 account set to Automatic, owner only when no stay is under way and someone from the household is
-home. The dashboard shows the Guest Calendar while it says guest and the Home Calendar otherwise;
-installers can automate around it too. Its attributes give the account's setting and both calendars.
+home. The dashboard shows the Guest Calendar and the Guest Shopping List while it says guest, and the
+household's otherwise; installers can automate around it too. Its attributes give the account's
+setting, both calendars and both shopping lists.
 """
 from __future__ import annotations
 
@@ -43,4 +44,6 @@ class AuriModeSensor(SensorEntity):
             "account_mode": self._calendars.account_mode or "unknown",
             "home_calendar": self._calendars.entity_for(HOME),
             "guest_calendar": self._calendars.entity_for(GUEST),
+            "home_shopping_list": self._calendars.list_for(HOME),
+            "guest_shopping_list": self._calendars.list_for(GUEST),
         }

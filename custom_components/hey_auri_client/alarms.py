@@ -22,11 +22,12 @@ Assistant's time zone. A time that doesn't exist on the night clocks go forward 
 later, and one that happens twice when they go back rings once.
 
 Guests' alarms (set in guest mode) are seen only by guests, and go at check-out or when the stay
-changes.
+changes. The household's alarms don't ring while Auri is in guest mode (calendars.AuriCalendars.mode):
+a repeating one rings again on its next day in owner mode, a one-time one is let go.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time as dtime, timedelta, timezone, tzinfo
 from functools import partial
@@ -316,6 +317,9 @@ class AuriAlarms:
         self._add_entities: AddEntitiesCallback | None = None
         self._scheduled: dict[str, CALLBACK_TYPE] = {}
         self._unsubs: list[CALLBACK_TYPE] = []
+        # The mode Auri is in now, owner or guest (AuriCalendars.mode, set in __init__.py). The
+        # household's alarms don't ring while it's guest: guests aren't woken by the owner's alarm.
+        self.mode: Callable[[], str] = lambda: "owner"
 
     # -- running ------------------------------------------------------------------------------
 
@@ -694,6 +698,9 @@ class AuriAlarms:
             summary.append(", ".join(rooms))
         if record.skip_date and record.days:
             summary.append(f"skips {DAY_NAMES[record.skip_date.weekday()].capitalize()}")
+        paused = self.paused(record)
+        if paused:
+            summary.append("paused while guests stay")
         return {
             "alarm_id": record.id,
             "name": record.name,
@@ -705,6 +712,7 @@ class AuriAlarms:
             "skipping": record.skip_date.isoformat() if record.skip_date else None,
             "snoozed_until": record.snooze_until.astimezone(tz).isoformat() if record.snooze_until else None,
             "guest": record.guest,
+            "paused": paused,
             "summary": " · ".join(summary),
         }
 
@@ -732,13 +740,26 @@ class AuriAlarms:
         due = record.next_at or dt_util.utcnow()
         snoozed = record.snooze_until is not None
         record.snooze_until = None
-        self._ring(record, due=due, snoozed=snoozed)
+        if self.paused(record):
+            _LOGGER.debug("Alarm %s paused while guests stay: not rung", record.name or record.id)
+        else:
+            self._ring(record, due=due, snoozed=snoozed)
         today = dt_util.utcnow().astimezone(self._tz()).date()
         if record.skip_date is not None and record.skip_date < today:
             record.skip_date = None
         self._schedule(record)
         self._write(record)
         self._save()
+
+    def paused(self, record: AlarmRecord) -> bool:
+        """A household alarm while Auri is in guest mode: it doesn't ring (a one-time one is let go)."""
+        return not record.guest and self.mode() == "guest"
+
+    @callback
+    def mode_changed(self) -> None:
+        """The mode changed (AuriCalendars' listener): the switches show whether they're paused."""
+        for record in self._records.values():
+            self._write(record)
 
     def _ring(self, record: AlarmRecord, *, due: datetime, snoozed: bool) -> None:
         """Ring each of the alarm's satellites now, or once it's back (until 15 minutes after `due`)."""

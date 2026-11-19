@@ -139,6 +139,67 @@ function buildCalendarCards(calendars) {
     }
   ];
 }
+function buildTodoCards(lists) {
+  const { home, guest, modeEntity } = typeof lists === "string" ? { home: lists } : lists;
+  const card = (entity) => ({ type: "todo-list", entity, title: "Shopping list" });
+  if (!guest || !modeEntity) {
+    return [card(home)];
+  }
+  return [
+    {
+      type: "conditional",
+      conditions: [{ condition: "state", entity: modeEntity, state: "guest" }],
+      card: card(guest)
+    },
+    {
+      type: "conditional",
+      conditions: [{ condition: "state", entity: modeEntity, state_not: "guest" }],
+      card: card(home)
+    }
+  ];
+}
+function buildAlarmCards(modeEntity) {
+  const alarms = (attributes) => ({
+    type: "custom:auto-entities",
+    card: {
+      type: "vertical-stack"
+    },
+    card_param: "cards",
+    filter: {
+      include: [
+        {
+          entity_id: "switch.auri_alarm_*",
+          ...attributes ? { attributes } : {},
+          options: {
+            type: "tile",
+            state_content: ["summary"],
+            vertical: false
+          }
+        }
+      ]
+    },
+    sort: {
+      method: "attribute",
+      attribute: "time"
+    },
+    show_empty: false
+  });
+  if (!modeEntity) {
+    return [alarms(null)];
+  }
+  return [
+    {
+      type: "conditional",
+      conditions: [{ condition: "state", entity: modeEntity, state: "guest" }],
+      card: alarms({ guest: true })
+    },
+    {
+      type: "conditional",
+      conditions: [{ condition: "state", entity: modeEntity, state_not: "guest" }],
+      card: alarms({ guest: false })
+    }
+  ];
+}
 function buildFixedStack(weatherEntity, calendars, todoEntity) {
   const cards = [
     { type: "heading", heading_style: "title" },
@@ -176,32 +237,7 @@ function buildFixedStack(weatherEntity, calendars, todoEntity) {
       },
       show_empty: false
     },
-    {
-      type: "custom:auto-entities",
-      card: {
-        type: "vertical-stack"
-      },
-      card_param: "cards",
-      filter: {
-        include: [
-          {
-            // Hey Auri Client's alarms: on while set. Tapping the icon turns one off or
-            // on; the line under its name is its time, its days and where it rings.
-            entity_id: "switch.auri_alarm_*",
-            options: {
-              type: "tile",
-              state_content: ["summary"],
-              vertical: false
-            }
-          }
-        ]
-      },
-      sort: {
-        method: "attribute",
-        attribute: "time"
-      },
-      show_empty: false
-    },
+    ...buildAlarmCards(calendars?.modeEntity ?? null),
     {
       type: "horizontal-stack",
       cards: [
@@ -239,11 +275,7 @@ function buildFixedStack(weatherEntity, calendars, todoEntity) {
       forecast_type: "daily"
     },
     ...buildCalendarCards(calendars),
-    {
-      type: "todo-list",
-      entity: todoEntity,
-      title: "Shopping list"
-    }
+    ...buildTodoCards(todoEntity)
   ];
   return {
     type: "vertical-stack",
@@ -386,7 +418,11 @@ var AuriHomeDashboardStrategy = class {
       guest: mode?.attributes?.guest_calendar ?? null,
       modeEntity: mode ? "sensor.auri_mode" : null
     };
-    const todoEntity = config?.todo_entity ?? "todo.shopping_list";
+    const todoEntity = {
+      home: config?.todo_entity ?? mode?.attributes?.home_shopping_list ?? "todo.shopping_list",
+      guest: mode?.attributes?.guest_shopping_list ?? null,
+      modeEntity: calendars.modeEntity
+    };
     const [areas, floors] = await Promise.all([
       fetchAreas(hass),
       fetchFloors(hass)

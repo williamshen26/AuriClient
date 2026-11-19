@@ -1,4 +1,10 @@
-"""Tool handlers for shopping list (todo) actions."""
+"""Tool handlers for shopping list (todo) actions.
+
+The turn's mode picks the list, as for the calendars (calendars.py): the household's is Home
+Assistant's Shopping list, the guests' the Guest Shopping List. A guest turn only ever reaches the
+guests' list; the household reaches theirs, or the guests' when they name it (`list`). The model's
+entity_id is ignored.
+"""
 from __future__ import annotations
 
 import logging
@@ -7,8 +13,16 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
+from ...calendars import HOME
 from ...exceptions import ToolExecutionError
-from ..helpers import resolve_entity_id_no_fallback
+from .calendar_services import get_calendars
+
+SHOPPING_LIST_TOOL_NAMES = frozenset({
+    "get_shopping_list",
+    "add_shopping_list_item",
+    "mark_shopping_list_item_complete",
+    "remove_completed_shopping_list_item",
+})
 
 _LOGGER = logging.getLogger(__package__)
 
@@ -20,11 +34,10 @@ class ShoppingListToolService:
         self.hass = hass
 
     async def get_shopping_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = resolve_entity_id_no_fallback(
-            self.hass,
-            "todo",
-            arguments.get("entity_id"),
-        )
+        chosen = await self._list(arguments)
+        if isinstance(chosen, dict):
+            return chosen
+        role, entity_id = chosen
         raw_status = arguments.get("status")
 
         if not isinstance(raw_status, list) or not raw_status:
@@ -51,17 +64,16 @@ class ShoppingListToolService:
 
             _LOGGER.info("get_items result: %s", result)
             if isinstance(result, dict):
-                return {"success": True, **result}
-            return {"success": True, "result": result}
+                return {"success": True, "list": role, **result}
+            return {"success": True, "list": role, "result": result}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
     async def add_shopping_list_item(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = resolve_entity_id_no_fallback(
-            self.hass,
-            "todo",
-            arguments.get("entity_id"),
-        )
+        chosen = await self._list(arguments)
+        if isinstance(chosen, dict):
+            return chosen
+        role, entity_id = chosen
         item = str(arguments.get("item", "")).strip()
         if not item:
             return {"retry": "item is required"}
@@ -74,7 +86,7 @@ class ShoppingListToolService:
                 target={"entity_id": entity_id},
                 blocking=True,
             )
-            return {"success": True}
+            return {"success": True, "list": role}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
@@ -82,11 +94,10 @@ class ShoppingListToolService:
         self,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        entity_id = resolve_entity_id_no_fallback(
-            self.hass,
-            "todo",
-            arguments.get("entity_id"),
-        )
+        chosen = await self._list(arguments)
+        if isinstance(chosen, dict):
+            return chosen
+        role, entity_id = chosen
 
         uid = arguments.get("uid")
         if not uid:
@@ -105,7 +116,7 @@ class ShoppingListToolService:
                 target={"entity_id": entity_id},
                 blocking=True,
             )
-            return {"success": True}
+            return {"success": True, "list": role}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
 
@@ -113,11 +124,10 @@ class ShoppingListToolService:
         self,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        entity_id = resolve_entity_id_no_fallback(
-            self.hass,
-            "todo",
-            arguments.get("entity_id"),
-        )
+        chosen = await self._list(arguments)
+        if isinstance(chosen, dict):
+            return chosen
+        role, entity_id = chosen
 
         try:
             await self.hass.services.async_call(
@@ -126,9 +136,24 @@ class ShoppingListToolService:
                 target={"entity_id": entity_id},
                 blocking=True,
             )
-            return {"success": True}
+            return {"success": True, "list": role}
         except HomeAssistantError as err:
             raise ToolExecutionError(str(err)) from err
+
+    async def _list(self, arguments: dict[str, Any]) -> tuple[str, str] | dict[str, Any]:
+        """(home or guest, the list's entity id) for this turn, or an error to return."""
+        turn = arguments.get("_turn")
+        turn_mode = getattr(turn, "mode", None)
+        calendars = get_calendars(self.hass)
+        if calendars is None:
+            if turn_mode == "guest":
+                return {"success": False, "error": "The guests' shopping list isn't ready yet: try again in a moment."}
+            return HOME, "todo.shopping_list"
+        role = calendars.list_role_for_turn(turn_mode, arguments.get("list"))
+        entity_id = calendars.list_for(HOME) if role == HOME else await calendars.async_ensure_list()
+        if not entity_id:
+            return {"success": False, "error": "The guests' shopping list isn't set up: Hey Auri Client couldn't add it to Home Assistant."}
+        return role, entity_id
 
     async def _get_full_shopping_list_item_id(self, uid: str, entity_id: str) -> str:
         try:

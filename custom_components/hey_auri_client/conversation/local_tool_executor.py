@@ -18,7 +18,7 @@ from .custom_services.entity_services import EntityToolService
 from .custom_services.guest_services import GuestToolService
 from .custom_services.light_services import LightToolService
 from .custom_services.media_player_services import MediaPlayerToolService
-from .custom_services.shopping_list_services import ShoppingListToolService
+from .custom_services.shopping_list_services import SHOPPING_LIST_TOOL_NAMES, ShoppingListToolService
 from .custom_services.sticky_note_services import StickyNoteToolService
 from .custom_services.timer_services import TIMER_TOOL_NAMES, TimerToolService
 from .custom_services.weather_services import WeatherToolService
@@ -185,6 +185,9 @@ class LocalToolExecutor:
             arguments["_turn"] = turn
         elif function_name in CALENDAR_TOOL_NAMES:
             # The turn's mode picks the calendar: a guest only the Guest Calendar (calendars.py).
+            arguments["_turn"] = turn
+        elif function_name in SHOPPING_LIST_TOOL_NAMES:
+            # The turn's mode picks the list too: a guest only the Guest Shopping List.
             arguments["_turn"] = turn
 
         if function_name in AUTOMATION_TOOL_NAMES and turn is not None and turn.user_is_admin is False:
