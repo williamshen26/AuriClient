@@ -117,6 +117,7 @@ Dashboard card construction functions:
 - `buildAreaTileCard()` - Create individual area tile cards
 - `buildAreaGridSection()` - Build floor section with title and area grid
 - `buildFixedStack()` - Assemble sidebar with clock/weather/calendar/todo
+- `buildCalendarCards()` - The calendar: with a guest calendar, the Guest Calendar while `sensor.auri_mode` says guest and the Home Calendar otherwise (two conditional cards)
 - `buildAreaViewCards()` - Generate entity cards for area detail views
 
 #### `helpers/utils.js`
@@ -209,7 +210,7 @@ strategy:
   title: "My Home"                           # Dashboard title (default: "Auri Home")
   dashboard_path: "auri-home"                # URL path (default: "auri-home")
   weather_entity: "weather.forecast_home"     # Weather entity (default: "weather.forecast_home")
-  calendar_entity: "calendar.home_calendar"   # Calendar entity (default: "calendar.home_calendar")
+  calendar_entity: "calendar.home_calendar"   # Home calendar when Hey Auri Client's sensor.auri_mode doesn't name one (default: "calendar.home_calendar")
   todo_entity: "todo.shopping_list"           # Todo entity (default: "todo.shopping_list")
 ```
 

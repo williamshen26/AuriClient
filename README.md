@@ -350,6 +350,33 @@ strategy:
 
 It uses three custom cards: **timer-bar-card** and **auto-entities**, both in the Marketplace, and **Auri Sticky Note Card**. The source is in `dashboard/` in this repository; see its README to change and rebuild it.
 
+The calendar on the dashboard follows the mode (see [Calendars](#calendars)): the Guest Calendar while Auri is in guest mode, the Home Calendar otherwise.
+
+## Calendars
+
+Auri keeps two Home Assistant **Local Calendars**, and sets them up itself:
+- **Home Calendar**, the household's. It's set up when Hey Auri Client starts.
+- **Guest Calendar**, for guests. It's set up once the home hosts guests: your account is set to guest mode or Automatic, or a stay is entered.
+
+Both show on Home Assistant's Calendar page. For now Auri uses only these two; Google and other calendars may come later.
+
+**Which calendar Auri uses follows the mode** (see [Owner and guest mode](#owner-and-guest-mode)):
+- **In owner mode,** the Home Calendar. You can also ask for the guest calendar by name ("put the cleaner on the guest calendar").
+- **In guest mode,** the Guest Calendar only: guests never see or change the household's.
+- **With Automatic,** the same rule as the mode: the Home Calendar only when no stay is under way and someone from the household is home.
+
+The **Auri Mode** sensor (`sensor.auri_mode`) shows the mode between turns: `owner` or `guest`, with your account's setting and both calendars as attributes. The dashboard's calendar switches with it.
+
+**What Auri can do with events:**
+- read them;
+- add them, once or repeating ("piano lessons every Thursday at 4");
+- move or change them;
+- remove them. Auri tells you which event, and asks first.
+
+For an event that repeats, Auri asks whether you mean only that one, that one and the ones after it, or all of them. All-day events work too.
+
+**The Guest Calendar is emptied after each stay,** so every guest starts with a clean calendar: when the stay's guest memory is erased (an hour after check-out), or when a new booking replaces a stay before then. Everything on it goes, including what the household added for those guests. What the household puts there before a booking arrives stays until that stay ends. Keep the house's own events, such as cleaning days, on the Home Calendar.
+
 ## Timers, alarms and sticky notes
 
 **Timers.** Ask Auri for a timer ("set a pasta timer for 10 minutes"), and it rings on the device you asked:

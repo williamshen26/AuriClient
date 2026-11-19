@@ -16,7 +16,13 @@ export class AuriHomeDashboardStrategy {
     const dashPath = config?.dashboard_path ?? "auri-home";
 
     const weatherEntity = config?.weather_entity ?? "weather.forecast_home";
-    const calendarEntity = config?.calendar_entity ?? "calendar.home_calendar";
+    // Hey Auri Client's mode sensor names both calendars; the guest one exists once the home hosts.
+    const mode = hass.states["sensor.auri_mode"];
+    const calendars = {
+      home: mode?.attributes?.home_calendar ?? config?.calendar_entity ?? "calendar.home_calendar",
+      guest: mode?.attributes?.guest_calendar ?? null,
+      modeEntity: mode ? "sensor.auri_mode" : null,
+    };
     const todoEntity = config?.todo_entity ?? "todo.shopping_list";
 
     // Fetch registries
@@ -34,7 +40,7 @@ export class AuriHomeDashboardStrategy {
     // Build fixed left stack
     const fixedStack = buildFixedStack(
       weatherEntity,
-      calendarEntity,
+      calendars,
       todoEntity
     );
 

@@ -121,6 +121,21 @@ class SaaSClient:
             tts_stream_endpoint.strip() if tts_stream_endpoint else None
         )
         self.metrics_service = metrics_service
+        # Told the account's mode setting (owner, guest or auto) whenever an answer carries it
+        # (calendars.AuriCalendars.note_account_mode).
+        self.on_account_mode: Callable[[str], None] | None = None
+
+    def _note_account_mode(self, answer: Any) -> None:
+        mode = answer.get("account_mode") if isinstance(answer, dict) else None
+        if self.on_account_mode is not None and mode in ("owner", "guest", "auto"):
+            try:
+                self.on_account_mode(mode)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Couldn't note the account's mode: %s", err)
+
+    async def async_check_account(self) -> None:
+        """Ask the conversation function for the account's mode setting (a warm-up, no turn). Never raises."""
+        await self._async_warm_function(f"{self.endpoint}/conversation", "/conversation", {"type": "warm_up"})
 
     def _session(self) -> aiohttp.ClientSession:
         """Home Assistant's shared session: its pool keeps connections to the API open between requests.
@@ -168,7 +183,12 @@ class SaaSClient:
                 headers=self._build_signed_headers(path, body, content_type="application/json"),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as response:
-                await response.read()
+                text = await response.text()
+            if path == "/conversation" and response.status < 400:
+                try:
+                    self._note_account_mode(json.loads(text))
+                except ValueError:
+                    pass
             # Warm now, whatever it answered: an older backend refuses the request, after the
             # same signature check and table reads a turn does.
             self.hass.data.setdefault(DOMAIN, {}).setdefault(_LAST_REQUEST_KEY, {})[_cloud_function(path) or path] = monotonic()
@@ -290,6 +310,8 @@ class SaaSClient:
                 try:
                     parsed = json.loads(body)
                     success = True
+                    if path == "/conversation":
+                        self._note_account_mode(parsed)
                     return parsed
                 except json.JSONDecodeError as err:
                     error_type = "json_decode_error"

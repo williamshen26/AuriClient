@@ -219,6 +219,8 @@ MAX_FOLLOW_UP_ROUNDS = 10
 DATA_AGENT = "agent"
 DATA_ALARMS = "alarms"
 DATA_BOOKINGS = "bookings"
+# The Home and Guest Calendars and the account's mode (calendars.py).
+DATA_CALENDARS = "calendars"
 DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
 DATA_SUPPORT = "support"
@@ -229,6 +231,8 @@ DATA_TIMERS = "timers"
 DATA_UPDATER = "updater"
 # Where AuriAlarms sits in hass.data[DOMAIN]["runtime"], for the alarm tools and the turn's context.
 RUNTIME_ALARMS = "auri_alarms"
+# Where AuriCalendars sits in hass.data[DOMAIN]["runtime"], for the calendar tools.
+RUNTIME_CALENDARS = "auri_calendars"
 
 # The Home Assistant account Auri support signs in with (a user id), set under Auri support in
 # the options. Unset: no account is treated as Auri support's.

@@ -17,6 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
 from .alarms import AuriAlarms
+from .calendars import AuriCalendars
 from .bookings.sync import BookingSync
 from .conversation.agent_class import ThinOpenAIAgent
 from .cache import (
@@ -28,6 +29,7 @@ from .cache import (
 from .const import (
     DATA_AGENT,
     DATA_ALARMS,
+    DATA_CALENDARS,
     DATA_BOOKINGS,
     DATA_MEMORY,
     DATA_SKILL_GUESS,
@@ -41,6 +43,7 @@ from .const import (
     MEDIA_PLAYER_MACS_STORAGE_VERSION,
     ROOT_RUNTIME,
     RUNTIME_ALARMS,
+    RUNTIME_CALENDARS,
 )
 from .conversation.custom_services.timer_services import RUNTIME_TIMERS
 from .conversation.services import async_setup_services
@@ -175,6 +178,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     timers = AuriTimers(hass, entry)
     # Alarms ring on satellites at a time of day (Home Assistant has no alarm clock); kept here.
     alarms = AuriAlarms(hass, entry, timers)
+    # The Home and Guest Calendars, chosen by the account's mode, which every backend answer carries.
+    calendars = AuriCalendars(hass, entry, bookings)
+    agent.client.on_account_mode = calendars.note_account_mode
     client_version = str(integration.version or "unknown")
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -187,9 +193,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data[DATA_UPDATER] = updater
     data[DATA_TIMERS] = timers
     data[DATA_ALARMS] = alarms
+    data[DATA_CALENDARS] = calendars
     runtime = hass.data[DOMAIN].setdefault("runtime", dict(ROOT_RUNTIME))
     runtime[RUNTIME_TIMERS] = timers
     runtime[RUNTIME_ALARMS] = alarms
+    runtime[RUNTIME_CALENDARS] = calendars
 
     # Connects in the background; conversations work (without memory) meanwhile.
     await memory.async_start()
@@ -199,6 +207,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await updater.async_start()
     entry.async_on_unload(updater.async_stop)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    async def _async_start_calendars(hass: HomeAssistant) -> None:
+        # Once Home Assistant runs: setting up a Local Calendar loads that integration. Then the
+        # account's mode setting, for the calendar the dashboard shows before the first turn.
+        await calendars.async_start()
+        entry.async_create_background_task(hass, agent.client.async_check_account(), "hey_auri_client account mode")
+
+    entry.async_on_unload(async_at_started(hass, _async_start_calendars))
+    entry.async_on_unload(calendars.async_stop)
 
     async def _async_check_logins(hass: HomeAssistant) -> None:
         await async_update_logins_issue(hass, entry)
@@ -304,6 +321,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime = hass.data[DOMAIN].get("runtime") or {}
         if runtime.get(RUNTIME_ALARMS) is alarms:
             runtime.pop(RUNTIME_ALARMS)
+    calendars: AuriCalendars | None = data.get(DATA_CALENDARS)
+    runtime = hass.data[DOMAIN].get("runtime") or {}
+    if calendars is not None and runtime.get(RUNTIME_CALENDARS) is calendars:
+        runtime.pop(RUNTIME_CALENDARS)
     ha_conversation.async_unset_agent(hass, entry)
     bookings: BookingSync | None = data.get(DATA_BOOKINGS)
     if bookings is not None:

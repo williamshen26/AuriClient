@@ -5,6 +5,7 @@ from .sticky_note import AuriStickyNoteEntity, generate_sticky_note_id
 from .session_link import AuriSessionLinkSensor
 from .memory_status import AuriMemorySensor
 from .guest_stay import AuriGuestStaySensor
+from .mode import AuriModeSensor
 
 __all__ = [
 	"AuriTimerEntity",
@@ -12,5 +13,6 @@ __all__ = [
 	"AuriSessionLinkSensor",
 	"AuriMemorySensor",
 	"AuriGuestStaySensor",
+	"AuriModeSensor",
 	"generate_sticky_note_id",
 ]

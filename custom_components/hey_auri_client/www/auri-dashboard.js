@@ -121,7 +121,25 @@ function buildAreaGridSection(title, areaList, dashPath) {
     ]
   };
 }
-function buildFixedStack(weatherEntity, calendarEntity, todoEntity) {
+function buildCalendarCards(calendars) {
+  const { home, guest, modeEntity } = typeof calendars === "string" ? { home: calendars } : calendars;
+  if (!guest || !modeEntity) {
+    return [{ type: "calendar", entities: [home] }];
+  }
+  return [
+    {
+      type: "conditional",
+      conditions: [{ condition: "state", entity: modeEntity, state: "guest" }],
+      card: { type: "calendar", entities: [guest] }
+    },
+    {
+      type: "conditional",
+      conditions: [{ condition: "state", entity: modeEntity, state_not: "guest" }],
+      card: { type: "calendar", entities: [home] }
+    }
+  ];
+}
+function buildFixedStack(weatherEntity, calendars, todoEntity) {
   const cards = [
     { type: "heading", heading_style: "title" },
     {
@@ -220,10 +238,7 @@ function buildFixedStack(weatherEntity, calendarEntity, todoEntity) {
       show_forecast: true,
       forecast_type: "daily"
     },
-    {
-      type: "calendar",
-      entities: [calendarEntity]
-    },
+    ...buildCalendarCards(calendars),
     {
       type: "todo-list",
       entity: todoEntity,
@@ -365,7 +380,12 @@ var AuriHomeDashboardStrategy = class {
   static async generate(config, hass) {
     const dashPath = config?.dashboard_path ?? "auri-home";
     const weatherEntity = config?.weather_entity ?? "weather.forecast_home";
-    const calendarEntity = config?.calendar_entity ?? "calendar.home_calendar";
+    const mode = hass.states["sensor.auri_mode"];
+    const calendars = {
+      home: mode?.attributes?.home_calendar ?? config?.calendar_entity ?? "calendar.home_calendar",
+      guest: mode?.attributes?.guest_calendar ?? null,
+      modeEntity: mode ? "sensor.auri_mode" : null
+    };
     const todoEntity = config?.todo_entity ?? "todo.shopping_list";
     const [areas, floors] = await Promise.all([
       fetchAreas(hass),
@@ -376,7 +396,7 @@ var AuriHomeDashboardStrategy = class {
     const { groups, other } = groupAreasByFloor(sortedAreas, floorsById);
     const fixedStack = buildFixedStack(
       weatherEntity,
-      calendarEntity,
+      calendars,
       todoEntity
     );
     const floorSections = [];

@@ -54,13 +54,38 @@ export function buildAreaGridSection(title, areaList, dashPath) {
 }
 
 /**
+ * The calendar card(s). With a guest calendar and Hey Auri Client's mode sensor: the Guest Calendar
+ * while the sensor says guest, the Home Calendar otherwise (it switches live). Otherwise one card.
+ * @param {string|{home: string, guest?: string, modeEntity?: string}} calendars - Calendar entity ID, or both calendars
+ * @returns {Object[]} Card configurations
+ */
+export function buildCalendarCards(calendars) {
+    const { home, guest, modeEntity } = typeof calendars === "string" ? { home: calendars } : calendars;
+    if (!guest || !modeEntity) {
+        return [{ type: "calendar", entities: [home] }];
+    }
+    return [
+        {
+            type: "conditional",
+            conditions: [{ condition: "state", entity: modeEntity, state: "guest" }],
+            card: { type: "calendar", entities: [guest] },
+        },
+        {
+            type: "conditional",
+            conditions: [{ condition: "state", entity: modeEntity, state_not: "guest" }],
+            card: { type: "calendar", entities: [home] },
+        },
+    ];
+}
+
+/**
  * Build fixed left stack with time, weather, calendar, and todo
  * @param {string} weatherEntity - Weather entity ID
- * @param {string} calendarEntity - Calendar entity ID
+ * @param {string|{home: string, guest?: string, modeEntity?: string}} calendars - Calendar entity ID, or both calendars
  * @param {string} todoEntity - Todo entity ID
  * @returns {Object} Vertical stack card configuration
  */
-export function buildFixedStack(weatherEntity, calendarEntity, todoEntity) {
+export function buildFixedStack(weatherEntity, calendars, todoEntity) {
     const cards = [
         { type: "heading", heading_style: "title" },
         {
@@ -159,10 +184,7 @@ export function buildFixedStack(weatherEntity, calendarEntity, todoEntity) {
             show_forecast: true,
             forecast_type: "daily",
         },
-        {
-            type: "calendar",
-            entities: [calendarEntity],
-        },
+        ...buildCalendarCards(calendars),
         {
             type: "todo-list",
             entity: todoEntity,

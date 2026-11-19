@@ -11,7 +11,7 @@ from ..memory.identity import TurnMeta
 from ..memory.tools import MemoryToolService
 from .custom_services.alarm_services import ALARM_TOOL_NAMES, AlarmToolService
 from .custom_services.automation_services import AutomationToolService
-from .custom_services.calendar_services import CalendarToolService
+from .custom_services.calendar_services import CALENDAR_TOOL_NAMES, CalendarToolService
 from .custom_services.climate_services import ClimateToolService
 from .custom_services.cover_services import CoverToolService
 from .custom_services.entity_services import EntityToolService
@@ -132,6 +132,8 @@ class LocalToolExecutor:
             "stop_alarm": self.alarm.stop_alarm,
             "get_calendar_events": self.calendar.get_calendar_events,
             "add_calendar_event": self.calendar.add_calendar_event,
+            "change_calendar_event": self.calendar.change_calendar_event,
+            "remove_calendar_event": self.calendar.remove_calendar_event,
         }
         if memory is not None:
             self.memory = MemoryToolService(memory)
@@ -180,6 +182,9 @@ class LocalToolExecutor:
             arguments["_turn"] = turn
         elif function_name in ALARM_TOOL_NAMES:
             # An alarm rings on the satellite that asked; a guest sees only the stay's alarms.
+            arguments["_turn"] = turn
+        elif function_name in CALENDAR_TOOL_NAMES:
+            # The turn's mode picks the calendar: a guest only the Guest Calendar (calendars.py).
             arguments["_turn"] = turn
 
         if function_name in AUTOMATION_TOOL_NAMES and turn is not None and turn.user_is_admin is False:

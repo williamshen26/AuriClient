@@ -4,9 +4,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import API_ENDPOINT, CONF_CLIENT_ID, CONF_SHARED_SECRET, DATA_BOOKINGS, DATA_MEMORY, DATA_TIMERS, DOMAIN
+from .const import API_ENDPOINT, CONF_CLIENT_ID, CONF_SHARED_SECRET, DATA_BOOKINGS, DATA_CALENDARS, DATA_MEMORY, DATA_TIMERS, DOMAIN
 from .conversation.custom_services.sticky_note_services import async_restore_sticky_notes
-from .entities import AuriGuestStaySensor, AuriMemorySensor, AuriSessionLinkSensor
+from .entities import AuriGuestStaySensor, AuriMemorySensor, AuriModeSensor, AuriSessionLinkSensor
 from .helpers import get_timeout_seconds
 from .saas_client import SaaSClient
 
@@ -16,7 +16,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """The integration's sensors: the session link, memory, the guest stay, sticky notes and timers."""
+    """The integration's sensors: the session link, memory, the guest stay, the mode, sticky notes and timers."""
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})
     runtime["async_add_entities"] = async_add_entities
     await async_restore_sticky_notes(hass)
@@ -42,6 +42,10 @@ async def async_setup_entry(
     bookings = entry_data.get(DATA_BOOKINGS)
     if bookings is not None:
         entities.append(AuriGuestStaySensor(entry, bookings))
+    # owner or guest, by the account's setting: which calendar the dashboard shows.
+    calendars = entry_data.get(DATA_CALENDARS)
+    if calendars is not None:
+        entities.append(AuriModeSensor(entry, calendars))
     async_add_entities(entities)
     # Each timer's sensor, from the timers kept across restarts; then each new one as it starts.
     timers = entry_data.get(DATA_TIMERS)
