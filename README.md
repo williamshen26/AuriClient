@@ -12,7 +12,7 @@ The integration adds three things to Home Assistant:
 
 - **Device control**: lights (on/off, brightness, color), covers and blinds (position, tilt), climate (temperature, humidity, fan and HVAC mode) and media players (power, playback, volume, mute, shuffle, source and app switching). TVs can be woken with Wake-on-LAN.
 - **Music** via [Music Assistant](https://music-assistant.io): search and play, and move what's playing to another speaker.
-- **Everyday skills**: weather forecasts, calendar events, shopping list, timers, sticky notes, and creating and editing automations.
+- **Everyday skills**: weather forecasts, calendar events, shopping list, timers, alarms, sticky notes, and creating and editing automations.
 - **Long-term memory** (optional, owner mode): Auri remembers facts, preferences and past conversations in your own PostgreSQL database, and can keep a readable copy in an Obsidian vault. See [Memory](#memory).
 - **Places and rides**: search for places, get directions, and request Uber ride links. Links arrive by text message or on the [session QR page](#session-qr-code). In mainland China they open Amap instead (see [Homes in mainland China](#homes-in-mainland-china)).
 - **Guest mode** for short-term rentals: answers guests' questions from the details you enter (check-in and check-out, Wi-Fi, parking, house rules and more) and can notify you.
@@ -338,7 +338,7 @@ Now and then Hey Auri has something to tell you, such as planned maintenance or 
 
 ## The Home dashboard
 
-Hey Auri Client includes the Home dashboard that Auri sets up on its hubs. It builds itself from your areas and floors: a sidebar with the timers, a clock, the weather, the calendar and the shopping list, a tile for each area, and a page for each area. It loads with the client and updates with it, so there's nothing to copy or add as a resource.
+Hey Auri Client includes the Home dashboard that Auri sets up on its hubs. It builds itself from your areas and floors: a sidebar with the timers, the alarms, a clock, the weather, the calendar and the shopping list, a tile for each area, and a page for each area. It loads with the client and updates with it, so there's nothing to copy or add as a resource.
 
 To use it, create a dashboard, open it, choose **Edit dashboard**, then **Raw configuration editor** in the menu, and replace everything with:
 
@@ -350,7 +350,7 @@ strategy:
 
 It uses three custom cards: **timer-bar-card** and **auto-entities**, both in the Marketplace, and **Auri Sticky Note Card**. The source is in `dashboard/` in this repository; see its README to change and rebuild it.
 
-## Timers and sticky notes
+## Timers, alarms and sticky notes
 
 **Timers.** Ask Auri for a timer ("set a pasta timer for 10 minutes"), and it rings on the device you asked:
 
@@ -365,6 +365,23 @@ Each timer is a sensor, `sensor.auri_timer_<id>`, which the Home dashboard shows
 Timers survive restarts, including the nightly update's. Once Home Assistant is back and the timer's device has reconnected, each one carries on with the time it had left, and one that ran out meanwhile rings at once. A timer whose device doesn't come back within 15 minutes is dropped.
 
 **Before 0.2.8,** the client fired `hey_auri_client.auri_timer_finished` and left the ringing to an automation (the master hub's "DO NOT DELETE" one). That event is gone, so the automation does nothing now: a Repairs notice offers to delete it. To do something else when a timer ends, such as flashing a light, use `hey_auri_client.timer_finished` (see [Events](#events)).
+
+**Alarms.** Ask Auri to wake you ("wake me up at 7", "set an alarm for 6:30 on weekdays", "set a gym alarm for 5:45 on Monday, Wednesday and Friday"), and the alarm rings on the voice satellite you asked, with the same ring as a timer. Say "stop", say the wake word or press the button to stop it; otherwise it stops by itself after 15 minutes. Say "snooze" (or "snooze for 5 minutes") within half an hour and it rings again in 9 minutes (or the time you said); "I'm up" cancels a snooze. With the Auri satellite firmware, the wake word during the ring stops it and keeps listening, so "Hey Auri, snooze" works in one go.
+
+- **Another room:** "set an alarm in Mia's room for 7" rings every satellite in that area (by its name or one of its aliases).
+- **From the phone app or the web page,** Auri asks which room's satellite should ring, unless the home has only one. Alarms ring on satellites only, not on phones.
+- **Repeating alarms** ring on the days you choose. "Skip tomorrow's alarm" skips one day, and "turn off the gym alarm" keeps it without ringing until you turn it back on. A one-time alarm is removed after it rings.
+- You can also ask what alarms you have, change an alarm's time or days, and cancel one or all of them.
+
+Home Assistant has no alarm clock, so Hey Auri Client keeps the alarms and rings the satellites itself: no automation is needed. At the alarm time it starts a 1-second Home Assistant timer on each satellite, which then plays its own timer ring. Each alarm is a switch, `switch.auri_alarm_<id>`, on while the alarm is set, which the Home dashboard lists with its time, days and room. Its attributes include `time`, `repeats`, `next_ring` and `rings_in`. These switches aren't exposed to voice assistants, so "turn off all the switches" can't silence an alarm.
+
+Alarms use Home Assistant's time zone and survive restarts. An alarm that falls while Home Assistant restarts, or while its satellite is offline, rings as soon as the satellite is back, up to 15 minutes late. The nightly update doesn't restart Home Assistant within 15 minutes before an alarm. On the night the clocks go forward, an alarm at a time that's skipped (2:30) rings an hour later; when they go back, an alarm at a time that happens twice rings once.
+
+The ring plays at the satellite's volume: a satellite turned down to 0, or whose media player is muted, rings silently. Its microphone Mute switch doesn't silence the ring, but voice can't stop it then (the button still can).
+
+**Guests** can set alarms too. They see only the alarms set during their stay, and those are removed at check-out.
+
+To do something when an alarm goes off, such as turning on the bedroom lights, use the `hey_auri_client.alarm_ringing` event (see [Events](#events)).
 
 **Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card. Notes are kept across restarts.
 
@@ -399,6 +416,7 @@ Every other account, including one that set up Home Assistant itself, gets no ve
 |---|---|
 | `hey_auri_client.conversation_finished` | `conversation_id`, `client_id` (the config entry ID), `user_input`, `response` |
 | `hey_auri_client.timer_finished` | `timer_id`, `entity_id`, `name`, `duration`, and the `device_id` it rang on (none for a timer that notified phones) |
+| `hey_auri_client.alarm_ringing` | `alarm_id`, `entity_id`, `name`, `time` (HH:MM), the `device_ids` of the satellites it rings on, and `snoozed` (whether it's a snoozed ring) |
 | `hey_auri_client.memory_run_finished` | `day`, `scope` (`owner` or `guest`), `status` (`succeeded`, `failed` or `skipped`), `reason`, and when it succeeded `digest`, `exchanges`, `facts_added`, `facts_updated` and `facts_confirmed` |
 
 The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `disabled` (not set up), `starting`, `enabled`, `unavailable` (the database can't be reached; Auri keeps working without memory and catches up later) or `error` (a setup problem; see its `error` attribute). Its attributes also show the last nightly run, guest memory's state (`guest_memory`: `on`, `off`, or `closed` after a stay has ended), and when it was last reset or erased.

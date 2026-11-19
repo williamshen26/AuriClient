@@ -16,6 +16,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
+from .alarms import AuriAlarms
 from .bookings.sync import BookingSync
 from .conversation.agent_class import ThinOpenAIAgent
 from .cache import (
@@ -26,6 +27,7 @@ from .cache import (
 )
 from .const import (
     DATA_AGENT,
+    DATA_ALARMS,
     DATA_BOOKINGS,
     DATA_MEMORY,
     DATA_SECURITY_REPORT,
@@ -37,6 +39,7 @@ from .const import (
     MEDIA_PLAYER_MACS_STORAGE_KEY,
     MEDIA_PLAYER_MACS_STORAGE_VERSION,
     ROOT_RUNTIME,
+    RUNTIME_ALARMS,
 )
 from .conversation.custom_services.timer_services import RUNTIME_TIMERS
 from .conversation.services import async_setup_services
@@ -64,7 +67,7 @@ from .updates import AutoUpdater
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = ["stt", "sensor", "tts", "button"]
+PLATFORMS = ["stt", "sensor", "tts", "button", "switch"]
 MEDIA_PLAYER_SOURCES_STORAGE_VERSION = 1
 MEDIA_PLAYER_SOURCES_STORAGE_KEY = f"{DOMAIN}_media_player_sources"
 
@@ -169,6 +172,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     updater = AutoUpdater(hass, entry, agent.client)
     # Timers ring on the device that asked, show on the dashboard and survive restarts.
     timers = AuriTimers(hass, entry)
+    # Alarms ring on satellites at a time of day (Home Assistant has no alarm clock); kept here.
+    alarms = AuriAlarms(hass, entry, timers)
     client_version = str(integration.version or "unknown")
 
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -179,7 +184,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data[DATA_SECURITY_REPORT] = reporter
     data[DATA_UPDATER] = updater
     data[DATA_TIMERS] = timers
-    hass.data[DOMAIN].setdefault("runtime", dict(ROOT_RUNTIME))[RUNTIME_TIMERS] = timers
+    data[DATA_ALARMS] = alarms
+    runtime = hass.data[DOMAIN].setdefault("runtime", dict(ROOT_RUNTIME))
+    runtime[RUNTIME_TIMERS] = timers
+    runtime[RUNTIME_ALARMS] = alarms
 
     # Connects in the background; conversations work (without memory) meanwhile.
     await memory.async_start()
@@ -288,6 +296,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime = hass.data[DOMAIN].get("runtime") or {}
         if runtime.get(RUNTIME_TIMERS) is timers:
             runtime.pop(RUNTIME_TIMERS)
+    alarms: AuriAlarms | None = data.get(DATA_ALARMS)
+    if alarms is not None:
+        await alarms.async_stop()
+        runtime = hass.data[DOMAIN].get("runtime") or {}
+        if runtime.get(RUNTIME_ALARMS) is alarms:
+            runtime.pop(RUNTIME_ALARMS)
     ha_conversation.async_unset_agent(hass, entry)
     bookings: BookingSync | None = data.get(DATA_BOOKINGS)
     if bookings is not None:

@@ -98,6 +98,32 @@ export function buildFixedStack(weatherEntity, calendarEntity, todoEntity) {
             show_empty: false,
         },
         {
+            type: "custom:auto-entities",
+            card: {
+                type: "vertical-stack",
+            },
+            card_param: "cards",
+            filter: {
+                include: [
+                    {
+                        // Hey Auri Client's alarms: on while set. Tapping the icon turns one off or
+                        // on; the line under its name is its time, its days and where it rings.
+                        entity_id: "switch.auri_alarm_*",
+                        options: {
+                            type: "tile",
+                            state_content: ["summary"],
+                            vertical: false,
+                        },
+                    },
+                ],
+            },
+            sort: {
+                method: "attribute",
+                attribute: "time",
+            },
+            show_empty: false,
+        },
+        {
             type: "horizontal-stack",
             cards: [
                 {

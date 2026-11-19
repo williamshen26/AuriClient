@@ -200,6 +200,8 @@ class AuriTimers:
         self._stale: list[dict[str, Any]] = []
         self._restore_until = dt_util.utcnow() + RESTORE_WAIT
         self._unsub: CALLBACK_TYPE | None = None
+        # Home Assistant's ids of the 1-second timers that ring a device for an alarm (ring()).
+        self._rings: set[str] = set()
 
     # -- running ------------------------------------------------------------------------------
 
@@ -360,6 +362,26 @@ class AuriTimers:
         self._write(record)
         self._save()
 
+    @callback
+    def ring(self, device_id: str, *, name: str | None = None, language: str | None = None) -> bool:
+        """Ring a device now, as a timer's end rings it: a 1-second Home Assistant timer there (alarms.py).
+
+        It isn't one of Auri's timers: no sensor, no timer bar, no timer_finished event. False when
+        the device can't ring now (a satellite that's away isn't a timer device until it's back).
+        """
+        manager = self._manager()
+        if manager is None or not manager.is_timer_device(device_id):
+            return False
+        try:
+            native_id = manager.start_timer(
+                device_id, None, None, 1, language=language or self.hass.config.language or "en", name=name
+            )
+        except Exception as err:  # noqa: BLE001 (its connection can drop at that moment: rung again later)
+            _LOGGER.warning("Couldn't ring device %s: %s", self.device_name(device_id) or device_id, err)
+            return False
+        self._rings.add(native_id)
+        return True
+
     def device_name(self, device_id: str | None) -> str | None:
         if not device_id or (device := dr.async_get(self.hass).async_get(device_id)) is None:
             return None
@@ -393,9 +415,12 @@ class AuriTimers:
         native = {
             timer_id: info
             for timer_id, info in (manager.timers.items() if manager is not None else ())
-            # Delayed commands ("turn off the lights in 5 minutes") ring nowhere.
-            if not getattr(info, "conversation_command", None)
+            # Delayed commands ("turn off the lights in 5 minutes") ring nowhere, and an alarm's
+            # 1-second ring isn't a timer.
+            if not getattr(info, "conversation_command", None) and timer_id not in self._rings
         }
+        if self._rings:
+            self._rings &= set(manager.timers) if manager is not None else set()
         changed = False
         for record in list(self._records.values()):
             if record.device_id is None:

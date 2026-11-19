@@ -9,7 +9,8 @@ copied by hand) gets no version, so nothing happens there.
 With a version to run that isn't installed, it installs that version through Home Assistant's
 Marketplace (its update entity, update.install with the version: a release tag such as v0.2.7)
 and restarts Home Assistant, which the new code needs. Nothing restarts when nothing was
-installed. It waits for a later night while a voice satellite is in a conversation, and gives up
+installed. It waits for a later night while a voice satellite is in a conversation or an alarm
+rings within 15 minutes, and gives up
 on a version after 3 failed nights; Auri staff see that on their Hubs to check list (the security
 summary's update_status).
 """
@@ -26,8 +27,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DATA_ALARMS, DOMAIN
 from .memory.config import CONF_MEMORY_DAY_BOUNDARY_HOUR, DEFAULT_MEMORY_DAY_BOUNDARY_HOUR
 
 if TYPE_CHECKING:
@@ -42,6 +44,8 @@ FAILED_NIGHTS_BEFORE_GIVING_UP = 3
 INSTALL_TIMEOUT = timedelta(minutes=15)
 # A satellite in these states is in a conversation: a restart now would cut it off.
 BUSY_SATELLITE_STATES = frozenset({"listening", "processing", "responding"})
+# No restart this long before an alarm: Home Assistant and the satellites might not be back in time.
+ALARM_QUIET_BEFORE = timedelta(minutes=15)
 _ASK_TIMEOUT_SECONDS = 20
 _STORAGE_VERSION = 1
 _STORAGE_KEY = f"{DOMAIN}_updates"
@@ -170,6 +174,10 @@ class AutoUpdater:
             return {"result": "failed", "version": target}
         if busy := [s.entity_id for s in self.hass.states.async_all("assist_satellite") if s.state in BUSY_SATELLITE_STATES]:
             _LOGGER.info("Not updating Hey Auri Client now: %s is in a conversation", ", ".join(busy))
+            return {"result": "busy", "version": target}
+        alarms = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get(DATA_ALARMS)
+        if alarms is not None and (soon := alarms.ringing_soon(ALARM_QUIET_BEFORE)) is not None:
+            _LOGGER.info("Not updating Hey Auri Client now: an alarm rings at %s", dt_util.as_local(soon).strftime("%H:%M"))
             return {"result": "busy", "version": target}
 
         _LOGGER.info("Updating Hey Auri Client from %s to %s", state.attributes.get("installed_version"), target)

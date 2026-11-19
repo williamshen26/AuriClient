@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from ..helpers import to_json_safe
 from ..memory.identity import TurnMeta
 from ..memory.tools import MemoryToolService
+from .custom_services.alarm_services import ALARM_TOOL_NAMES, AlarmToolService
 from .custom_services.automation_services import AutomationToolService
 from .custom_services.calendar_services import CalendarToolService
 from .custom_services.climate_services import ClimateToolService
@@ -55,6 +56,7 @@ class LocalToolExecutor:
         self.sticky_note = StickyNoteToolService(hass)
         self.automation = AutomationToolService(hass)
         self.timer = TimerToolService(hass)
+        self.alarm = AlarmToolService(hass)
         self.calendar = CalendarToolService(hass)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
             # Fallback for hallucinated generic turn_on/turn_off/call_service
@@ -122,6 +124,12 @@ class LocalToolExecutor:
             "change_timer": self.timer.change_timer,
             "pause_timer": self.timer.pause_timer,
             "resume_timer": self.timer.resume_timer,
+            "set_alarm": self.alarm.set_alarm,
+            "list_alarms": self.alarm.list_alarms,
+            "cancel_alarm": self.alarm.cancel_alarm,
+            "change_alarm": self.alarm.change_alarm,
+            "snooze_alarm": self.alarm.snooze_alarm,
+            "stop_alarm": self.alarm.stop_alarm,
             "get_calendar_events": self.calendar.get_calendar_events,
             "add_calendar_event": self.calendar.add_calendar_event,
         }
@@ -169,6 +177,9 @@ class LocalToolExecutor:
             arguments["_memory_embedding"] = function_payload.get("memory_embedding")
         elif function_name in TIMER_TOOL_NAMES:
             # A timer rings on the device that asked; Auri's own timer notifies the asker's phones.
+            arguments["_turn"] = turn
+        elif function_name in ALARM_TOOL_NAMES:
+            # An alarm rings on the satellite that asked; a guest sees only the stay's alarms.
             arguments["_turn"] = turn
 
         if function_name in AUTOMATION_TOOL_NAMES and turn is not None and turn.user_is_admin is False:

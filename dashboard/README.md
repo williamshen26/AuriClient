@@ -19,6 +19,7 @@ Instead of manually creating and maintaining dashboard cards, this strategy gene
 - **Fixed sidebar** with essential widgets:
   - Personalized greeting header
   - A timer bar for each running or paused timer (Hey Auri Client's `sensor.auri_timer_*`); a paused one stands still
+  - A row for each alarm (Hey Auri Client's `switch.auri_alarm_*`): its time, days and room, with its icon turning it off or on
   - Analog clock
   - Weather forecast
   - Calendar

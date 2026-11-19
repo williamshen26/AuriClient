@@ -205,6 +205,9 @@ EVENT_TIMER_FINISHED = f"{DOMAIN}.timer_finished"
 # What clients before 0.2.8 fired instead, for the "DO NOT DELETE" automation that rang the
 # satellite and notified every phone. No longer fired; a Repairs notice offers to delete it.
 OLD_TIMER_FINISHED_EVENT = f"{DOMAIN}.auri_timer_finished"
+# Fired when one of Auri's alarms goes off (alarms.py), for an owner's own wake-up routine. The
+# satellites ring by themselves; nothing needs to listen to it.
+EVENT_ALARM_RINGING = f"{DOMAIN}.alarm_ringing"
 EVENT_CONVERSATION_FINISHED = f"{DOMAIN}.conversation_finished"
 # A satellite's firmware fires this when the user starts a request: the wake word or the button.
 # Home Assistant doesn't tell an agent how a request started; this resets the follow-up count.
@@ -214,6 +217,7 @@ EVENT_AURI_WAKE_WORD = "esphome.auri_wake_word"
 MAX_FOLLOW_UP_ROUNDS = 10
 
 DATA_AGENT = "agent"
+DATA_ALARMS = "alarms"
 DATA_BOOKINGS = "bookings"
 DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
@@ -221,6 +225,8 @@ DATA_SUPPORT = "support"
 DATA_SECURITY_REPORT = "security_report"
 DATA_TIMERS = "timers"
 DATA_UPDATER = "updater"
+# Where AuriAlarms sits in hass.data[DOMAIN]["runtime"], for the alarm tools and the turn's context.
+RUNTIME_ALARMS = "auri_alarms"
 
 # The Home Assistant account Auri support signs in with (a user id), set under Auri support in
 # the options. Unset: no account is treated as Auri support's.

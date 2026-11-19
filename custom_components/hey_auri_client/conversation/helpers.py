@@ -12,7 +12,7 @@ from homeassistant.helpers import area_registry as ar, device_registry as dr, en
 from homeassistant.util import dt as dt_util
 
 from ..cache import add_processed_entity, get_media_player_sources, get_processed_entities
-from ..const import CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, DOMAIN
+from ..const import CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, DOMAIN, RUNTIME_ALARMS
 from ..exceptions import ToolExecutionError
 from ..helpers import to_json_safe
 
@@ -126,7 +126,7 @@ async def build_context_snapshot(
     # Not the process's local time: its zone comes from the container's TZ or the host (UTC in
     # a container without TZ), and doesn't follow a change to Home Assistant's setting.
     now = dt_util.now()
-    return {
+    snapshot = {
         "agent_id": user_input.agent_id,
         "device_id": user_input.device_id,
         "language": user_input.language,
@@ -149,6 +149,11 @@ async def build_context_snapshot(
         "now": now.isoformat(),
         "day_of_week": now.strftime("%A"),
     }
+    # An alarm that went off on this satellite in the last 30 minutes: "stop" or "snooze" means it.
+    alarms = hass.data.get(DOMAIN, {}).get("runtime", {}).get(RUNTIME_ALARMS)
+    if alarms is not None and (alarm_rang := alarms.rang_here(user_input.device_id)) is not None:
+        snapshot["alarm_rang"] = alarm_rang
+    return snapshot
 
 
 def get_response_language(hass: HomeAssistant) -> str:
