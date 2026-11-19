@@ -429,7 +429,7 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - your home's location (latitude and longitude, time zone, country);
   - the current time, the Home Assistant user's name, the language, and which device and area you're speaking from;
   - whether a booking is under way, whether anyone from your household is home (yes or no, not who), and whether Auri should ask the guests their name.
-- **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech. When a satellite starts listening after a quiet half-minute, two signed requests with nothing in them get the cloud ready while you speak.
+- **For voice**: your audio, to transcribe it, and Auri's reply text, to turn it into speech. When a satellite starts listening after a quiet half-minute, two signed requests with nothing in them get the cloud ready while you speak. As soon as you stop speaking, the words heard so far go to the cloud (again as further words arrive) so it can guess which of Auri's skills the request needs, such as lights or timers, and have it ready: the same words the request sends a moment later. The cloud keeps none of it.
 - **Whether the signed-in user is an administrator** (yes or no), so automations are offered only to administrators.
 - **Hourly, when something changed, and once a day anyway: your hub's security, as counts and yes or no only**, shown under Hub security on your dashboard at hey-auri.com, and to Auri support to see which hubs need attention:
   - the Home Assistant and Hey Auri Client versions, and how many updates are waiting;

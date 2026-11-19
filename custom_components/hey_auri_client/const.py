@@ -223,6 +223,8 @@ DATA_FRONTEND_CLIENT = "frontend_client"
 DATA_MEMORY = "memory"
 DATA_SUPPORT = "support"
 DATA_SECURITY_REPORT = "security_report"
+# The skill guess (conversation/skill_guess.py): speech-to-text starts it, the agent's turn sends it.
+DATA_SKILL_GUESS = "skill_guess"
 DATA_TIMERS = "timers"
 DATA_UPDATER = "updater"
 # Where AuriAlarms sits in hass.data[DOMAIN]["runtime"], for the alarm tools and the turn's context.

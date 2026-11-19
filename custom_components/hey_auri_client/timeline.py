@@ -34,6 +34,10 @@ class TurnTimeline:
     first_audio: float | None = None
     cloud_seconds: float = 0.0
     cloud_requests: int = 0
+    # The skill guess (conversation/skill_guess.py): the skills, "none", "late", "failed" or "" (none made),
+    # and how long the turn waited for it, alongside memory's recall.
+    skill_guess: str = ""
+    guess_wait: float = 0.0
     created: float = field(default_factory=monotonic)
 
 
@@ -68,6 +72,14 @@ def cloud_request(hass: HomeAssistant, seconds: float) -> None:
         timeline.cloud_requests += 1
 
 
+def skill_guess(hass: HomeAssistant, guessed: str, waited: float) -> None:
+    """What the turn's skill guess gave, and how long the turn waited for it (seconds)."""
+    timeline = _current(hass)
+    if timeline is not None:
+        timeline.skill_guess = guessed
+        timeline.guess_wait = waited
+
+
 def first_audio(hass: HomeAssistant) -> None:
     """The reply's first audio reached Home Assistant: log the turn and close it."""
     timeline = _current(hass)
@@ -88,7 +100,9 @@ def describe(timeline: TurnTimeline) -> str:
         f"transcript {span(timeline.speech_end, timeline.transcript)} ms"
         f" | to agent {span(timeline.transcript, timeline.agent_start)} ms"
         f" | context and memory {span(timeline.agent_start, timeline.context_ready)} ms"
-        f" | cloud {int(timeline.cloud_seconds * 1000)} ms in {timeline.cloud_requests} requests"
+        + (f" (skill guess {timeline.skill_guess}, waited {int(timeline.guess_wait * 1000)} ms)"
+           if timeline.skill_guess else "")
+        + f" | cloud {int(timeline.cloud_seconds * 1000)} ms in {timeline.cloud_requests} requests"
         f" | agent total {span(timeline.agent_start, timeline.agent_done)} ms"
         f" | to speech request {span(timeline.agent_done, timeline.tts_request)} ms"
         f" | speech first audio {span(timeline.tts_request, timeline.first_audio)} ms"

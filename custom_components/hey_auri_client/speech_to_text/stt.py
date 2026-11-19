@@ -18,6 +18,7 @@ from ..const import (
     API_ENDPOINT,
     CONF_CLIENT_ID,
     DATA_MEMORY,
+    DATA_SKILL_GUESS,
     DOMAIN,
     ERROR_NO_AUTHENTICATION,
     ERROR_NO_NO_SPEECH,
@@ -266,7 +267,7 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
         return stt.SpeechResult(transcript, stt.SpeechResultState.SUCCESS)
 
     def _words_handler(self) -> Callable[[str], None]:
-        """For the words heard as speech ends: note the moment, and start memory's recall on them."""
+        """For the words heard as speech ends: note the moment, and start memory's recall and the skill guess."""
         speech_ended = False
 
         def on_words(words: str) -> None:
@@ -274,9 +275,14 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             if not speech_ended:
                 speech_ended = True
                 timeline.speech_ended(self.hass)
-            memory = (self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) or {}).get(DATA_MEMORY)
+            data = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) or {}
+            memory = data.get(DATA_MEMORY)
             if words and memory is not None:
                 memory.prefetch_turn(words)
+            # Every voice turn, whatever the language and with memory on or off (conversation/skill_guess.py).
+            guesses = data.get(DATA_SKILL_GUESS)
+            if words and guesses is not None:
+                guesses.prefetch(words)
 
         return on_words
 

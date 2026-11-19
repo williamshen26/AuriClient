@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable
 from datetime import UTC, datetime
 import logging
@@ -39,6 +40,7 @@ from .follow_up import FollowUpTracker
 from .helpers import build_context_snapshot, get_response_language
 from ..helpers import get_timeout_seconds
 from .local_tool_executor import MEMORY_TOOL_NAMES, LocalToolExecutor
+from .skill_guess import SkillGuesses
 from ..memory.identity import Speaker, TurnMeta, async_resolve_speaker
 from ..metric_service import RequestLatencyMetricService
 from ..saas_client import SaaSClient, SaaSTurnResponse
@@ -171,6 +173,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             metrics_service=self.request_latency_metrics,
         )
         self.memory: MemoryRuntime | None = None
+        # A voice turn's words, guessed as speech ends: the skills its first model call needs.
+        self.skill_guesses = SkillGuesses(hass, self.client)
         self.tool_executor = LocalToolExecutor(hass)
         # Turns heard from a mic left open after a reply, and how many in a row.
         self.follow_ups = FollowUpTracker()
@@ -337,8 +341,12 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             user_id=user_input.context.user_id,
             language=user_input.language,
         )
+        # The skill guess started as speech ended: waited for alongside memory's recall (voice turns only).
+        hints = asyncio.ensure_future(self.skill_guesses.async_hints(user_input.text))
         if self.memory is not None:
             context["memory"] = await self.memory.async_turn_context(user_input.text, speaker, conversation_id)
+        skill_hints, guessed, waited = await hints
+        timeline.skill_guess(self.hass, guessed, waited)
         timeline.mark(self.hass, "context_ready")
         tool_names: list[str] = []
         payload = {
@@ -351,6 +359,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             },
             "context": context,
         }
+        if skill_hints:
+            payload["skill_hints"] = skill_hints
 
         try:
             response = await self._timed(self.client.send_user_turn(payload))

@@ -30,6 +30,7 @@ from .const import (
     DATA_ALARMS,
     DATA_BOOKINGS,
     DATA_MEMORY,
+    DATA_SKILL_GUESS,
     DATA_SECURITY_REPORT,
     DATA_SUPPORT,
     DATA_TIMERS,
@@ -179,6 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     data[DATA_AGENT] = agent
     data[DATA_MEMORY] = memory
+    data[DATA_SKILL_GUESS] = agent.skill_guesses
     data[DATA_BOOKINGS] = bookings
     data[DATA_SUPPORT] = support
     data[DATA_SECURITY_REPORT] = reporter
