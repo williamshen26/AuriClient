@@ -417,7 +417,7 @@ The ring plays at the satellite's volume: a satellite turned down to 0, or whose
 
 To do something when an alarm goes off, such as turning on the bedroom lights, use the `hey_auri_client.alarm_ringing` event (see [Events](#events)).
 
-**Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card. Notes are kept across restarts.
+**Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card, or in the **Auri Sticky Note Card** (`type: custom:auri-sticky-note-card`, with the note's `entity`), which the client includes and which can delete the note. Notes are kept across restarts.
 
 ## Automatic updates (homes Auri set up)
 
