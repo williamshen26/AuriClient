@@ -418,6 +418,7 @@ class MemoryRuntime:
         kind: str,
         tool_names: list[str],
         language: str | None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         """Queue one exchange for the archive of the space of the turn's mode (the caller checks the mode)."""
         if not self.config.configured or self.state == MemoryState.ERROR:
@@ -433,7 +434,18 @@ class MemoryRuntime:
             kind=kind,
             tool_names=tool_names,
             language=language,
+            meta=meta,
         )
+
+    def note_mishearing_used(self, conversation_id: str | None, memory_id: int) -> None:
+        """A voice turn went out as this mishearing's meant words (in the space async_turn_context found it in)."""
+        self.space_for_turn(self.last_known_mode, conversation_id).note_mishearing_used(memory_id)
+
+    def meant_words(self, words: str) -> str | None:
+        """The meant words when these are a saved mishearing's (mishearings.py), for the skill guess at speech end."""
+        if not words or self.memory_allowed is False:
+            return None
+        return self.space_for(self.last_known_mode).meant_words(words)
 
     # ── the owner's memory, for callers that predate spaces ─────────────────
 

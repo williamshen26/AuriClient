@@ -74,6 +74,7 @@ class FakeApi:
         self.ratings: dict[str, tuple[int, str]] = {}
         self.on_rate = None  # runs while a rating is "in the cloud"
         self.embed_updates: list[Any] = []  # what each reconcile asked for
+        self.mishearing_answer: dict[str, Any] = {"mishearings": []}  # /memory/mishearings' answer
 
     def _maybe_fail(self, stage: str) -> None:
         if stage in self.fail:
@@ -137,6 +138,12 @@ class FakeApi:
         ]
         return {"ratings": ratings, "usage": {"prompt_tokens": 20, "completion_tokens": 5}}
 
+    async def mishearings(self, **fields):
+        self.calls.append(("mishearings", fields["windows"]))
+        self.scopes.add(fields.get("scope"))
+        self._maybe_fail("mishearings")
+        return self.mishearing_answer
+
 
 class FakeHass:
     def __init__(self, config_dir: str) -> None:
@@ -171,6 +178,7 @@ class FakeRuntime:
         self.entities = store.list_entities()
         self.backfills = 0
         self.invalidations = 0
+        self.mishearing_refreshes = 0
 
     def invalidate(self) -> None:
         self.invalidations += 1
@@ -187,6 +195,9 @@ class FakeRuntime:
     async def async_backfill_embeddings(self) -> int:
         self.backfills += 1
         return 0
+
+    async def async_refresh_mishearings(self) -> None:
+        self.mishearing_refreshes += 1
 
 
 CANDIDATES = [
@@ -1029,3 +1040,154 @@ def test_vault_copy_is_written_and_a_public_folder_is_refused(store, make_job, t
     job, _, _, _ = make_job(vault_path=str(public))
     asyncio.run(job.async_run_day(day, force=True))
     assert not (public / "Auri").exists()
+
+
+# ── mishearings (memory/mishearings.py) ─────────────────────────────────────────────────────────
+
+def seed_voice(store: MemoryStore, day: date, turns: list[tuple[int, str, str, list[str], str]], *, device: str = "sat-1",
+               voice: bool = True) -> None:
+    """Voice turns from one satellite: (seconds after 10:00, said, reply, tools, kind)."""
+    start = day_window(day, TZ, 4)[0] + timedelta(hours=6)
+    rows = []
+    for seconds, said, reply, tools, kind in turns:
+        exchange = new_exchange_id()
+        at = dt_util.as_utc(start + timedelta(seconds=seconds))
+        common = {"conversation_id": f"voice-{day}", "exchange_id": exchange, "kind": kind, "device_id": device,
+                  "tool_names": tools, "meta": {"voice": True} if voice else {}}
+        rows.append({**common, "role": "user", "content": said, "speaker_source": "ha_user", "speaker_name": "Will",
+                     "person_entity_id": "person.will", "created_at": at})
+        rows.append({**common, "role": "assistant", "content": reply, "speaker_source": "assistant",
+                     "created_at": at + timedelta(seconds=1)})
+    store.insert_messages(rows)
+
+
+MISHEARD_DAY = [
+    (0, "瓦登达", "我没听清“瓦登达”，您能再说一遍吗？", [], "chat"),
+    (9, "把灯打开", "好的", ["turn_on_light"], "device_control"),
+]
+PAIR = {"window": 1, "heard": "瓦登达", "meant": "把灯打开", "speaker": "Will", "evidence": "把灯打开"}
+
+
+def test_the_night_saves_what_speech_to_text_misheard_word_for_word(store, make_job):
+    day = yesterday()
+    seed_voice(store, day, MISHEARD_DAY)
+    job, runtime, api, _ = make_job([])
+    api.mishearing_answer = {"mishearings": [PAIR], "usage": {"prompt_tokens": 40, "completion_tokens": 8}}
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert result["status"] == "succeeded" and result["mishearings"] == 1
+    # The windows went out without their times, the short device command included.
+    ((_, windows),) = [call for call in api.calls if call[0] == "mishearings"]
+    assert [[exchange["said"] for exchange in window["exchanges"]] for window in windows] == [["瓦登达", "把灯打开"]]
+    assert "occurred_at" not in windows[0]["exchanges"][0]
+    saved = rows(store, "SELECT content, meta, source, occurred_at, expires_at FROM auri_memory.mem_memories "
+                        "WHERE kind = 'mishearing'")
+    assert len(saved) == 1
+    assert saved[0]["content"] == 'Speech-to-text heard "瓦登达" when someone said "把灯打开".'
+    assert saved[0]["meta"] == {"heard": "瓦登达", "meant": "把灯打开", "speakers": ["Will"]}
+    assert saved[0]["source"] == "nightly"
+    assert saved[0]["expires_at"] - saved[0]["occurred_at"] > timedelta(days=170)
+    assert runtime.mishearing_refreshes == 1
+    run = rows(store, "SELECT stats FROM auri_memory.mem_runs WHERE job = 'nightly' AND run_date = :day", day=day)
+    assert run[0]["stats"]["mishearing_windows"] == 1 and run[0]["stats"]["usage"]["prompt_tokens"] >= 40
+
+
+def test_a_mishearing_found_another_night_is_counted_again(store, make_job):
+    first, second = yesterday() - timedelta(days=1), yesterday()
+    seed_voice(store, first, MISHEARD_DAY)
+    seed_voice(store, second, MISHEARD_DAY)
+    job, _, api, _ = make_job([])
+    api.mishearing_answer = {"mishearings": [PAIR]}
+
+    asyncio.run(job.async_run_day(first))
+    result = asyncio.run(job.async_run_day(second))
+
+    assert (result["mishearings"], result["mishearings_again"]) == (0, 1)
+    assert rows(store, "SELECT confirmed_count FROM auri_memory.mem_memories WHERE kind = 'mishearing'") == [
+        {"confirmed_count": 1}]
+
+
+def test_a_cloud_error_skips_only_the_mishearings(store, make_job):
+    day = yesterday()
+    seed_voice(store, day, MISHEARD_DAY)
+    job, _, api, _ = make_job([])
+    # An AuriService that doesn't have the step yet.
+    api.fail["mishearings"] = MemoryApiError("Unsupported memory route", status_code=404, error_code="not_found")
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert result["status"] == "succeeded" and result["digest"] == 1 and result["mishearings"] == 0
+    run = rows(store, "SELECT stats FROM auri_memory.mem_runs WHERE job = 'nightly' AND run_date = :day", day=day)
+    assert run[0]["stats"]["mishearings_skipped"] == "not_found"
+
+
+def test_over_the_budget_the_mishearings_stop_the_night_as_any_stage_does(store, make_job):
+    day = yesterday()
+    seed_voice(store, day, MISHEARD_DAY)
+    job, _, api, _ = make_job([])
+    api.fail["mishearings"] = MemoryApiError("limit", status_code=429)
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert result == {"status": "failed", "reason": "over_budget"}
+    assert rows(store, "SELECT count(*) AS n FROM auri_memory.mem_memories")[0]["n"] == 0  # nothing half-written
+
+
+def test_typed_turns_and_lone_requests_send_no_windows(store, make_job):
+    day = yesterday()
+    seed_voice(store, day, MISHEARD_DAY, voice=False)  # typed in the app
+    seed_voice(store, day, [(600, "What time is it?", "Ten.", [], "chat")], device="sat-2")
+    job, _, api, _ = make_job([])
+
+    result = asyncio.run(job.async_run_day(day))
+
+    assert result["status"] == "succeeded"
+    assert not [call for call in api.calls if call[0] == "mishearings"]
+
+
+def test_a_pair_corrected_with_its_own_heard_words_is_retired(store, make_job):
+    first, second = yesterday() - timedelta(days=1), yesterday()
+    seed_voice(store, first, MISHEARD_DAY)
+    job, runtime, api, _ = make_job([])
+    api.mishearing_answer = {"mishearings": [PAIR]}
+    asyncio.run(job.async_run_day(first))
+    # Sent as "把灯打开", corrected with "瓦登达" itself: the pair was wrong.
+    seed_voice(store, second, [(0, "瓦登达", "好的", ["turn_on_light"], "device_control"),
+                               (9, "不是，瓦登达", "我没听清", [], "chat")])
+    store.insert_messages([])  # (nothing else that day)
+    with store.engine.begin() as conn:
+        import sqlalchemy
+        conn.execute(sqlalchemy.text("UPDATE auri_memory.chat_messages SET meta = '{\"voice\": true, \"taken_as\": \"把灯打开\"}' "
+                                     "WHERE content = '瓦登达' AND created_at >= :since"),
+                     {"since": dt_util.as_utc(day_window(second, TZ, 4)[0])})
+    api.mishearing_answer = {"mishearings": [dict(PAIR, meant="瓦登达")]}
+
+    result = asyncio.run(job.async_run_day(second))
+
+    assert (result["mishearings"], result["mishearings_wrong"]) == (0, 1)
+    assert rows(store, "SELECT status, status_reason FROM auri_memory.mem_memories WHERE kind = 'mishearing'") == [
+        {"status": "retracted", "status_reason": "wrong"}]
+    assert runtime.mishearing_refreshes == 2
+
+
+def test_a_new_meaning_for_the_same_words_replaces_the_old_pair(store, make_job):
+    # The night after, the household corrected a turn the hub had sent as the old meant words. Short device
+    # commands only: the day has no transcript, and its mishearings are still found.
+    first, second = yesterday() - timedelta(days=1), yesterday()
+    seed_voice(store, first, MISHEARD_DAY)
+    seed_voice(store, second, [(0, "瓦登达", "好的", ["turn_on_light"], "device_control"),
+                               (9, "不是，把灯关上", "好的", ["turn_off_light"], "device_control")])
+    job, runtime, api, _ = make_job([])
+    api.mishearing_answer = {"mishearings": [PAIR]}
+    asyncio.run(job.async_run_day(first))
+    api.mishearing_answer = {"mishearings": [dict(PAIR, meant="把灯关上")]}
+
+    result = asyncio.run(job.async_run_day(second))
+
+    assert result["status"] == "succeeded" and result["digest"] == 0 and result["mishearings"] == 1
+    assert ("digest", "draft") not in api.calls[-3:]
+    saved = rows(store, "SELECT meta->>'meant' AS meant, status FROM auri_memory.mem_memories "
+                        "WHERE kind = 'mishearing' ORDER BY id")
+    assert saved == [{"meant": "把灯打开", "status": "superseded"}, {"meant": "把灯关上", "status": "current"}]
+    assert runtime.mishearing_refreshes == 2

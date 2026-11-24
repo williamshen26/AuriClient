@@ -262,6 +262,9 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             kind=kind or _turn_kind(user_input, tool_names),
             tool_names=tool_names,
             language=user_input.language,
+            # Voice turns go into the nightly job's mishearing windows (memory/mishearings.py), with the words they
+            # went out as when those were a saved mishearing's.
+            meta=({"voice": True} | ({"taken_as": turn.taken_as} if turn.taken_as else {})) if turn.voice else None,
         )
 
     async def _send_tool_results_fire_and_forget(self, payload: dict) -> None:
@@ -347,6 +350,17 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             context["memory"] = await self.memory.async_turn_context(user_input.text, speaker, conversation_id)
         skill_hints, guessed, waited = await hints
         timeline.skill_guess(self.hass, guessed, waited)
+        # Any outcome but "" means speech-to-text sent these words as speech ended: a voice turn.
+        turn.voice = bool(guessed)
+        # Speech-to-text wrote these very words before when the household meant others (memory/mishearings.py):
+        # a voice turn goes out as the meant words; a typed one as typed.
+        text = user_input.text
+        memory_block = context.get("memory") if isinstance(context.get("memory"), dict) else {}
+        heard_as = memory_block.pop("heard_as", None)
+        if heard_as and turn.voice:
+            text = turn.taken_as = heard_as["meant"]
+            memory_block["heard_as"] = {"heard": heard_as["heard"], "id": heard_as["id"]}
+            self.memory.note_mishearing_used(conversation_id, heard_as["id"])
         timeline.mark(self.hass, "context_ready")
         tool_names: list[str] = []
         payload = {
@@ -354,7 +368,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             "conversation_id": conversation_id,
             "message": {
                 "role": "user",
-                "content": user_input.text,
+                "content": text,
                 "ts": datetime.now(UTC).isoformat(),
             },
             "context": context,

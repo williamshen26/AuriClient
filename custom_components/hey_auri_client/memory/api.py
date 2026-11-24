@@ -186,6 +186,9 @@ class MemoryApi:
     async def rate(self, **fields: Any) -> dict[str, Any]:
         return await self._post("rate", fields)
 
+    async def mishearings(self, **fields: Any) -> dict[str, Any]:
+        return await self._post("mishearings", fields)
+
     async def grade(self, items: list[dict[str, str]]) -> dict[str, Any]:
         return await self._post("grade", {"items": items})
 

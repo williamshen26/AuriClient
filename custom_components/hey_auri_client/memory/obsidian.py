@@ -21,6 +21,7 @@ _KIND_TITLES = {
     "decision": "Decisions",
     "commitment": "Plans and commitments",
     "about_assistant": "About the assistant",
+    "mishearing": "Heard wrong (speech-to-text)",
 }
 
 

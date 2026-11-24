@@ -12,6 +12,13 @@ MAX_EXCHANGE_CHARS = 1500
 # Short device commands ("turn off the lights") say nothing worth
 # remembering; longer ones may carry a preference ("...I like it dim at night").
 DEVICE_CONTROL_MAX_IGNORED_WORDS = 12
+# Mishearing windows: voice requests from one device, each this close to the one before (the repeat or the yes
+# that shows what was meant comes right after).
+MISHEARING_WINDOW_GAP = timedelta(minutes=2)
+MAX_MISHEARING_WINDOWS = 60  # AuriService's limit per request
+MAX_WINDOW_EXCHANGES = 8
+MAX_WINDOW_TEXT_CHARS = 300
+MAX_WINDOW_TOOLS = 8
 
 
 def day_window(day: date, tz: tzinfo, boundary_hour: int) -> tuple[datetime, datetime]:
@@ -102,6 +109,83 @@ def split_chunk(chunk: str) -> list[str]:
         return [chunk[:middle], chunk[middle:]]
     middle = len(lines) // 2
     return ["\n".join(lines[:middle]), "\n".join(lines[middle:])]
+
+
+def mishearing_windows(rows: Sequence[dict[str, Any]], tz: tzinfo, *, guest: bool = False) -> list[dict[str, Any]]:
+    """Runs of two or more voice exchanges from one device, each within two minutes of the one before.
+
+    For /memory/mishearings: a request speech-to-text misheard is usually followed by the repeat, the correction
+    or the yes to "did you mean" that shows what was meant. Unlike the digest's transcript, short device commands
+    stay in (the meant request is often one); automatic turns and typed ones don't (archive meta "voice").
+    Each exchange keeps its time as occurred_at, which isn't sent.
+    """
+    exchanges: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("kind") == "automatic":
+            continue
+        exchange = exchanges.setdefault(
+            row["exchange_id"],
+            {"device": row.get("device_id") or "", "voice": False, "said": "", "reply": "", "speaker": "",
+             "occurred_at": row["created_at"], "tools": [str(name) for name in row.get("tool_names") or []][:MAX_WINDOW_TOOLS]},
+        )
+        text = _clip(row.get("content") or "", MAX_WINDOW_TEXT_CHARS)
+        if row.get("role") == "user":
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            exchange.update(said=text, voice=bool(meta.get("voice")), speaker=speaker_label(row, guest=guest),
+                            occurred_at=row["created_at"])
+            if meta.get("taken_as"):  # sent as a saved mishearing's meant words (memory/mishearings.py)
+                exchange["taken_as"] = _clip(str(meta["taken_as"]), MAX_WINDOW_TEXT_CHARS)
+        else:
+            exchange["reply"] = text
+    by_device: dict[str, list[dict[str, Any]]] = {}
+    for exchange in exchanges.values():
+        if exchange["voice"] and exchange["said"] and exchange["device"]:
+            by_device.setdefault(exchange["device"], []).append(exchange)
+
+    runs: list[list[dict[str, Any]]] = []
+    for device_exchanges in by_device.values():
+        device_exchanges.sort(key=lambda exchange: exchange["occurred_at"])
+        current: list[dict[str, Any]] = []
+        for exchange in device_exchanges:
+            if current and (
+                exchange["occurred_at"] - current[-1]["occurred_at"] > MISHEARING_WINDOW_GAP
+                or len(current) >= MAX_WINDOW_EXCHANGES
+            ):
+                if len(current) >= 2:
+                    runs.append(current)
+                current = []
+            current.append(exchange)
+        if len(current) >= 2:
+            runs.append(current)
+    runs.sort(key=lambda run: run[0]["occurred_at"])
+
+    return [
+        {
+            "idx": index,
+            "exchanges": [
+                {
+                    "at": f"{exchange['occurred_at'].astimezone(tz):%H:%M:%S}",
+                    "speaker": exchange["speaker"],
+                    "said": exchange["said"],
+                    "reply": exchange["reply"],
+                    "tools": exchange["tools"],
+                    **({"taken_as": exchange["taken_as"]} if exchange.get("taken_as") else {}),
+                    "occurred_at": exchange["occurred_at"],
+                }
+                for exchange in run
+            ],
+        }
+        for index, run in enumerate(runs[:MAX_MISHEARING_WINDOWS], start=1)
+    ]
+
+
+def windows_to_send(windows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The windows as /memory/mishearings takes them (without the times kept for the memories)."""
+    return [
+        {"idx": window["idx"],
+         "exchanges": [{key: value for key, value in exchange.items() if key != "occurred_at"} for exchange in window["exchanges"]]}
+        for window in windows
+    ]
 
 
 def exchanges_for_memory(rows: Sequence[dict[str, Any]], *, guest: bool = False) -> list[dict[str, Any]]:

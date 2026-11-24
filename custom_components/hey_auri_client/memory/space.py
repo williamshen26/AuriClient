@@ -28,6 +28,7 @@ from .config import CONF_MEMORY_LOGIN_PEOPLE
 from .db import MemoryDbError
 from .guest import stay_over
 from .identity import AskedOnceCache, Speaker, StatedSpeakerCache, household_persons
+from . import mishearings
 from .recall import (
     AUTO_NOTES_TOTAL_CHARS,
     PROFILE_TOTAL_CHARS,
@@ -117,6 +118,8 @@ class MemorySpace:
         self._persons_synced_at = 0.0
         # Keyed by (speaker entity, shared).
         self._profile_cache: dict[tuple[int | None, bool], tuple[float, list[RecallRow]]] = {}
+        # What speech-to-text misheard here before (mishearings.py), loaded on attach and after each change.
+        self._mishearings: list[mishearings.Mishearing] = []
         self.turn_logger = TurnLogger(self.hass, self._async_write_rows, spool_key=spool_key)
 
     # ── basics ──────────────────────────────────────────────────────────────
@@ -166,12 +169,14 @@ class MemorySpace:
         self._household_id = store.ensure_household()
         self.store = store
         self._entities, self._person_ids, self._persons_synced_at = [], {}, 0.0
+        self._mishearings = self._load_mishearings_blocking(store)
         self.invalidate()
 
     def detach(self) -> None:
         self.store = None
         self._household_id = None
         self._entities, self._person_ids = [], {}
+        self._mishearings = []
         self.clear_conversations()
         self.invalidate()
 
@@ -355,6 +360,48 @@ class MemorySpace:
             return resolved[0] if resolved else None
         return None
 
+    # ── mishearings ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_mishearings_blocking(store: MemoryStore) -> list[mishearings.Mishearing]:
+        try:
+            return mishearings.from_rows(store.current_mishearings())
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Couldn't load mishearings: %s", err)
+            return []
+
+    async def async_refresh_mishearings(self) -> None:
+        """Reload the saved mishearings (after a nightly run saved some, or a forget)."""
+        store = self.store
+        if store is not None:
+            self._mishearings = await self.hass.async_add_executor_job(self._load_mishearings_blocking, store)
+
+    def mishearing_for(self, text: str) -> mishearings.Mishearing | None:
+        """The saved mishearing whose heard words these are (mishearings.match); None when memory is off here."""
+        if not self.enabled or not self._mishearings:
+            return None
+        return mishearings.match(text, self._mishearings, dt_util.utcnow())
+
+    def meant_words(self, text: str) -> str | None:
+        """The meant words when these are a saved mishearing's heard words (for the skill guess)."""
+        pair = self.mishearing_for(text)
+        return pair.meant if pair else None
+
+    def note_mishearing_used(self, memory_id: int) -> None:
+        """A turn went out as a mishearing's meant words: it lasts mishearings.TTL from now (in the background)."""
+        store = self.store
+        if store is None:
+            return
+        expires_at = dt_util.utcnow() + mishearings.TTL
+
+        def _note() -> None:
+            try:
+                store.note_mishearing_used(memory_id, expires_at=expires_at)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Couldn't note the mishearing's use: %s", err)
+
+        self.hass.async_add_executor_job(_note)
+
     # ── per-turn memory block ───────────────────────────────────────────────
 
     async def async_turn_context(self, text: str, speaker: Speaker, conversation_id: str | None) -> dict[str, Any]:
@@ -373,6 +420,12 @@ class MemorySpace:
         block["household"] = self.household_roster()
         if (party_size := self.party_size()) is not None:
             block["party_size"] = party_size
+        # Words speech-to-text misheard before: recall reads the meant ones, and the agent sends those for a voice
+        # turn (memory.heard_as). Matched before anything that skips short messages: a misheard request is often a
+        # few characters.
+        if pair := self.mishearing_for(text):
+            block["heard_as"] = mishearings.heard_as(pair)
+            text = pair.meant
 
         who = speaker if speaker.known else (Speaker(source="stated", name=stated[0], person_entity_id=stated[1]) if stated else None)
         speaker_subject = self._person_subject(who.name, who.person_entity_id) if who else None
@@ -615,6 +668,8 @@ class MemorySpace:
             return []
         retracted = await self.hass.async_add_executor_job(lambda: store.retract(ids, reason="forget"))
         self.invalidate()
+        if any(kind == mishearings.KIND for _, kind, _ in retracted):
+            await self.async_refresh_mishearings()
         if retracted and query_vector is not None and embedding_tag:
             ids_text = ",".join(str(memory_id) for memory_id, _, _ in retracted)
             await self.hass.async_add_executor_job(
@@ -643,8 +698,12 @@ class MemorySpace:
         kind: str,
         tool_names: list[str],
         language: str | None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
-        """Queue one exchange (user message + reply) for this space's archive (the caller checks the mode)."""
+        """Queue one exchange (user message + reply) for this space's archive (the caller checks the mode).
+
+        meta: {"voice": True} when the words came from speech-to-text (the nightly job's mishearing windows).
+        """
         speaker = self.speaker_for(speaker) or Speaker()
         stated = self.stated_speakers.get(conversation_id)
         if speaker.known:
@@ -663,6 +722,7 @@ class MemorySpace:
             "area": speaker.area,
             "language": language,
             "tool_names": tool_names,
+            "meta": dict(meta or {}),
         }
         rows = [
             {

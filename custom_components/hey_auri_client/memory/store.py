@@ -76,6 +76,8 @@ class NewMemory:
     speaker_source: str | None = None
     speaker_person_entity_id: str | None = None
     speaker_name: str | None = None
+    # Structured details for the hub's own use: a mishearing's heard and meant words (memory/mishearings.py).
+    meta: dict[str, Any] | None = None
 
 
 class MemoryStore:
@@ -402,7 +404,7 @@ class MemoryStore:
             rows = conn.execute(
                 self._sql(
                     f"""SELECT id, conversation_id, exchange_id::text, role, content, kind, speaker_source,
-                               speaker_name, area, tool_names, created_at
+                               speaker_name, area, tool_names, created_at, device_id, meta
                         FROM {_S}.chat_messages
                         WHERE scope = :scope AND created_at >= :start AND created_at < :end
                         ORDER BY created_at, id"""
@@ -482,17 +484,18 @@ class MemoryStore:
             "sensitivity": memory.sensitivity,
             "expires_at": memory.expires_at,
             "content_hash": digest,
+            "meta": json.dumps(memory.meta or {}, ensure_ascii=False),
         }
         new_id = conn.execute(
             text(
                 f"""INSERT INTO {_S}.mem_memories
                     (scope, kind, content, embedding, embedding_model, source, source_ref, run_id, conversation_id,
                      exchange_id, speaker_source, speaker_person_entity_id, speaker_name, occurred_at, due_at,
-                     importance, sensitivity, expires_at, content_hash)
+                     importance, sensitivity, expires_at, content_hash, meta)
                     VALUES (:scope, :kind, :content, CAST(:embedding AS vector), :embedding_model, :source,
                             :source_ref, :run_id, :conversation_id, CAST(:exchange_id AS uuid), :speaker_source,
                             :speaker_person_entity_id, :speaker_name, :occurred_at, :due_at, :importance,
-                            :sensitivity, :expires_at, :content_hash)
+                            :sensitivity, :expires_at, :content_hash, CAST(:meta AS jsonb))
                     ON CONFLICT (scope, kind, content_hash) WHERE status = 'current' DO NOTHING
                     RETURNING id"""
             ),
@@ -664,20 +667,22 @@ class MemoryStore:
             ).all()
         return {int(row[0]): row[1] for row in rows}
 
-    def retract(self, ids: Sequence[int], *, reason: str) -> list[tuple[int, str, str]]:
+    def retract(self, ids: Sequence[int], *, reason: str, conn=None) -> list[tuple[int, str, str]]:
         """Retract current memories (never deleted); returns (id, kind, content) of each one changed."""
         if not ids:
             return []
-        with self._engine.begin() as conn:
-            rows = conn.execute(
-                self._sql(
-                    f"""UPDATE {_S}.mem_memories SET status = 'retracted', status_changed_at = now(),
-                            status_reason = :reason
-                        WHERE scope = :scope AND status = 'current' AND id = ANY (CAST(:ids AS bigint[]))
-                        RETURNING id, kind, content"""
-                ),
-                {"scope": self.scope, "ids": [int(i) for i in ids], "reason": reason[:200]},
-            ).all()
+        if conn is None:
+            with self._engine.begin() as own:
+                return self.retract(ids, reason=reason, conn=own)
+        rows = conn.execute(
+            self._sql(
+                f"""UPDATE {_S}.mem_memories SET status = 'retracted', status_changed_at = now(),
+                        status_reason = :reason
+                    WHERE scope = :scope AND status = 'current' AND id = ANY (CAST(:ids AS bigint[]))
+                    RETURNING id, kind, content"""
+            ),
+            {"scope": self.scope, "ids": [int(i) for i in ids], "reason": reason[:200]},
+        ).all()
         return [(int(row[0]), row[1], row[2]) for row in rows]
 
     def retract_similar(
@@ -710,6 +715,54 @@ class MemoryStore:
                 },
             ).all()
         return [int(row[0]) for row in rows]
+
+    def current_mishearings(self, conn=None) -> list[tuple[int, Any, datetime | None]]:
+        """(id, meta, expires_at) of the current mishearings (memory/mishearings.py reads the words from meta)."""
+        if conn is None:
+            with self._engine.connect() as own:
+                return self.current_mishearings(own)
+        rows = conn.execute(
+            self._sql(
+                f"""SELECT id, meta, expires_at FROM {_S}.mem_memories
+                    WHERE scope = :scope AND kind = 'mishearing' AND status = 'current'
+                    ORDER BY id"""
+            ),
+            {"scope": self.scope},
+        ).all()
+        return [(int(row[0]), row[1], row[2]) for row in rows]
+
+    def note_mishearing_used(self, memory_id: int, *, expires_at: datetime) -> None:
+        """A voice turn went out as this mishearing's meant words: count it and keep it until expires_at at least."""
+        with self._engine.begin() as conn:
+            conn.execute(
+                self._sql(
+                    f"""UPDATE {_S}.mem_memories SET access_count = access_count + 1, last_accessed = now(),
+                            expires_at = GREATEST(COALESCE(expires_at, :expires_at), :expires_at)
+                        WHERE scope = :scope AND id = :id AND kind = 'mishearing' AND status = 'current'"""
+                ),
+                {"scope": self.scope, "id": int(memory_id), "expires_at": expires_at},
+            )
+
+    def renew_mishearing(self, conn, memory_id: int, *, speaker: str | None, expires_at: datetime) -> None:
+        """A mishearing found again: count it, keep it longer, and note who it happened to."""
+        meta = conn.execute(
+            self._sql(f"SELECT meta FROM {_S}.mem_memories WHERE scope = :scope AND id = :id"),
+            {"scope": self.scope, "id": int(memory_id)},
+        ).scalar()
+        meta = dict(meta) if isinstance(meta, dict) else {}
+        speakers = [name for name in meta.get("speakers") or [] if isinstance(name, str)]
+        if speaker and speaker not in speakers:
+            speakers = (speakers + [speaker])[-5:]
+        meta["speakers"] = speakers
+        conn.execute(
+            self._sql(
+                f"""UPDATE {_S}.mem_memories SET confirmed_count = confirmed_count + 1, last_confirmed_at = now(),
+                        expires_at = GREATEST(COALESCE(expires_at, :expires_at), :expires_at), meta = CAST(:meta AS jsonb)
+                    WHERE scope = :scope AND id = :id"""
+            ),
+            {"scope": self.scope, "id": int(memory_id), "expires_at": expires_at,
+             "meta": json.dumps(meta, ensure_ascii=False)},
+        )
 
     def confirm(self, conn, ids: Sequence[int]) -> None:
         """Note that a nightly run saw these memories stated again."""
@@ -831,6 +884,7 @@ class MemoryStore:
                                EXTRACT(EPOCH FROM now() - COALESCE(m.occurred_at, m.recorded_at)) / 86400.0 AS age_days
                         FROM {_S}.mem_memories m JOIN cand c ON c.id = m.id CROSS JOIN q
                         WHERE m.scope = :scope AND m.status = 'current' AND m.sensitivity <> 'secret'
+                          AND m.kind <> 'mishearing'
                           AND (m.expires_at IS NULL OR m.expires_at > now())
                           AND (:shared OR m.sensitivity = 'normal'
                                OR EXISTS (SELECT 1 FROM {_S}.mem_edges e WHERE e.from_memory = m.id
@@ -1232,7 +1286,7 @@ class MemoryStore:
             rows = conn.execute(
                 self._sql(
                     f"""SELECT id, content FROM {_S}.mem_memories
-                        WHERE scope = :scope AND status = 'current'
+                        WHERE scope = :scope AND status = 'current' AND kind <> 'mishearing'
                           AND (embedding IS NULL OR embedding_model IS DISTINCT FROM :model)
                         ORDER BY recorded_at DESC LIMIT :limit"""
                 ),
@@ -1370,7 +1424,7 @@ class MemoryStore:
                 self._sql(
                     f"""SELECT {_ROW_COLUMNS} FROM {_S}.mem_memories m
                         WHERE m.scope = :scope AND m.status = 'current'
-                          AND m.kind IN ('fact', 'preference', 'decision', 'commitment', 'about_assistant')
+                          AND m.kind IN ('fact', 'preference', 'decision', 'commitment', 'about_assistant', 'mishearing')
                           AND m.sensitivity <> 'secret' AND (:include_private OR m.sensitivity = 'normal')
                         ORDER BY m.kind, COALESCE(m.occurred_at, m.recorded_at) DESC"""
                 ),

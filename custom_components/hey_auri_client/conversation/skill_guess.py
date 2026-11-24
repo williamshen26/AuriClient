@@ -49,33 +49,41 @@ class SkillGuesses:
         self._latest: _Guess | None = None  # the last finished guess, until a turn uses it
         self._task: asyncio.Task | None = None  # the guess in flight
         self._task_key: str | None = None
-        self._pending: str | None = None  # newer words, sent when the guess in flight finishes
+        # Newer words (and what to guess from instead), sent when the guess in flight finishes.
+        self._pending: tuple[str, str | None] | None = None
 
     @callback
-    def prefetch(self, words: str) -> None:
-        """Guess the skills for these words (the voice turn's so far), unless a guess for them is under way."""
+    def prefetch(self, words: str, *, guess_from: str | None = None) -> None:
+        """Guess the skills for these words (the voice turn's so far), unless a guess for them is under way.
+
+        guess_from: other words to guess from, for these words' turn: the meant words when these are a mishearing
+        the household's memory knows (memory/mishearings.py), so "瓦登达" loads what "把灯打开" needs.
+        """
         words = " ".join(str(words or "").split())
         key = query_key(words)
         if not key or len(words) > _MAX_CHARS:
             return
         if self._task is not None and not self._task.done():
             if key != self._task_key:
-                self._pending = words
+                self._pending = (words, guess_from)
             return
         latest = self._latest
         if latest is not None and latest.key == key and monotonic() - latest.finished < _STALE_SECONDS:
             return
-        self._start(words)
+        self._start(words, guess_from)
 
-    def _start(self, words: str) -> None:
+    def _start(self, words: str, guess_from: str | None = None) -> None:
         self._task_key = query_key(words)
-        self._task = self.hass.async_create_background_task(self._async_guess(words), "hey_auri_client skill guess")
+        self._task = self.hass.async_create_background_task(
+            self._async_guess(words, guess_from), "hey_auri_client skill guess"
+        )
 
-    async def _async_guess(self, words: str) -> None:
+    async def _async_guess(self, words: str, guess_from: str | None = None) -> None:
         skills: list[str] | None
+        text = " ".join(str(guess_from or "").split())[:_MAX_CHARS] or words
         try:
             response = await self.client.post_json(
-                "/conversation", {"type": "skill_guess", "text": words}, timeout_seconds=_REQUEST_TIMEOUT_SECONDS
+                "/conversation", {"type": "skill_guess", "text": text}, timeout_seconds=_REQUEST_TIMEOUT_SECONDS
             )
             given = response.get("skills") if isinstance(response, dict) else None
             skills = [skill for skill in given if isinstance(skill, str) and skill] if isinstance(given, list) else []
@@ -85,7 +93,7 @@ class SkillGuesses:
         self._latest = _Guess(query_key(words), skills, monotonic())
         pending, self._pending = self._pending, None
         if pending is not None:
-            self._start(pending)
+            self._start(*pending)
 
     async def async_hints(self, text: str, budget: float = HINT_WAIT_SECONDS) -> tuple[list[str], str, float]:
         """The skills to send with this turn, what happened, and how long it waited (seconds).

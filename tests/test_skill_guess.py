@@ -194,8 +194,9 @@ async def test_the_words_go_to_the_skill_guess_as_speech_ends(hass: HomeAssistan
         def __init__(self) -> None:
             self.words: list[str] = []
 
-        def prefetch(self, words: str) -> None:
+        def prefetch(self, words: str, *, guess_from: str | None = None) -> None:
             self.words.append(words)
+            assert guess_from is None  # no memory here (memory/mishearings.py's guess: test_mishearings.py)
 
     entry = _entry(hass)
     guesses = Guesses()

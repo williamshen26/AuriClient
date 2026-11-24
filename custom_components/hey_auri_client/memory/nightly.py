@@ -8,8 +8,10 @@ For each finished local day (days end at the configured boundary hour):
   5. drop repeats and anything the household asked to forget;
   6. compare each candidate with its nearest current facts and, where there
      are close ones, let /memory/reconcile decide to add, update or skip;
+  6b. /memory/mishearings: what speech-to-text misheard in the day's voice
+     windows, and what was meant (mishearings.py); skipped on a cloud error;
   7. write everything in one transaction (digest, 7-day exchanges, facts,
-     supersede links and the run row), so a failure leaves nothing partial;
+     mishearings, supersede links and the run row), so a failure leaves nothing partial;
   8. write the Obsidian copy and fire hey_auri_client.memory_run_finished.
 Every cloud call happens before the write, so a retry starts clean.
 
@@ -31,10 +33,27 @@ from homeassistant.util import dt as dt_util
 
 from ..const import EVENT_MEMORY_RUN_FINISHED
 from .api import MemoryApiError, embedding_tag
+from .mishearings import (
+    KIND as MISHEARING_KIND,
+    TTL as MISHEARING_TTL,
+    checked_pairs,
+    from_rows as mishearings_from_rows,
+    same_words,
+    statement as mishearing_statement,
+)
 from .obsidian import remove_daily_note, validate_vault, write_daily_note, write_memory_note
 from .recall import normalize_statement, repeats
 from .store import COMMITMENT_GRACE, EXCHANGE_TTL, NewMemory
-from .transcript import build_transcript, chunk_lines, current_day, day_window, exchanges_for_memory, split_chunk
+from .transcript import (
+    build_transcript,
+    chunk_lines,
+    current_day,
+    day_window,
+    exchanges_for_memory,
+    mishearing_windows,
+    split_chunk,
+    windows_to_send,
+)
 
 if TYPE_CHECKING:
     from .space import MemorySpace
@@ -278,46 +297,82 @@ class NightlyJob:
         day_start, day_end = day_window(run.day, tz, self._space.config.day_boundary_hour)
         rows = await self._run(store.messages_between, dt_util.as_utc(day_start), dt_util.as_utc(day_end))
         lines = build_transcript(rows, tz, guest=self._space.is_guest)
-        if not lines:
+        # Short device commands stay out of the transcript, but not out of the mishearing windows: a day of them
+        # alone can still show what speech-to-text misheard.
+        windows = mishearing_windows(rows, tz, guest=self._space.is_guest)
+        if not lines and not windows:
             await self._run(lambda: store.finish_run(run.run_id, status="skipped", stats={"reason": "nothing_to_process"}))
             return {"status": "skipped", "reason": "nothing_to_process"}
         run.stats["transcript_lines"] = len(lines)
         run.stats["transcript_chars"] = sum(len(line) + 1 for line in lines)
 
-        await self._run(store.set_run_stage, run.run_id, "digest")
-        digest = await self._async_digest(run, lines)
-
-        await self._run(store.set_run_stage, run.run_id, "embed")
-        now = dt_util.utcnow()
-        # A day processed late doesn't add exchanges that would already be expired.
-        exchanges = [
-            item for item in exchanges_for_memory(rows, guest=self._space.is_guest) if item["occurred_at"] + EXCHANGE_TTL > now
-        ]
-        texts = ([digest] if digest else []) + [item["content"] for item in exchanges]
+        digest: str | None = None
         digest_vector: list[float] | None = None
-        if texts:
-            vectors = await self._async_embed(run, texts)
-            if digest:
-                digest_vector, vectors = vectors[0], vectors[1:]
-            for item, vector in zip(exchanges, vectors):
-                item["embedding"] = vector
+        exchanges: list[dict[str, Any]] = []
+        decisions: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = []
+        if lines:
+            await self._run(store.set_run_stage, run.run_id, "digest")
+            digest = await self._async_digest(run, lines)
 
-        await self._run(store.set_run_stage, run.run_id, "extract")
-        candidates = await self._async_extract(run, lines)
+            await self._run(store.set_run_stage, run.run_id, "embed")
+            now = dt_util.utcnow()
+            # A day processed late doesn't add exchanges that would already be expired.
+            exchanges = [
+                item for item in exchanges_for_memory(rows, guest=self._space.is_guest)
+                if item["occurred_at"] + EXCHANGE_TTL > now
+            ]
+            texts = ([digest] if digest else []) + [item["content"] for item in exchanges]
+            if texts:
+                vectors = await self._async_embed(run, texts)
+                if digest:
+                    digest_vector, vectors = vectors[0], vectors[1:]
+                for item, vector in zip(exchanges, vectors):
+                    item["embedding"] = vector
 
-        await self._run(store.set_run_stage, run.run_id, "reconcile")
-        candidates = await self._async_filter_candidates(run, candidates)
-        decisions = await self._async_reconcile(run, candidates)
+            await self._run(store.set_run_stage, run.run_id, "extract")
+            candidates = await self._async_extract(run, lines)
+
+            await self._run(store.set_run_stage, run.run_id, "reconcile")
+            candidates = await self._async_filter_candidates(run, candidates)
+            decisions = await self._async_reconcile(run, candidates)
+
+        await self._run(store.set_run_stage, run.run_id, "mishearings")
+        mishearings = await self._async_mishearings(run, windows)
 
         await self._run(store.set_run_stage, run.run_id, "apply")
         persons = {person["name"].lower(): person for person in self._space.people()}
-        counts = await self._run(self._apply_blocking, run, day_start, digest, digest_vector, exchanges, decisions, persons)
+        counts = await self._run(
+            self._apply_blocking, run, day_start, digest, digest_vector, exchanges, decisions, persons, mishearings
+        )
         if run.tag:
             self._space.note_embedding_tag(run.tag)
+        if mishearings:  # saved, found again or retired
+            await self._space.async_refresh_mishearings()
 
         if digest:
             await self._async_vault(lambda vault: write_daily_note(vault, run.day, digest))
         return {"status": "succeeded", **counts}
+
+    async def _async_mishearings(self, run: _Run, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """What speech-to-text misheard in the day's voice windows, and what was meant (mishearings.py).
+
+        Over the budget or memory off stops the run, as for every stage. Any other cloud error only skips
+        this step tonight (an AuriService that doesn't have it yet answers 404), so the day's digest and
+        facts are still written.
+        """
+        run.stats["mishearing_windows"] = len(windows)
+        if not windows:
+            return []
+        try:
+            response = await self._space.api.mishearings(scope=run.envelope["scope"], windows=windows_to_send(windows))
+        except MemoryApiError as err:
+            if err.over_budget or err.disabled:
+                raise
+            _LOGGER.info("Finding mishearings for %s skipped: %s", run.day, err)
+            run.stats["mishearings_skipped"] = err.error_code or str(err.status_code or "error")
+            return []
+        run.add_usage(response)
+        return checked_pairs(response, windows)
 
     async def _async_embed(self, run: _Run, texts: list[str]) -> list[list[float]]:
         vectors, tag = await self._space.api.embed(texts, task_type="RETRIEVAL_DOCUMENT", scope=self._space.mode)
@@ -569,10 +624,12 @@ class NightlyJob:
         exchanges: list[dict[str, Any]],
         decisions: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]],
         persons: dict[str, dict[str, Any]],
+        mishearings: Sequence[dict[str, Any]] = (),
     ) -> dict[str, int]:
         """Write the day in one transaction, including the run row's success."""
         store = self._store
-        counts = {"digest": 0, "exchanges": 0, "facts_added": 0, "facts_updated": 0, "facts_confirmed": 0}
+        counts = {"digest": 0, "exchanges": 0, "facts_added": 0, "facts_updated": 0, "facts_confirmed": 0,
+                  "mishearings": 0, "mishearings_again": 0, "mishearings_wrong": 0}
         with store.engine.begin() as conn:
             if digest:
                 previous = store.retire_current_digest(conn, run.day)
@@ -650,6 +707,37 @@ class NightlyJob:
                     counts["facts_confirmed"] += 1
                 else:
                     counts["facts_added"] += 1
+
+            now = datetime.now(day_start.tzinfo)
+            current = mishearings_from_rows(store.current_mishearings(conn)) if mishearings else []
+            for pair in mishearings:
+                if pair.get("wrong"):
+                    # A request sent as an earlier pair's meant words was corrected with the words as heard.
+                    wrong = [saved.memory_id for saved in current if same_words(saved.heard, pair["heard"])]
+                    counts["mishearings_wrong"] += len(store.retract(wrong, reason="wrong", conn=conn))
+                    continue
+                speaker = pair.get("speaker") or None
+                memory_id, again = store.insert_memory(
+                    NewMemory(
+                        kind=MISHEARING_KIND,
+                        content=mishearing_statement(pair["heard"], pair["meant"]),
+                        source="nightly",
+                        occurred_at=pair.get("occurred_at") or day_start,
+                        expires_at=now + MISHEARING_TTL,
+                        source_ref=run.day,
+                        run_id=run.run_id,
+                        meta={"heard": pair["heard"], "meant": pair["meant"], "speakers": [speaker] if speaker else []},
+                    ),
+                    conn,
+                )
+                if again:
+                    store.renew_mishearing(conn, memory_id, speaker=speaker, expires_at=now + MISHEARING_TTL)
+                else:
+                    # These words meant something else before: the newer pair wins, so a wrong one is corrected.
+                    older = [saved.memory_id for saved in mishearings_from_rows(store.current_mishearings(conn))
+                             if saved.memory_id != memory_id and same_words(saved.heard, pair["heard"])]
+                    store.supersede(conn, older, memory_id, kinds=(MISHEARING_KIND,), reason="updated")
+                counts["mishearings_again" if again else "mishearings"] += 1
 
             run.stats.update(counts)
             store.finish_run(run.run_id, status="succeeded", stats=run.stats, conn=conn)

@@ -53,6 +53,10 @@ class TurnMeta:
     device_id: str | None = None
     user_id: str | None = None
     language: str | None = None
+    # The words came from Hey Auri's speech-to-text (the skill guess saw them as speech ended).
+    voice: bool = False
+    # The words the turn went out as: a saved mishearing's meant words (memory/mishearings.py).
+    taken_as: str | None = None
 
 
 def household_persons(hass: HomeAssistant, login_people: Mapping[str, str] | None = None) -> list[dict[str, Any]]:

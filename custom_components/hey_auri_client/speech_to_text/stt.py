@@ -280,9 +280,10 @@ class AuriSpeechToTextEntity(stt.SpeechToTextEntity):
             if words and memory is not None:
                 memory.prefetch_turn(words)
             # Every voice turn, whatever the language and with memory on or off (conversation/skill_guess.py).
+            # Words speech-to-text misheard before are guessed from what was meant (memory/mishearings.py).
             guesses = data.get(DATA_SKILL_GUESS)
             if words and guesses is not None:
-                guesses.prefetch(words)
+                guesses.prefetch(words, guess_from=memory.meant_words(words) if memory is not None else None)
 
         return on_words
 

@@ -139,6 +139,17 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             f"CREATE INDEX mem_edges_to_memory_idx ON {_S}.mem_edges (to_memory, relation) WHERE to_memory IS NOT NULL",
         ],
     ),
+    (
+        # Mishearings (memory/mishearings.py): what speech-to-text wrote and what was meant, word for word in meta.
+        2,
+        [
+            f"ALTER TABLE {_S}.mem_memories DROP CONSTRAINT IF EXISTS mem_memories_kind_check",
+            f"""ALTER TABLE {_S}.mem_memories ADD CONSTRAINT mem_memories_kind_check
+                CHECK (kind IN ('fact', 'preference', 'decision', 'commitment', 'about_assistant', 'digest', 'exchange',
+                                'mishearing'))""",
+            f"ALTER TABLE {_S}.mem_memories ADD COLUMN IF NOT EXISTS meta jsonb NOT NULL DEFAULT '{{}}'::jsonb",
+        ],
+    ),
 ]
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

@@ -50,7 +50,8 @@ from custom_components.hey_auri_client.const import (  # noqa: E402
     SERVICE_RUN_MEMORY_EXAM,
 )
 from custom_components.hey_auri_client.conversation.agent_class import ThinOpenAIAgent  # noqa: E402
-from custom_components.hey_auri_client.memory import exam, logins, names, space as memory_space, turn_log  # noqa: E402
+from custom_components.hey_auri_client.conversation.skill_guess import SkillGuesses  # noqa: E402
+from custom_components.hey_auri_client.memory import exam, logins, mishearings, names, space as memory_space, turn_log  # noqa: E402
 from custom_components.hey_auri_client.memory.recall import match_subjects  # noqa: E402
 from custom_components.hey_auri_client.memory.api import MemoryApiError  # noqa: E402
 from custom_components.hey_auri_client.memory.db import EXAM_MEMORY_SCHEMA  # noqa: E402
@@ -1522,3 +1523,99 @@ async def test_the_exam_puts_the_households_language_back(hass: HomeAssistant, m
     with _exam_through(agent, tmp_path, changed_it_and_failed), pytest.raises(HomeAssistantError, match="unplugged"):
         await runtime.async_run_exam()
     assert "stt_language" not in runtime.entry.options
+
+
+# ── mishearings (memory/mishearings.py) ─────────────────────────────────────────────────────────
+
+async def _save_mishearing(hass: HomeAssistant, runtime: MemoryRuntime, heard: str, meant: str) -> int:
+    memory = NewMemory(kind=mishearings.KIND, content=mishearings.statement(heard, meant), source="nightly",
+                       expires_at=dt_util.utcnow() + mishearings.TTL, meta={"heard": heard, "meant": meant})
+    memory_id, _ = await hass.async_add_executor_job(runtime.store.insert_memory, memory)
+    await runtime.owner.async_refresh_mishearings()
+    return memory_id
+
+
+async def test_a_saved_mishearing_comes_with_the_turn_however_short(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    memory_id = await _save_mishearing(hass, runtime, "瓦登达", "把灯打开")
+
+    block = await runtime.owner.async_turn_context("瓦登达。", Speaker(), "h1")
+    assert block["heard_as"] == {"heard": "瓦登达", "meant": "把灯打开", "id": memory_id}
+    assert "heard_as" not in await runtime.owner.async_turn_context("把灯打开", Speaker(), "h2")
+    assert "heard_as" not in await runtime.owner.async_turn_context("瓦登达吧", Speaker(), "h2")  # close isn't the same
+    assert runtime.meant_words("瓦登达") == "把灯打开"
+    assert runtime.meant_words("把灯打开") is None
+
+    # A pair the household wants gone is forgotten like any memory, and no longer matches.
+    await runtime.owner.async_forget([memory_id], query_vector=None, embedding_tag=None)
+    assert "heard_as" not in await runtime.owner.async_turn_context("瓦登达", Speaker(), "h3")
+    assert runtime.meant_words("瓦登达") is None
+
+
+async def test_recall_reads_the_meant_words(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    await _save_mishearing(hass, runtime, "Turn on the lice", "Turn on the office light")
+    await hass.async_add_executor_job(
+        runtime.store.insert_memory, NewMemory(kind="preference", content=_OFFICE_LIGHT, source="chat"))
+    block = await runtime.owner.async_turn_context("Turn on the lice", Speaker(), "h4")
+    assert _OFFICE_LIGHT in block["notes"]
+
+
+async def test_a_mishearing_is_loaded_when_memory_starts(hass: HomeAssistant, memory_setup) -> None:
+    _agent, runtime, _client, _will = memory_setup
+    memory_id = await _save_mishearing(hass, runtime, "Turn on the lice", "turn on the lights")
+    runtime.owner._mishearings = []  # noqa: SLF001 (as before a restart)
+    await hass.async_add_executor_job(runtime.owner.attach_blocking, runtime.store)
+    block = await runtime.owner.async_turn_context("turn on the LICE", Speaker(), "h5")
+    assert block["heard_as"]["id"] == memory_id
+
+
+class _GuessCloud:
+    """Auri's cloud answering skill guesses: keeps the words it was asked about."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def post_json(self, path: str, payload: dict[str, Any], **_kwargs) -> dict[str, Any]:
+        self.texts.append(payload["text"])
+        return {"type": "skill_guess", "skills": ["light"]}
+
+
+async def test_a_voice_turn_is_archived_as_voice_and_guessed_from_the_meant_words(hass: HomeAssistant, memory_setup) -> None:
+    agent, runtime, client, _will = memory_setup
+    memory_id = await _save_mishearing(hass, runtime, "瓦登达", "把灯打开")
+    cloud = _GuessCloud()
+    agent.skill_guesses = SkillGuesses(hass, cloud)
+
+    # As speech ends (speech_to_text/stt.py): the words, and what to guess from instead.
+    agent.skill_guesses.prefetch("瓦登达", guess_from=runtime.meant_words("瓦登达"))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    client.responses.append(final("v1", "好的"))
+    await agent.async_process(_input("瓦登达", "v1", device_id="sat-1"))
+    client.responses.append(final("v1", "现在九点。"))
+    await agent.async_process(_input("现在几点了", "v1", device_id="sat-1"))  # typed: no guess for its words
+    await _settle(hass)
+
+    # Auri got the meant words, with the heard ones for its door-or-gate rule; the guess came from the meant words.
+    assert cloud.texts == ["把灯打开"]
+    first, typed = client.payloads
+    assert first["message"]["content"] == "把灯打开" and first["skill_hints"] == ["light"]
+    assert first["context"]["memory"]["heard_as"] == {"heard": "瓦登达", "id": memory_id}
+    assert "heard_as" not in typed["context"]["memory"]
+    archived = _db(runtime, "SELECT content, device_id, meta FROM auri_memory.chat_messages WHERE role = 'user' ORDER BY id")
+    assert archived == [
+        {"content": "瓦登达", "device_id": "sat-1", "meta": {"voice": True, "taken_as": "把灯打开"}},
+        {"content": "现在几点了", "device_id": "sat-1", "meta": {}},
+    ]
+    # Used, so it lasts longer.
+    (used,) = _db(runtime, f"SELECT access_count, expires_at FROM auri_memory.mem_memories WHERE id = {memory_id}")
+    assert used["access_count"] == 1 and used["expires_at"] > dt_util.utcnow() + mishearings.TTL - timedelta(minutes=5)
+
+
+async def test_typed_words_that_are_a_mishearing_go_as_typed(hass: HomeAssistant, memory_setup) -> None:
+    agent, runtime, client, _will = memory_setup
+    await _save_mishearing(hass, runtime, "瓦登达", "把灯打开")
+    client.responses.append(final("t1", "瓦登达是什么？"))
+    await agent.async_process(_input("瓦登达", "t1"))
+    assert client.payloads[0]["message"]["content"] == "瓦登达"
+    assert "heard_as" not in client.payloads[0]["context"]["memory"]
