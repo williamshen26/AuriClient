@@ -348,7 +348,7 @@ strategy:
   dashboard_path: auri-home  # the dashboard's URL
 ```
 
-It uses three custom cards: **timer-bar-card** and **auto-entities**, both in the Marketplace, and **Auri Sticky Note Card**. The source is in `dashboard/` in this repository; see its README to change and rebuild it.
+It uses three custom cards, **Auri Sticky Note Card**, **auto-entities** and **timer-bar-card**, and the client includes all three, so there's nothing else to install (auto-entities and timer-bar-card are their projects' own releases; their licences are in `custom_components/hey_auri_client/www/THIRD_PARTY_LICENSES.md`). The source is in `dashboard/` in this repository; see its README to change and rebuild it, and for hubs that still have the cards as dashboard resources.
 
 The calendar, the shopping list and the alarms on the dashboard follow the mode (see [Calendars and the shopping list](#calendars-and-the-shopping-list)): the guests' while Auri is in guest mode, the household's otherwise.
 

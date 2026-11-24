@@ -144,6 +144,26 @@ This writes `custom_components/hey_auri_client/www/auri-dashboard.js`. Its URL c
 
 They have a copy in `/config/www/dashboards/auri-dashboard.js`, added under **Settings** → **Dashboards** → **Resources** as `/local/dashboards/auri-dashboard.js`. Delete that resource and the file, but only once the hub runs Hey Auri Client 0.2.8 or later, and then reload every open dashboard (F5; on a wall tablet or in the phone app, reload the page). A page opened before Home Assistant restarted with 0.2.8 doesn't have the client's copy: with the resource gone, it shows "Timeout waiting for strategy element ll-strategy-dashboard-auri-home to be registered" until it's reloaded. While both are there the client's copy wins (it loads first, and the old copy's elements are then not defined again), but the old one still loads with every page.
 
+### The cards it uses
+
+The dashboards are built with three custom cards, which the client serves too (`frontend.py`), so nothing else
+needs installing:
+- **Auri Sticky Note Card** (`www/auri-sticky-note-card.js`, this repository's own);
+- **auto-entities** 1.16.1 (`www/auto-entities.js`, MIT) and **timer-bar-card** 1.31.0 (`www/timer-bar-card.js`,
+  Apache-2.0), unchanged from their projects; their licences are in `www/THIRD_PARTY_LICENSES.md`.
+
+To update auto-entities or timer-bar-card, replace the file with the project's release build, change the version
+here, in `frontend.py` and in `THIRD_PARTY_LICENSES.md`, and check the Home dashboard's timers and lists.
+
+### Hubs set up before Hey Auri Client 0.2.14
+
+They have copies of the cards in `/config/www/community/`, added under **Settings** → **Dashboards** →
+**Resources** as `/local/community/...`: `auri-sticky-note-card`, `lovelace-auto-entities`, `timer-bar-card`, and
+also `button-card`, `lovelace-layout-card` and `lovelace-qr-code-card`, which no Auri dashboard uses. Once the hub
+runs Hey Auri Client 0.2.14 or later, delete those resources (and the folders, or the cards in HACS), unless one of
+the household's own dashboards uses one, then reload every open dashboard. While both are there the client's copies
+win (they load first; the old copies then fail to register again, a message in the browser console only).
+
 ### Creating the dashboard
 
 1. Go to **Settings** → **Dashboards**
