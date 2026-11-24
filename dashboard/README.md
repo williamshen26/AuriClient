@@ -152,8 +152,16 @@ needs installing:
 - **auto-entities** 1.16.1 (`www/auto-entities.js`, MIT) and **timer-bar-card** 1.31.0 (`www/timer-bar-card.js`,
   Apache-2.0), unchanged from their projects; their licences are in `www/THIRD_PARTY_LICENSES.md`.
 
+The sticky note card loads on every page. auto-entities and timer-bar-card load only when one of these strategies
+generates a dashboard (`helpers/communityCards.js`, before any card is built), never on every page: timer-bar-card,
+loaded at page start, builds a hidden Lovelace panel before Home Assistant has set up its routes, and that sent every
+refresh to the Overview dashboard (found 2026-11-23 on the 0.2.14 branch; `tests/test_frontend.py` keeps it so). So
+a dashboard of the household's own that uses either card needs its own copy (the Marketplace) unless an Auri dashboard
+was opened first in that browser.
+
 To update auto-entities or timer-bar-card, replace the file with the project's release build, change the version
-here, in `frontend.py` and in `THIRD_PARTY_LICENSES.md`, and check the Home dashboard's timers and lists.
+here, in `frontend.py` and in `THIRD_PARTY_LICENSES.md`, and check the Home dashboard's timers and lists, and that a
+refresh on any page stays on that page.
 
 ### Hubs set up before Hey Auri Client 0.2.14
 

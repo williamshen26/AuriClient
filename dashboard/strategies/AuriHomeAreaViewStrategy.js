@@ -2,6 +2,7 @@
  * Area view strategy
  * Generates a view for a specific area with entity tiles grouped by domain
  */
+import { loadCommunityCards } from "../helpers/communityCards.js";
 import { fetchDevices, fetchEntities } from "../helpers/HomeAssistantAPI.js";
 import {
   getEntitiesForArea,
@@ -11,6 +12,8 @@ import { buildAreaViewCards } from "../helpers/CardBuilder.js";
 
 export class AuriHomeAreaViewStrategy {
   static async generate(config, hass) {
+    // auto-entities and timer-bar-card, before any card that uses them is built.
+    await loadCommunityCards();
     const area = config.area;
 
     // Fetch devices and entities

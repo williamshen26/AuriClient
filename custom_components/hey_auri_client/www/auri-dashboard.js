@@ -1,3 +1,21 @@
+// helpers/communityCards.js
+var CARD_FILES = ["auto-entities.js", "timer-bar-card.js"];
+var loading = null;
+function loadCommunityCards() {
+  if (!loading) {
+    const versions = new URL(import.meta.url).searchParams;
+    loading = Promise.all(
+      CARD_FILES.map((file) => {
+        const url = new URL(`./${file}`, import.meta.url);
+        const version = versions.get(file);
+        if (version) url.searchParams.set("v", version);
+        return import(url.href).catch((error) => console.warn(`Hey Auri: ${file} not loaded`, error));
+      })
+    );
+  }
+  return loading;
+}
+
 // helpers/utils.js
 function sortByName(list) {
   return [...list].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
@@ -410,6 +428,7 @@ function buildAreaViewCards(entitiesByDomain) {
 // strategies/AuriHomeDashboardStrategy.js
 var AuriHomeDashboardStrategy = class {
   static async generate(config, hass) {
+    await loadCommunityCards();
     const dashPath = config?.dashboard_path ?? "auri-home";
     const weatherEntity = config?.weather_entity ?? "weather.forecast_home";
     const mode = hass.states["sensor.auri_mode"];
@@ -480,6 +499,7 @@ var AuriHomeDashboardStrategy = class {
 // strategies/AuriHomeAreaViewStrategy.js
 var AuriHomeAreaViewStrategy = class {
   static async generate(config, hass) {
+    await loadCommunityCards();
     const area = config.area;
     const [devices, entities] = await Promise.all([
       fetchDevices(hass),
@@ -513,6 +533,7 @@ var AuriHomeAreaViewStrategy = class {
 // strategies/AuriHomeStickNoteViewStrategy.js
 var AuriHomeStickNoteViewStrategy = class {
   static async generate(config, hass) {
+    await loadCommunityCards();
     const title = config?.title ?? "Sticky Notes";
     const path = config?.path ?? "home";
     const entityIdPattern = config?.entity_id_pattern ?? "sensor.auri_sticky_note*";

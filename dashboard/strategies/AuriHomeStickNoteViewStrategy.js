@@ -2,10 +2,13 @@
  * Sticky note dashboard strategy
  * Generates a dashboard with a masonry home view where each sticky note is its own card.
  */
+import { loadCommunityCards } from "../helpers/communityCards.js";
 import { fetchEntities } from "../helpers/HomeAssistantAPI.js";
 
 export class AuriHomeStickNoteViewStrategy {
   static async generate(config, hass) {
+    // auto-entities and timer-bar-card, before any card that uses them is built.
+    await loadCommunityCards();
     const title = config?.title ?? "Sticky Notes";
     const path = config?.path ?? "home";
     const entityIdPattern = config?.entity_id_pattern ?? "sensor.auri_sticky_note*";

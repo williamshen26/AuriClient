@@ -3,6 +3,7 @@
  * Generates a "Home" view with fixed cards (header/clock/weather/calendar/todo)
  * and auto-generated Area cards grouped by Floor.
  */
+import { loadCommunityCards } from "../helpers/communityCards.js";
 import { sortByName } from "../helpers/utils.js";
 import { fetchAreas, fetchFloors } from "../helpers/HomeAssistantAPI.js";
 import { createFloorMap, groupAreasByFloor } from "../helpers/AreaHelper.js";
@@ -13,6 +14,8 @@ import {
 
 export class AuriHomeDashboardStrategy {
   static async generate(config, hass) {
+    // auto-entities and timer-bar-card, before any card that uses them is built.
+    await loadCommunityCards();
     const dashPath = config?.dashboard_path ?? "auri-home";
 
     const weatherEntity = config?.weather_entity ?? "weather.forecast_home";
