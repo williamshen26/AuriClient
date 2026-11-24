@@ -15,6 +15,7 @@ from ..cache import add_processed_entity, get_media_player_sources, get_processe
 from ..const import CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE, DOMAIN, RUNTIME_ALARMS
 from ..exceptions import ToolExecutionError
 from ..helpers import to_json_safe
+from .music_pairs import is_music_assistant_entity
 
 
 def resolve_entity_id_no_fallback(
@@ -213,7 +214,9 @@ def transform_ha_entity_id_to_auri_entity_id(hass: HomeAssistant, entity_id: str
     state = hass.states.get(entity_id)
     if state:
         if entity_id.startswith("media_player."):
-            if is_music_assistant_state(state):
+            # By the entity registry: app_id is "music_assistant" only while a Music Assistant queue is active,
+            # so an idle or unavailable player used to show as a plain media_player.
+            if is_music_assistant_entity(hass, entity_id):
                 return entity_id.replace("media_player.", "music_source.", 1)
             if device_has_entity_domain(hass, entity_id, "assist_satellite"):
                 return entity_id.replace("media_player.", "satellite_speaker.", 1)

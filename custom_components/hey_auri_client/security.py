@@ -25,6 +25,7 @@ from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .conversation.music_pairs import music_link_summary
 from .memory.logins import names_text
 
 if TYPE_CHECKING:
@@ -173,6 +174,9 @@ async def async_security_summary(
         "support_last_sign_in": last_sign_in.isoformat() if last_sign_in else None,
         # Automatic updates (updates.py): off, current, pending, failed or no_entity.
         **(updater.summary() if updater is not None else {"update_status": None, "update_target": None}),
+        # Whether Music Assistant's players can be read to pair them with their speakers (conversation/music_pairs.py):
+        # "unreadable" after a Home Assistant or Music Assistant update changed them; None without Music Assistant.
+        **music_link_summary(hass),
     }
 
 

@@ -7,13 +7,14 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from ...cache import get_media_player_macs, get_media_player_sources
 from ...exceptions import ToolExecutionError
+from ..music_pairs import paired
 from ..helpers import (
     _clamp_percentage,
     _clamp_step_percentage,
@@ -118,12 +119,96 @@ class MediaPlayerToolService:
             # async_upnp_client UpnpConnectionError) that are not HomeAssistantError.
             raise ToolExecutionError(str(err)) from err
 
+    async def _match_music_players(
+        self, sources: list[str], service: str, data: dict[str, Any], feature: MediaPlayerEntityFeature
+    ) -> None:
+        """Set a speaker's Music Assistant players to match it, so none brings its old level back. Never raises."""
+        for source in sources:
+            state = self.hass.states.get(source)
+            if state is None or state.state in ("off", "unavailable", "unknown"):
+                continue
+            if not self.media_player_has_feature(source, feature):
+                continue
+            try:
+                retry = await self._call_media_service(service, {"entity_id": source, **data})
+            except ToolExecutionError as err:
+                _LOGGER.debug("Couldn't match %s on %s: %s", service, source, err)
+                continue
+            if retry:
+                _LOGGER.debug("Couldn't match %s on %s: %s", service, source, retry)
+
+    def _speaker_ready(self, speaker: str, feature: MediaPlayerEntityFeature) -> State | None:
+        """The speaker's state when it can take the command now, else None (the command then goes as before)."""
+        state = self.hass.states.get(speaker)
+        if state is None or state.state in ("off", "unavailable", "unknown"):
+            return None
+        return state if self.media_player_has_feature(speaker, feature) else None
+
+    async def _mute_paired(self, speaker: str, sources: list[str], is_volume_muted: bool) -> dict[str, Any] | None:
+        """Mute on a speaker, then on its Music Assistant players (conversation/music_pairs.py); None to go as before."""
+        if self._speaker_ready(speaker, MediaPlayerEntityFeature.VOLUME_MUTE) is None:
+            return None
+        try:
+            retry = await self._call_media_service("volume_mute", {"entity_id": speaker, "is_volume_muted": is_volume_muted})
+        except ToolExecutionError as err:
+            _LOGGER.debug("Muting the speaker %s failed, trying %s as asked: %s", speaker, sources, err)
+            return None
+        if retry:
+            return retry
+        await self._match_music_players(
+            sources, "volume_mute", {"is_volume_muted": is_volume_muted}, MediaPlayerEntityFeature.VOLUME_MUTE
+        )
+        return {
+            "success": True,
+            "entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, speaker),
+            "is_volume_muted": is_volume_muted,
+        }
+
+    async def _adjust_paired_volume(
+        self, speaker: str, sources: list[str], raw_volume_pct: Any, raw_volume_step_pct: Any
+    ) -> dict[str, Any] | None:
+        """Volume on a speaker, then its Music Assistant players to match (conversation/music_pairs.py).
+
+        A Music Assistant player only passes volume on while it plays, so the speaker is set first, whichever of
+        the two the model chose; a step counts from the speaker's own level. None when the speaker can't take it
+        now (off, unavailable, no volume control or level): the command then goes to the model's entity as before.
+        """
+        state = self._speaker_ready(speaker, MediaPlayerEntityFeature.VOLUME_SET)
+        if state is None:
+            return None
+        if raw_volume_pct is not None:
+            level = _clamp_percentage(float(raw_volume_pct) * 100) / 100
+        else:
+            current = state.attributes.get("volume_level")
+            if current is None:
+                return None
+            step = _clamp_step_percentage(float(raw_volume_step_pct) * 100) / 100
+            level = _clamp_percentage((float(current) + step) * 100) / 100
+        try:
+            retry = await self._call_media_service("volume_set", {"entity_id": speaker, "volume_level": level})
+        except ToolExecutionError as err:
+            _LOGGER.debug("Setting the speaker %s's volume failed, trying %s as asked: %s", speaker, sources, err)
+            return None
+        if retry:
+            return retry
+        await self._match_music_players(sources, "volume_set", {"volume_level": level}, MediaPlayerEntityFeature.VOLUME_SET)
+        return {
+            "success": True,
+            "entity_id": transform_ha_entity_id_to_auri_entity_id(self.hass, speaker),
+            "volume_pct": float(level),
+        }
+
     async def set_media_mute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = resolve_entity_id_no_fallback(
             self.hass,
             "media_player",
             transform_auri_entity_id_to_ha_entity_id(arguments.get("entity_id")),
         )
+        # A Music Assistant player and its speaker: the speaker first (conversation/music_pairs.py).
+        if arguments.get("is_volume_muted") is not None and (pair := paired(self.hass, entity_id)) is not None:
+            result = await self._mute_paired(*pair, bool(arguments["is_volume_muted"]))
+            if result is not None:
+                return result
         state = self.hass.states.get(entity_id)
         if state and state.state == "off":
             return {
@@ -887,6 +972,12 @@ class MediaPlayerToolService:
             return {
                 "retry": "volume_pct or volume_step_pct is required for adjust_volume"
             }
+
+        # A Music Assistant player and its speaker: the speaker first, then the player to match (music_pairs.py).
+        if (pair := paired(self.hass, entity_id)) is not None:
+            result = await self._adjust_paired_volume(*pair, raw_volume_pct, raw_volume_step_pct)
+            if result is not None:
+                return result
 
         state = self.hass.states.get(entity_id)
         if state and state.state == "off":

@@ -211,6 +211,8 @@ async def test_the_summary_has_counts_and_yes_or_no_only(hass: HomeAssistant, tw
         "support_last_sign_in": signed_in.created_at.isoformat(),
         "update_status": None,  # no automatic updater given
         "update_target": None,
+        "music_link": None,  # no Music Assistant (conversation/music_pairs.py; test_music_pairs.py has the rest)
+        "music_pairs": None,
     }
     assert "Will" not in str(summary) and "Support" not in str(summary)
 

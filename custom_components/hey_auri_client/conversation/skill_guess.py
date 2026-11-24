@@ -24,8 +24,10 @@ from ..memory.api import query_key
 _LOGGER = logging.getLogger(__name__)
 
 # How long a turn waits for a guess still in flight. The guess runs while the hub waits after the last
-# words (300 ms), so it's usually back before the turn starts.
-HINT_WAIT_SECONDS = 0.15
+# words (300 ms), so it's usually back before the turn starts. 150 ms until 2026-11-24, when a guess that took
+# 268 ms missed its turn and the model, without the skill, said volume control wasn't available. Guesses took
+# 190 ms median, 267 ms p95, 339 ms at most that week; one that arrives saves a model round (about 0.6 s).
+HINT_WAIT_SECONDS = 0.3
 # A guess this old belongs to an earlier turn.
 _STALE_SECONDS = 30.0
 _REQUEST_TIMEOUT_SECONDS = 2
