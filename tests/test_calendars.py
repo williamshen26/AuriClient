@@ -84,7 +84,7 @@ async def home(hass: HomeAssistant, freezer, tmp_path):
     async def hosting(**options) -> None:
         hass.config_entries.async_update_entry(entry, options=options)
         calendars.note_account_mode("auto")
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)  # the guest calendar and list are set up in tasks
         await calendars._async_refresh()  # noqa: SLF001
 
     yield SimpleNamespace(entry=entry, calendars=calendars, call=call, shop=shop, hosting=hosting, freezer=freezer)
@@ -152,7 +152,8 @@ async def test_the_mode_sensor_shows_the_mode_and_both_calendars(hass: HomeAssis
     changes: list[int] = []
     home.calendars.async_add_listener(lambda: changes.append(1))
     home.calendars.note_account_mode("guest")
-    await hass.async_block_till_done()
+    # The Guest Shopping List is set up in a background task: wait for it too, or a slow runner sees no list yet.
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert changes
 
     sensor = AuriModeSensor(home.entry, home.calendars)
