@@ -198,7 +198,7 @@ async def test_the_hub_asks_for_the_account_mode_at_start_and_every_five_minutes
     async def later(minutes: int) -> None:
         home.freezer.tick(timedelta(minutes=minutes))
         async_fire_time_changed(hass)
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)  # a guest answer sets up the guest calendar in a task
 
     await later(4)
     assert asked == ["owner"]  # not yet
