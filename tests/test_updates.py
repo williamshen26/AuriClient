@@ -4,6 +4,8 @@ Uses pytest-homeassistant-custom-component (Linux only).
 """
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -16,6 +18,7 @@ from homeassistant.core import HomeAssistant, ServiceCall  # noqa: E402
 
 from custom_components.hey_auri_client.const import CONF_CLIENT_ID, CONF_SHARED_SECRET, DOMAIN  # noqa: E402
 from custom_components.hey_auri_client.memory.config import CONF_MEMORY_DAY_BOUNDARY_HOUR  # noqa: E402
+from custom_components.hey_auri_client import updates  # noqa: E402
 from custom_components.hey_auri_client.updates import (  # noqa: E402
     FAILED_NIGHTS_BEFORE_GIVING_UP,
     UPDATE_PATH,
@@ -55,9 +58,11 @@ class Marketplace:
         self.installs: list[dict] = []
         self.fail = False
         self.writes_version = True
+        self.on_install = lambda: None
         self.set(installed)
 
         async def install(call: ServiceCall) -> None:
+            self.on_install()
             self.installs.append(dict(call.data))
             if self.fail:
                 raise RuntimeError("GitHub rate limit")
@@ -72,6 +77,35 @@ class Marketplace:
         )
 
 
+class Backups:
+    """Home Assistant's backup.create_automatic action: blocking until the backup is done."""
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.made = 0
+        self.fail = False
+        self.slow = False
+        self.cancelled = 0
+        # Set by a test: the backup waits for it (an upload to an off-site location still going).
+        self.hold: asyncio.Event | None = None
+        self.on_backup = lambda: None
+
+        async def create_automatic(_call: ServiceCall) -> None:
+            self.on_backup()
+            try:
+                if self.slow:
+                    await asyncio.sleep(1)
+                if self.hold is not None:
+                    await self.hold.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+            if self.fail:
+                raise RuntimeError("No space left on device")
+            self.made += 1
+
+        hass.services.async_register("backup", "create_automatic", create_automatic)
+
+
 @pytest.fixture
 def make(hass: HomeAssistant):
     created: list[AutoUpdater] = []
@@ -82,6 +116,7 @@ def make(hass: HomeAssistant):
         backend = Backend(version)
         marketplace = Marketplace(hass, installed) if installed else None
         restarts = async_mock_service(hass, "homeassistant", "restart")
+        hass.data["test_backups"] = Backups(hass)
         updater = AutoUpdater(hass, entry, backend)
         await updater.async_start()
         created.append(updater)
@@ -207,3 +242,67 @@ async def test_what_was_asked_survives_a_restart(hass: HomeAssistant, make) -> N
 @pytest.mark.parametrize(("options", "hour"), [({}, 3), ({CONF_MEMORY_DAY_BOUNDARY_HOUR: 6}, 5), ({CONF_MEMORY_DAY_BOUNDARY_HOUR: 0}, 23)])
 def test_it_runs_the_hour_before_memorys_night_job(options, hour) -> None:
     assert update_hour(options) == hour
+
+
+# ── a backup first ───────────────────────────────────────────────────────────────────────────────
+
+async def test_home_assistant_is_backed_up_before_the_install(hass: HomeAssistant, make) -> None:
+    updater, _backend, marketplace, restarts = await make("v0.2.7")
+    order: list[str] = []
+    marketplace.on_install = lambda: order.append("install")
+    updater.hass.data["test_backups"].on_backup = lambda: order.append("backup")
+
+    assert (await updater.async_check())["result"] == "installed"
+    await hass.async_block_till_done()
+
+    assert order == ["backup", "install"] and len(restarts) == 1
+
+
+@pytest.mark.parametrize("problem", ["fails", "missing", "slow"])
+async def test_without_a_finished_backup_nothing_is_installed(hass: HomeAssistant, make, monkeypatch, problem) -> None:
+    updater, _backend, marketplace, restarts = await make("v0.2.7")
+    backups = updater.hass.data["test_backups"]
+    if problem == "fails":
+        backups.fail = True
+    elif problem == "missing":
+        hass.services.async_remove("backup", "create_automatic")
+    else:
+        backups.slow = True
+        monkeypatch.setattr(updates, "BACKUP_TIMEOUT", timedelta(milliseconds=50))
+
+    result = await updater.async_check()
+    await hass.async_block_till_done()
+
+    assert result == {"result": "backup_failed", "version": "v0.2.7"}
+    assert marketplace.installs == [] and restarts == []
+    # Counted like a failed install: after 3 nights staff see it on their list (update_status "failed").
+    assert updater.summary() == {"update_status": "pending", "update_target": "v0.2.7"}
+
+
+async def test_running_out_of_time_never_cancels_the_backup(hass: HomeAssistant, make, monkeypatch) -> None:
+    """The backup may be uploading to Hey Auri's off-site location: the updater stops waiting, the backup goes on."""
+    updater, _backend, marketplace, restarts = await make("v0.2.7")
+    backups = updater.hass.data["test_backups"]
+    backups.hold = asyncio.Event()
+    monkeypatch.setattr(updates, "BACKUP_TIMEOUT", timedelta(milliseconds=50))
+
+    assert await updater.async_check() == {"result": "backup_failed", "version": "v0.2.7"}
+    assert marketplace.installs == [] and restarts == []
+
+    backups.hold.set()  # the upload finishes later
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert backups.made == 1 and backups.cancelled == 0
+
+
+async def test_nothing_to_install_means_no_backup(hass: HomeAssistant, make) -> None:
+    updater, _backend, _marketplace, _restarts = await make("v0.2.6")
+    assert (await updater.async_check())["result"] == "current"
+    assert updater.hass.data["test_backups"].made == 0
+
+
+async def test_a_conversation_that_starts_during_the_backup_waits_for_another_night(hass: HomeAssistant, make) -> None:
+    updater, _backend, marketplace, restarts = await make("v0.2.7")
+    updater.hass.data["test_backups"].on_backup = lambda: hass.states.async_set("assist_satellite.kitchen", "listening")
+
+    assert (await updater.async_check())["result"] == "busy"
+    assert marketplace.installs == [] and restarts == []

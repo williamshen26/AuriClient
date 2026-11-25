@@ -6,9 +6,13 @@ should run (POST /hub/update). The answer depends on the account: hubs Auri set 
 "try first" or "everyone" group, and every other account (a DIY customer, a test hub whose code is
 copied by hand) gets no version, so nothing happens there.
 
-With a version to run that isn't installed, it installs that version through Home Assistant's
-Marketplace (its update entity, update.install with the version: a release tag such as v0.2.7)
-and restarts Home Assistant, which the new code needs. Nothing restarts when nothing was
+With a version to run that isn't installed, it first backs Home Assistant up with the hub's automatic
+backup settings (backup.create_automatic, waiting until it's done): an update can change data an older
+version can't read (0.2.15 moved the memory database to schema 2), so a restore point right before it
+is the only way back. Without a finished backup, nothing is installed that night; a backup still running
+after 45 minutes (a big one uploading off-site) is left to finish, never cancelled. Then it installs that
+version through Home Assistant's Marketplace (its update entity, update.install with the version: a
+release tag such as v0.2.7) and restarts Home Assistant, which the new code needs. Nothing restarts when nothing was
 installed. It waits for a later night while a voice satellite is in a conversation or an alarm
 rings within 15 minutes, and gives up
 on a version after 3 failed nights; Auri staff see that on their Hubs to check list (the security
@@ -42,6 +46,8 @@ REPOSITORY = "williamshen26/AuriClient"
 ENTITY_ID = "update.hey_auri_client"
 FAILED_NIGHTS_BEFORE_GIVING_UP = 3
 INSTALL_TIMEOUT = timedelta(minutes=15)
+# Longer than this, and the night is left for memory's night job (an hour after the update starts).
+BACKUP_TIMEOUT = timedelta(minutes=45)
 # A satellite in these states is in a conversation: a restart now would cut it off.
 BUSY_SATELLITE_STATES = frozenset({"listening", "processing", "responding"})
 # No restart this long before an alarm: Home Assistant and the satellites might not be back in time.
@@ -49,6 +55,14 @@ ALARM_QUIET_BEFORE = timedelta(minutes=15)
 _ASK_TIMEOUT_SECONDS = 20
 _STORAGE_VERSION = 1
 _STORAGE_KEY = f"{DOMAIN}_updates"
+
+
+def _log_late_backup_failure(task: asyncio.Task) -> None:
+    """A backup the updater stopped waiting for still reports how it ended (and its error is read)."""
+    if task.cancelled():
+        return
+    if (err := task.exception()) is not None:
+        _LOGGER.warning("The backup before updating Hey Auri Client failed: %s: %s", type(err).__name__, err)
 
 
 def version_key(version: str | None) -> tuple[int, ...]:
@@ -172,12 +186,13 @@ class AutoUpdater:
             return {"result": "current", "version": target}
         if self._failures >= FAILED_NIGHTS_BEFORE_GIVING_UP:
             return {"result": "failed", "version": target}
-        if busy := [s.entity_id for s in self.hass.states.async_all("assist_satellite") if s.state in BUSY_SATELLITE_STATES]:
-            _LOGGER.info("Not updating Hey Auri Client now: %s is in a conversation", ", ".join(busy))
+        if self._busy():
             return {"result": "busy", "version": target}
-        alarms = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get(DATA_ALARMS)
-        if alarms is not None and (soon := alarms.ringing_soon(ALARM_QUIET_BEFORE)) is not None:
-            _LOGGER.info("Not updating Hey Auri Client now: an alarm rings at %s", dt_util.as_local(soon).strftime("%H:%M"))
+
+        # A restore point right before anything changes. Then the household again: the backup took a while.
+        if (why := await self._async_backup()) is not None:
+            return await self._async_failed(target, why, result="backup_failed")
+        if self._busy():
             return {"result": "busy", "version": target}
 
         _LOGGER.info("Updating Hey Auri Client from %s to %s", state.attributes.get("installed_version"), target)
@@ -199,14 +214,46 @@ class AutoUpdater:
         await self.hass.services.async_call("homeassistant", "restart", {}, blocking=False)
         return {"result": "installed", "version": target}
 
-    async def _async_failed(self, target: str, why: str) -> dict[str, Any]:
+    def _busy(self) -> bool:
+        """A satellite in a conversation, or an alarm about to ring: no restart now."""
+        if busy := [s.entity_id for s in self.hass.states.async_all("assist_satellite") if s.state in BUSY_SATELLITE_STATES]:
+            _LOGGER.info("Not updating Hey Auri Client now: %s is in a conversation", ", ".join(busy))
+            return True
+        alarms = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get(DATA_ALARMS)
+        if alarms is not None and (soon := alarms.ringing_soon(ALARM_QUIET_BEFORE)) is not None:
+            _LOGGER.info("Not updating Hey Auri Client now: an alarm rings at %s", dt_util.as_local(soon).strftime("%H:%M"))
+            return True
+        return False
+
+    async def _async_backup(self) -> str | None:
+        """Back Home Assistant up with its automatic backup settings and wait; why it couldn't, or None."""
+        if not self.hass.services.has_service("backup", "create_automatic"):
+            return "Home Assistant's backup action isn't available"
+        _LOGGER.info("Backing up Home Assistant before updating Hey Auri Client")
+        # Its own task, waited on through a shield: running out of time stops the waiting, never the
+        # backup, which may be uploading to an off-site location (Hey Auri's) and finishes on its own.
+        backup = self.hass.async_create_background_task(
+            self.hass.services.async_call("backup", "create_automatic", {}, blocking=True),
+            "hey_auri_client backup before update",
+        )
+        backup.add_done_callback(_log_late_backup_failure)
+        try:
+            async with asyncio.timeout(BACKUP_TIMEOUT.total_seconds()):
+                await asyncio.shield(backup)
+        except TimeoutError:
+            return f"the backup took over {int(BACKUP_TIMEOUT.total_seconds() // 60)} minutes (it carries on)"
+        except Exception as err:  # noqa: BLE001 (counted; tried again the next night)
+            return f"the backup failed: {type(err).__name__}: {err}"
+        return None
+
+    async def _async_failed(self, target: str, why: str, *, result: str = "install_failed") -> dict[str, Any]:
         self._failures += 1
         await self._async_save()
         _LOGGER.warning(
             "Couldn't install Hey Auri Client %s (night %s of %s): %s",
             target, self._failures, FAILED_NIGHTS_BEFORE_GIVING_UP, why,
         )
-        return {"result": "install_failed", "version": target}
+        return {"result": result, "version": target}
 
     async def _async_save(self) -> None:
         await self._store.async_save({"asked": self._asked, "target": self._target, "failures": self._failures})
