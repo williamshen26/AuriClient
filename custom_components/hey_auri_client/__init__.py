@@ -227,6 +227,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _async_check_security(*_: Any) -> None:
         await async_update_security_issues(hass)
+        # Before the summary, which says whether Hey Auri is one of the automatic backup locations.
+        await _async_offer_offsite_backups(hass)
         await _async_report_security(hass, entry, client_version)
 
     # With remote access: notices for accounts without two-factor and for unlimited failed
@@ -243,9 +245,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(async_at_started(hass, _async_check_timer_automation))
     entry.async_on_unload(hass.bus.async_listen(EVENT_AUTOMATION_RELOADED, _async_check_timer_automation))
 
+    # Hey Auri's off-site backup location (backup.py) appears once the entry has loaded and goes when it
+    # unloads: Home Assistant's backup integration asks for the agents again on each change.
+    entry.async_on_unload(entry.async_on_state_change(lambda: _notify_backup_listeners(hass)))
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     ha_conversation.async_set_agent(hass, entry, agent)
     return True
+
+
+def _notify_backup_listeners(hass: HomeAssistant) -> None:
+    try:
+        from .backup import async_notify_backup_listeners  # pylint: disable=import-outside-toplevel
+    except ImportError:  # Home Assistant's backup code can't load here: no off-site location
+        return
+    async_notify_backup_listeners(hass)
+
+
+async def _async_offer_offsite_backups(hass: HomeAssistant) -> None:
+    """Add Hey Auri to the automatic backup locations the first time it's offered. Never raises."""
+    try:
+        from .backup import async_offer_offsite  # pylint: disable=import-outside-toplevel
+
+        await async_offer_offsite(hass)
+    except Exception:  # noqa: BLE001 (a backup setting must never break the integration)
+        _LOGGER.exception("Couldn't add Hey Auri to the automatic backup locations")
 
 
 async def _async_report_security(hass: HomeAssistant, entry: ConfigEntry, client_version: str) -> None:

@@ -20,6 +20,7 @@ The integration adds three things to Home Assistant:
 - **Personalities**: Auri, Tovi, Glen or Brigg, chosen on your dashboard at hey-auri.com.
 - **Quick confirmations**: simple device commands get an immediate spoken "OK" instead of waiting for a full reply.
 - **Hands-free follow-ups**: when Auri expects an answer, such as a question or the next step of a recipe, it keeps listening, so you don't repeat the wake word. See [Keeping the mic open](#keeping-the-mic-open).
+- **Off-site backups**: a **Hey Auri** backup location in Home Assistant, kept in Canada, so a hub that fails can be restored on a new one. See [Off-site backups](#off-site-backups-the-hey-auri-location).
 
 ## Requirements
 
@@ -433,6 +434,18 @@ On a home Auri set up, Hey Auri Client keeps itself on the version Auri support 
 
 Every other account, including one that set up Home Assistant itself, gets no version from Hey Auri, so nothing happens: update from the Marketplace as usual. A Hey Auri Client copied into `custom_components` by hand can't update itself this way.
 
+## Off-site backups (the Hey Auri location)
+
+Hey Auri Client adds **Hey Auri** to the backup locations under **Settings → System → Backups**. A backup kept only on the hub is lost with the hub; one in the Hey Auri location can be restored on a new hub.
+
+- **What's stored**: the backup exactly as Home Assistant made it, encrypted with your backup encryption key. Hey Auri keeps encrypted backups only: with encryption off for the Hey Auri location, the upload is refused.
+- **Where**: Hey Auri's storage in Canada, in a folder of your account's own. The hub uploads straight to it in parts of 100 MB, through short-lived links Hey Auri hands out after checking the hub's signature; the backup doesn't pass through Hey Auri's servers, and the hub holds no storage keys. A part that fails is tried again, up to 5 times.
+- **How many**: as many as your automatic backup settings keep (7 on hubs Auri set up), and at most 10 per account, for backups of up to 10 GB. A deleted backup can be brought back by Auri support for 15 days.
+- **Turned on once**: the first time the location is offered, it's added to your automatic backup locations. If you take it off, it stays off.
+- **Restoring on a new hub**: set up Hey Auri Client with the same account (its client ID and secret are on your dashboard at hey-auri.com), open **Settings → System → Backups**, choose a backup in the Hey Auri location and restore it with your backup encryption key. On hubs Auri set up, Auri support keeps that key.
+- Not offered when Home Assistant's country is mainland China: the backups would leave the country.
+- On update nights, the backup before an update includes the upload. If it isn't done after 45 minutes, nothing is installed that night, and the backup carries on.
+
 ## Services
 
 | Service | What it does |
@@ -472,7 +485,9 @@ The **Auri Memory** sensor (`sensor.auri_memory`) shows whether memory works: `d
   - the Home Assistant and Hey Auri Client versions, and how many updates are waiting;
   - whether Home Assistant is reachable from outside the home, whether failed logins lock anyone out, and how many accounts can sign in from outside without two-factor login (the number, not who);
   - whether Auri support's account is chosen, has two-factor login and is signed in now, and when it last signed in;
-  - on homes Auri set up, the version Hey Auri Client should run and whether its automatic update worked.
+  - on homes Auri set up, the version Hey Auri Client should run and whether its automatic update worked;
+  - your automatic backups: how often, how many are kept, whether the Hey Auri location is one of them, and a fingerprint of the backup encryption key (it can't be turned back into the key; Auri support uses it to check that each hub has its own key, and that they keep the current one).
+- **Your backups, in the Hey Auri location** (see [Off-site backups](#off-site-backups-the-hey-auri-location)): each backup, encrypted with your key, and Home Assistant's details of it (its name, date, size, version and which apps and folders it includes).
 - **Once a night**, the question of which Hey Auri Client version to run (a signed request with nothing in it).
 - **When you answer a message from Hey Auri** (see [Messages from Hey Auri](#messages-from-hey-auri)): your choice, your words, and the speaker's name if Auri knows it, kept with your account's email so Auri support can contact you.
 - **When Auri needs it**: the results of the tools it uses, such as your shopping list, your calendar events or the guest instructions you configured.

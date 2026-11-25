@@ -177,7 +177,18 @@ async def async_security_summary(
         # Whether Music Assistant's players can be read to pair them with their speakers (conversation/music_pairs.py):
         # "unreadable" after a Home Assistant or Music Assistant update changed them; None without Music Assistant.
         **music_link_summary(hass),
+        # Automatic backups: schedule, copies kept, whether Hey Auri's off-site location is one of them, and the
+        # backup key's fingerprint, never the key (backup.py).
+        **_backup_summary(hass),
     }
+
+
+def _backup_summary(hass: HomeAssistant) -> dict[str, Any]:
+    try:
+        from .backup import backup_summary  # pylint: disable=import-outside-toplevel (Home Assistant's backup code)
+    except ImportError:
+        return {"backup_schedule": None, "backup_copies": None, "backup_offsite": None, "backup_key_id": None}
+    return backup_summary(hass)
 
 
 class SecurityReporter:
