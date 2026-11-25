@@ -109,7 +109,7 @@ async def test_the_home_calendar_is_set_up_and_the_guest_one_once_the_home_hosts
     assert home.calendars.entity_for(GUEST) is None  # a household that doesn't host gets no extra calendar
 
     home.calendars.note_account_mode("auto")
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)  # the guest calendar is set up in a background task
     assert home.calendars.entity_for(GUEST) == "calendar.guest_calendar"
 
     # Found by its Local Calendar entry, whatever its entity is called; set up only once.
@@ -191,7 +191,7 @@ async def test_the_hub_asks_for_the_account_mode_at_start_and_every_five_minutes
     home.calendars.async_stop()
     calendars = AuriCalendars(hass, home.entry, None, check_account=check_account)
     await calendars.async_start()
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)  # the first account check runs in a background task
     sensor = AuriModeSensor(home.entry, calendars)
     assert asked == ["owner"] and sensor.native_value == "owner"
 
