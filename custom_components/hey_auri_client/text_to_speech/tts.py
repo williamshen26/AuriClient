@@ -28,6 +28,7 @@ from ..const import (
     SUPPORTED_LANGUAGES,
 )
 from ..conversation.helpers import get_response_language
+from ..pictures import without_pictures
 from ..helpers import get_timeout_seconds
 from ..metric_service import RequestLatencyMetricService
 from ..saas_client import SaaSClient
@@ -291,7 +292,8 @@ class AuriTextToSpeechEntity(tts.TextToSpeechEntity):
         persisted setting -- rather than detecting it from the reply text or
         trusting whatever HA's pipeline happens to pass in.
         """
-        clean_message = str(message or "").strip()
+        # A reply shown in the chat can carry pictures (pictures.py): they're seen, not read out.
+        clean_message = without_pictures(str(message or "")).strip()
 
         if not clean_message:
             raise ValueError("TTS message is empty")

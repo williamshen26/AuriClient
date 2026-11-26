@@ -1,3 +1,8 @@
+// A picture Auri keeps on the hub (Hey Auri Client's pictures.py) is linked with its own key (?k=), which
+// needs nothing from this card. Notes from 0.2.19's first build have the plain path: only those are signed.
+const AURI_PICTURE_PATH = /\/api\/hey_auri_client\/pictures\/[A-Za-z0-9_\/.-]+\.jpg(?![?\w])/g;
+const AURI_RESIGN_MS = 12 * 3600 * 1000;
+
 class AuriStickyNoteCard extends HTMLElement {
   setConfig(config) {
     if (!config.entity) {
@@ -103,7 +108,70 @@ class AuriStickyNoteCard extends HTMLElement {
     return 3;
   }
 
+  // An older picture note holds a plain path, which needs a login, and an <img> sends none: the card shows
+  // it through a signed link from Home Assistant (auth/sign_path). Signed links die when Home Assistant restarts, so they're signed again when the
+  // connection comes back, and every 12 hours.
   _renderMarkdown(markdown) {
+    const paths = [...new Set(markdown.match(AURI_PICTURE_PATH) || [])];
+    if (!paths.length || !this._hass) {
+      this._showMarkdown(markdown);
+      return;
+    }
+    const render = (this._renderCount = (this._renderCount || 0) + 1);
+    this._watchReconnect();
+    Promise.all(paths.map((path) => this._signedPath(path)))
+      .then((signed) => {
+        if (render !== this._renderCount) {
+          return;
+        }
+        let text = markdown;
+        paths.forEach((path, index) => {
+          text = text.split(path).join(signed[index]);
+        });
+        this._showMarkdown(text);
+        clearTimeout(this._resignTimer);
+        this._resignTimer = setTimeout(() => this._resign(), AURI_RESIGN_MS);
+      })
+      .catch((err) => {
+        console.error("Failed to sign Auri picture links", err);
+        if (render === this._renderCount) {
+          this._showMarkdown(markdown);
+        }
+      });
+  }
+
+  async _signedPath(path) {
+    this._signed = this._signed || new Map();
+    const cached = this._signed.get(path);
+    if (cached && cached.until > Date.now()) {
+      return cached.path;
+    }
+    const result = await this._hass.callWS({ type: "auth/sign_path", path, expires: 86400 });
+    this._signed.set(path, { path: result.path, until: Date.now() + AURI_RESIGN_MS });
+    return result.path;
+  }
+
+  _resign() {
+    this._signed = new Map();
+    if (this._lastMarkdown !== undefined) {
+      this._renderMarkdown(this._lastMarkdown);
+    }
+  }
+
+  _watchReconnect() {
+    const connection = this._hass && this._hass.connection;
+    if (!connection || this._watchedConnection === connection) {
+      return;
+    }
+    this._watchedConnection = connection;
+    connection.addEventListener("ready", () => this._resign());
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this._resignTimer);
+  }
+
+  _showMarkdown(markdown) {
     this._contentEl.innerHTML = "";
 
     const markdownEl = document.createElement("ha-markdown");

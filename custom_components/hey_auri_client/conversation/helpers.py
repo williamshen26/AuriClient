@@ -250,12 +250,13 @@ def get_house_layout(hass: HomeAssistant) -> dict[str, list[str]]:
 
 
 # Low-value fields dropped from the attributes sent for every exposed entity:
-# entity_picture/icon are UI-only, friendly_name duplicates the "name" field
+# entity_picture/icon are UI-only (and a camera's access_token opens its picture
+# for minutes: it never leaves the hub), friendly_name duplicates the "name" field
 # already carried alongside it, and supported_* fields (e.g. supported_features,
 # a capability bitmask; supported_color_modes) aren't meaningful without domain
 # knowledge the model doesn't have. This snapshot is the only source of entity
 # attributes sent to SaaS -- there is no tool to fetch a fresher live reading.
-_NOISY_ATTRIBUTE_KEYS = {"entity_picture", "icon", "friendly_name", "group_members",
+_NOISY_ATTRIBUTE_KEYS = {"entity_picture", "icon", "friendly_name", "group_members", "access_token",
                          "app_id", "entity_picture_local", "supported_features",
                          "mass_player_type", "active_queue"}
 

@@ -13,6 +13,7 @@ The integration adds three things to Home Assistant:
 - **Device control**: lights (on/off, brightness, color), covers and blinds (position, tilt), climate (temperature, humidity, fan and HVAC mode) and media players (power, playback, volume, mute, shuffle, source and app switching). TVs can be woken with Wake-on-LAN.
 - **Music** via [Music Assistant](https://music-assistant.io): search and play, and move what's playing to another speaker. Volume and mute work whether music is playing or not: a Music Assistant player only passes them on while it plays, so Auri sets the speaker it plays on first, then the player to match. The two are paired by the device's MAC address, which Music Assistant and Home Assistant both know; a device on two networks pairs once its other MAC is added with `hey_auri_client.assign_mac`.
 - **Everyday skills**: weather forecasts, calendar events, shopping list, timers, alarms, sticky notes, and creating and editing automations.
+- **Pictures**: "show me a picture of a sperm whale" finds a real photo on Wikipedia or Wikimedia Commons, with its credit; "draw me a dragon eating pizza" draws one (5 drawings a home a day); "show me the front door" shows a camera; "show me a video of sperm whales" links to one on YouTube. Every photo and drawing is kept on the hub. See [Pictures](#pictures).
 - **Long-term memory** (optional, owner mode): Auri remembers facts, preferences and past conversations in your own PostgreSQL database, and can keep a readable copy in an Obsidian vault. See [Memory](#memory).
 - **Places and rides**: search for places, get directions, and request Uber ride links. Links arrive by text message or on the [session QR page](#session-qr-code). In mainland China they open Amap instead (see [Homes in mainland China](#homes-in-mainland-china)).
 - **Guest mode** for short-term rentals: answers guests' questions from the details you enter (check-in and check-out, Wi-Fi, parking, house rules and more) and can notify you.
@@ -420,7 +421,17 @@ The ring plays at the satellite's volume: a satellite turned down to 0, or whose
 
 To do something when an alarm goes off, such as turning on the bedroom lights, use the `hey_auri_client.alarm_ringing` event (see [Events](#events)).
 
-**Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card, or in the **Auri Sticky Note Card** (`type: custom:auri-sticky-note-card`, with the note's `entity`), which the client includes and which can delete the note. Notes are kept across restarts.
+**Sticky notes.** Each note is a sensor (`sensor.auri_sticky_note_<id>`) whose content is Markdown, so you can show it in a Markdown card, or in the **Auri Sticky Note Card** (`type: custom:auri-sticky-note-card`, with the note's `entity`), which the client includes and which can delete the note. Notes are kept across restarts. A note can show a picture Auri kept: each picture's link carries a key of its own, so any Markdown card shows it, and it keeps working after a restart.
+
+## Pictures
+
+- **Real photos** come from Wikipedia and Wikimedia Commons. Hey Auri looks them up and downloads them, so the home's address never reaches Wikimedia. Their licences (CC BY, CC BY-SA, public domain) allow keeping a copy with its credit, which is shown under each one.
+- **Drawings**, for something made up or personal, come from Gemini's image model: at most 5 a home a day (the home's own day). One Auri won't draw, or that fails, doesn't count.
+- **Where it shows**: under the reply in Home Assistant's web Assist dialog (a browser, or the app's built-in web view). Satellites and the phone apps' own Assist screens show plain text, so there it goes on a sticky note, and Auri says so. Hey Auri's voice doesn't read pictures out; a home where a pipeline pairs Auri with another voice gets them on notes instead.
+- **Kept**: every photo and drawing is saved in `/config/hey_auri_client/pictures`, which is in every backup (the off-site one too), and listed in the Media panel under **Hey Auri pictures**. Nothing is deleted automatically.
+- **Guests**: a guest's pictures go in a Guests folder and are deleted, with their sticky notes, when the stay ends, as the Guest Calendar is emptied. A household member signed in to Home Assistant keeps theirs, even in guest mode.
+- **Videos**: "show me a video of sperm whales" finds one on YouTube (safe search on) and shows its thumbnail, which opens the video on YouTube; it shows in the chat or on a sticky note like a picture. Nothing is kept (YouTube's videos can't be saved). Each home can search 10 videos a day. Not in mainland China, where YouTube is blocked (Home Assistant's country).
+- **Cameras**: "show me the front door" shows a camera exposed to Auri in the web Assist dialog, through a link valid 10 minutes, in owner mode only. It isn't kept, and the picture never leaves the hub.
 
 ## Automatic updates (homes Auri set up)
 

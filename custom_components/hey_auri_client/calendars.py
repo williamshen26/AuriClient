@@ -41,6 +41,7 @@ from .bookings.automatic_mode import stay_context
 from .bookings.schedule import stay_state
 from .const import DOMAIN
 from .memory.guest import stay_key, stay_over
+from .pictures import async_clear_guest_pictures
 
 if TYPE_CHECKING:
     from .bookings.sync import BookingSync
@@ -346,6 +347,8 @@ class AuriCalendars:
             self._save()
 
     async def _async_clear_guest(self, why: str) -> None:
+        # The guests' pictures, and the notes that show them, go with their calendar and list.
+        await async_clear_guest_pictures(self.hass, why)
         await self._async_clear_guest_list(why)
         entity = calendar_entity(self.hass, self.entity_for(GUEST))
         if entity is None:

@@ -48,6 +48,7 @@ from .const import (
 from .conversation.custom_services.timer_services import RUNTIME_TIMERS
 from .conversation.services import async_setup_services
 from .frontend import async_register_frontend_resources
+from .pictures import async_register_view as async_register_pictures_view
 from .memory.legacy import relocate_legacy_user_data
 from .memory.logins import async_delete_logins_issue, async_update_logins_issue
 from .memory.names import async_delete_names_issue, async_update_names_issue
@@ -85,6 +86,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     if runtime.get("frontend_resources_registered") is None:
         await async_register_frontend_resources(hass)
         runtime["frontend_resources_registered"] = True
+    # The pictures Auri keeps (pictures.py), for the chat, sticky notes and the Media panel.
+    async_register_pictures_view(hass)
 
     store: Store[dict[str, list[str]]] = runtime.setdefault(
         "media_player_sources_store",

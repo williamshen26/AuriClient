@@ -8,7 +8,7 @@ Home Assistant, or after they said their name in the conversation (the
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Mapping
 
@@ -57,6 +57,10 @@ class TurnMeta:
     voice: bool = False
     # The words the turn went out as: a saved mishearing's meant words (memory/mishearings.py).
     taken_as: str | None = None
+    # Lines the picture tools put under the reply in the chat (pictures.chat_block), and the turn's
+    # drawings so far (one a turn): conversation/custom_services/picture_services.py.
+    pictures: list[str] = field(default_factory=list)
+    drawings: int = 0
 
 
 def household_persons(hass: HomeAssistant, login_people: Mapping[str, str] | None = None) -> list[dict[str, Any]]:

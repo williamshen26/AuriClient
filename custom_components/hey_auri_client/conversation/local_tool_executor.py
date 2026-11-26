@@ -18,6 +18,7 @@ from .custom_services.entity_services import EntityToolService
 from .custom_services.guest_services import GuestToolService
 from .custom_services.light_services import LightToolService
 from .custom_services.media_player_services import MediaPlayerToolService
+from .custom_services.picture_services import PictureToolService
 from .custom_services.shopping_list_services import SHOPPING_LIST_TOOL_NAMES, ShoppingListToolService
 from .custom_services.sticky_note_services import StickyNoteToolService
 from .custom_services.timer_services import TIMER_TOOL_NAMES, TimerToolService
@@ -26,8 +27,11 @@ from ..exceptions import ToolExecutionError
 
 if TYPE_CHECKING:
     from ..memory.runtime import MemoryRuntime
+    from ..saas_client import SaaSClient
 
 MEMORY_TOOL_NAMES = frozenset({"recall_memory", "remember_memory", "forget_memory"})
+# Pictures: where one shows depends on who asked and from where (the turn), and a guest's are cleared.
+PICTURE_TOOL_NAMES = frozenset({"find_picture", "draw_picture", "find_video", "show_camera"})
 # Read and change Home Assistant's automations: administrators only, as in Home Assistant itself.
 AUTOMATION_TOOL_NAMES = frozenset(
     {"get_automation_metadata_service", "add_automation", "update_automation", "remove_automation"}
@@ -43,7 +47,9 @@ ADMIN_ONLY_RESULT = {
 class LocalToolExecutor:
     """Executes supported tool calls locally in Home Assistant."""
 
-    def __init__(self, hass: HomeAssistant, *, memory: MemoryRuntime | None = None) -> None:
+    def __init__(
+        self, hass: HomeAssistant, *, memory: MemoryRuntime | None = None, client: SaaSClient | None = None
+    ) -> None:
         self.hass = hass
         self.entity = EntityToolService(hass)
         self.light = LightToolService(hass)
@@ -58,6 +64,7 @@ class LocalToolExecutor:
         self.timer = TimerToolService(hass)
         self.alarm = AlarmToolService(hass)
         self.calendar = CalendarToolService(hass)
+        self.picture = PictureToolService(hass, client)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
             # Fallback for hallucinated generic turn_on/turn_off/call_service
             # calls; see EntityToolService._turn_on_off / .call_service for
@@ -134,6 +141,10 @@ class LocalToolExecutor:
             "add_calendar_event": self.calendar.add_calendar_event,
             "change_calendar_event": self.calendar.change_calendar_event,
             "remove_calendar_event": self.calendar.remove_calendar_event,
+            "find_picture": self.picture.find_picture,
+            "draw_picture": self.picture.draw_picture,
+            "find_video": self.picture.find_video,
+            "show_camera": self.picture.show_camera,
         }
         if memory is not None:
             self.memory = MemoryToolService(memory)
@@ -188,6 +199,9 @@ class LocalToolExecutor:
             arguments["_turn"] = turn
         elif function_name in SHOPPING_LIST_TOOL_NAMES:
             # The turn's mode picks the list too: a guest only the Guest Shopping List.
+            arguments["_turn"] = turn
+        elif function_name in PICTURE_TOOL_NAMES:
+            # In the chat or on a note, the household's or a guest's (pictures.py).
             arguments["_turn"] = turn
 
         if function_name in AUTOMATION_TOOL_NAMES and turn is not None and turn.user_is_admin is False:

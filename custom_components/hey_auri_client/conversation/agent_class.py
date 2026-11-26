@@ -128,6 +128,13 @@ def _without_announcement(response: SaaSTurnResponse) -> str | None:
     return content
 
 
+def _with_pictures(reply: str, turn: TurnMeta) -> str:
+    """The reply as the screen shows it: with the pictures the turn's tools showed under it (pictures.py)."""
+    if not turn.pictures:
+        return reply
+    return "\n\n".join([reply.rstrip(), *turn.pictures]).strip()
+
+
 def _is_fast_path_eligible(
     tool_calls: list[dict] | None,
     tool_results: list[dict],
@@ -175,7 +182,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
         self.memory: MemoryRuntime | None = None
         # A voice turn's words, guessed as speech ends: the skills its first model call needs.
         self.skill_guesses = SkillGuesses(hass, self.client)
-        self.tool_executor = LocalToolExecutor(hass)
+        self.tool_executor = LocalToolExecutor(hass, client=self.client)
         # Turns heard from a mic left open after a reply, and how many in a row.
         self.follow_ups = FollowUpTracker()
         entry.async_on_unload(hass.bus.async_listen(EVENT_AURI_WAKE_WORD, self._async_note_wake))
@@ -196,7 +203,7 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
     def attach_memory(self, memory: MemoryRuntime) -> None:
         """Use the entry's memory runtime (created after this agent's client, which it calls)."""
         self.memory = memory
-        self.tool_executor = LocalToolExecutor(self.hass, memory=memory)
+        self.tool_executor = LocalToolExecutor(self.hass, memory=memory, client=self.client)
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -412,7 +419,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
                         response_language, FAST_PATH_ACK_PHRASES["en"]
                     )
                     intent_response = intent.IntentResponse(language=response_language)
-                    intent_response.async_set_speech(ack_phrase)
+                    # A picture found in an earlier round of this turn still shows under the reply.
+                    intent_response.async_set_speech(_with_pictures(ack_phrase, turn))
                     # Device commands as before; a list or note action is classified as it is
                     # without the fast path (the nightly job drops short device commands).
                     device_only = all(name in _DEVICE_TOOL_NAMES for name in tool_names)
@@ -467,7 +475,8 @@ class ThinOpenAIAgent(conversation.AbstractConversationAgent):
             return self._silent_result(conversation_id)
 
         intent_response = intent.IntentResponse(language=get_response_language(self.hass))
-        intent_response.async_set_speech(response.content or "")
+        # The picture lines go to the screen only: memory, the event and follow-ups keep Auri's words.
+        intent_response.async_set_speech(_with_pictures(response.content or "", turn))
         # Without a message from Hey Auri it passed on: that isn't about the household.
         self._log_turn(user_input, turn, reply=_without_announcement(response), tool_names=tool_names)
         # This reply was to ask the guests their name: that's once for the stay.

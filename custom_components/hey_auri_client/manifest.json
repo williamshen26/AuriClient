@@ -1,7 +1,7 @@
 {
   "domain": "hey_auri_client",
   "name": "Hey Auri Client",
-  "after_dependencies": ["mobile_app"],
+  "after_dependencies": ["assist_pipeline", "mobile_app"],
   "codeowners": ["@williamshen26"],
   "config_flow": true,
   "dependencies": [
@@ -10,6 +10,7 @@
     "history",
     "http",
     "intent",
+    "media_source",
     "recorder",
     "stt",
     "rest",
@@ -21,5 +22,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/williamshen26/AuriClient/issues",
   "requirements": ["influxdb>=5.3.2", "ical>=10.0.0"],
-  "version": "0.2.18"
+  "version": "0.2.19"
 }
