@@ -48,6 +48,7 @@ from .const import (
 from .conversation.custom_services.timer_services import RUNTIME_TIMERS
 from .conversation.services import async_setup_services
 from .frontend import async_register_frontend_resources
+from .pictures import EXPIRY_INTERVAL as PICTURE_EXPIRY_INTERVAL, async_expire_pictures
 from .pictures import async_register_view as async_register_pictures_view
 from .memory.legacy import relocate_legacy_user_data
 from .memory.logins import async_delete_logins_issue, async_update_logins_issue
@@ -239,6 +240,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Hey Auri as counts (the dashboard's Hub security) when they change.
     entry.async_on_unload(async_at_started(hass, _async_check_security))
     entry.async_on_unload(async_track_time_interval(hass, _async_check_security, SECURITY_CHECK_INTERVAL))
+
+    async def _async_expire_pictures(*_: Any) -> None:
+        await async_expire_pictures(hass)
+
+    # Pictures are kept 30 days, and as long as a sticky note shows them (pictures.py).
+    entry.async_on_unload(async_at_started(hass, _async_expire_pictures))
+    entry.async_on_unload(async_track_time_interval(hass, _async_expire_pictures, PICTURE_EXPIRY_INTERVAL))
 
     async def _async_check_timer_automation(*_: Any) -> None:
         await async_update_old_timer_automation_issue(hass)

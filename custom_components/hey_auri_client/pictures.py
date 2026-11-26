@@ -1,7 +1,8 @@
 """Pictures Auri finds or draws, kept on the hub and shown in Home Assistant.
 
 - Kept in <config>/hey_auri_client/pictures, which is in every backup, the off-site one too (Home Assistant
-  backs up the config folder; /media is a folder of its own that hubs leave out). The household's are there,
+  backs up the config folder; /media is a folder of its own that hubs leave out). A picture is kept 30 days
+  (RETENTION), and for as long as a sticky note shows it: async_expire_pictures, daily (__init__.py). The household's are there,
   the guests' in guest/: emptied when their stay ends (calendars.py), with the sticky notes that show them.
   A 256 px copy of each is in thumbs/, for the Media panel ("Hey Auri pictures", media_source.py).
 - Served at /api/hey_auri_client/pictures/<path>?k=<key>: each picture has a key of its own, kept with it,
@@ -21,7 +22,9 @@ household member using the app while the home is in Automatic guest mode keeps t
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
+from datetime import datetime, timedelta
 import html
 import io
 import logging
@@ -50,6 +53,8 @@ FOLDER = ("hey_auri_client", "pictures")
 URL_PREFIX = "/api/hey_auri_client/pictures"
 MAX_SIDE = 1280
 THUMB_SIDE = 256
+RETENTION = timedelta(days=30)
+EXPIRY_INTERVAL = timedelta(days=1)
 STORAGE_KEY = f"{DOMAIN}_pictures"
 STORAGE_VERSION = 1
 DATA_PICTURES = f"{DOMAIN}_pictures"
@@ -57,6 +62,8 @@ _PATH = re.compile(r"^(?:guest/)?(?:thumbs/)?[0-9]{8}-[0-9]{6}-[a-z0-9-]{1,48}\.
 # The picture lines of a reply (chat_block): an image, and the credit under it. Speech leaves them out.
 _IMAGE_MARKDOWN = re.compile(r"\[!\[[^\]\n]*\]\([^)\s]*\)\]\([^)\s]*\)|!\[[^\]\n]*\]\([^)\s]*\)")
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# A picture's link in a note's text (keyed, or the first build's plain path, the picture or its thumbnail).
+_LINKED = re.compile(r"/api/hey_auri_client/pictures/(guest/)?(?:thumbs/)?([0-9]{8}-[0-9]{6}-[a-z0-9-]{1,48}\.jpg)")
 _CREDIT = re.compile(r"<small>.*?</small>", re.S)
 
 
@@ -198,6 +205,29 @@ class AuriPictures:
         _LOGGER.info("Deleted the guests' pictures (%s): %s", why, len(guests))
         return len(guests)
 
+    async def async_expire(self, notes: Mapping[str, str], now: datetime | None = None) -> int:
+        """Delete the pictures over RETENTION old that no note shows; `notes` is every note's text by id.
+
+        Whether a note shows a picture is read from its text (notes are never edited, only made and deleted),
+        so a note deleted from the dashboard, by Auri or with its entity frees its picture all the same.
+        """
+        await self.async_ready()
+        shown = {(match.group(1) or "") + match.group(2) for text in notes.values() for match in _LINKED.finditer(text or "")}
+        cutoff = (now or dt_util.utcnow()) - RETENTION
+        expired = [picture for picture in self._pictures if picture.path not in shown and _made(picture) < cutoff]
+        if expired:
+            await self.hass.async_add_executor_job(_delete_files, self.root, [picture.path for picture in expired])
+        gone = {id(picture) for picture in expired}
+        async with self._lock:
+            guest_notes = [note_id for note_id in self._guest_notes if note_id in notes]
+            if gone or guest_notes != self._guest_notes:
+                self._pictures = [picture for picture in self._pictures if id(picture) not in gone]
+                self._guest_notes = guest_notes
+                self._save()
+        if expired:
+            _LOGGER.info("Deleted %s pictures over %s days old that no sticky note shows", len(expired), RETENTION.days)
+        return len(expired)
+
     @callback
     def _save(self) -> None:
         self._store.async_delay_save(
@@ -219,6 +249,31 @@ async def async_clear_guest_pictures(hass: HomeAssistant, why: str) -> None:
         await (await async_get_pictures(hass)).async_clear_guest(why)
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Couldn't delete the guests' pictures (%s): %s", why, err)
+
+
+async def async_expire_pictures(hass: HomeAssistant, *_: Any) -> None:
+    """Daily, and once Home Assistant has started (__init__.py). Never raises; deletes nothing without the notes."""
+    from .conversation.custom_services.sticky_note_services import (  # noqa: PLC0415 (it imports the entities)
+        async_sticky_note_markdowns,
+    )
+
+    try:
+        notes = await async_sticky_note_markdowns(hass)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Couldn't read the sticky notes, so no old pictures were deleted: %s", err)
+        return
+    try:
+        await (await async_get_pictures(hass)).async_expire(notes)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Couldn't delete the old pictures: %s", err)
+
+
+def _made(picture: Picture) -> datetime:
+    """When it was kept; a record whose time can't be read counts as new (kept)."""
+    made = dt_util.parse_datetime(picture.created_at or "")
+    if made is None:
+        return dt_util.utcnow()
+    return made if made.tzinfo else made.replace(tzinfo=dt_util.UTC)
 
 
 def link_key() -> str:

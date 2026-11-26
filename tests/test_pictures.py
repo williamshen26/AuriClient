@@ -53,6 +53,7 @@ from custom_components.hey_auri_client.media_source import async_get_media_sourc
 from custom_components.hey_auri_client.memory.identity import Speaker, TurnMeta  # noqa: E402
 from custom_components.hey_auri_client.pictures import (  # noqa: E402
     async_clear_guest_pictures,
+    async_expire_pictures,
     async_get_pictures,
     async_register_view,
     without_pictures,
@@ -138,6 +139,9 @@ class Notes:
         del self.notes[note_id]
         return {"note_id": note_id, "deleted": True}
 
+    async def markdowns(self, hass) -> dict[str, str]:
+        return {note_id: note["markdown"] for note_id, note in self.notes.items()}
+
 
 @pytest.fixture
 async def setup(hass: HomeAssistant, tmp_path: Path, monkeypatch) -> Notes:
@@ -149,6 +153,7 @@ async def setup(hass: HomeAssistant, tmp_path: Path, monkeypatch) -> Notes:
     notes = Notes()
     monkeypatch.setattr(picture_services, "create_auri_sticky_note_native", notes.create)
     monkeypatch.setattr(sticky_note_services, "delete_auri_sticky_note_native", notes.delete)
+    monkeypatch.setattr(sticky_note_services, "async_sticky_note_markdowns", notes.markdowns)
     return notes
 
 
@@ -264,6 +269,70 @@ async def test_the_media_panel_lists_them_newest_first(hass: HomeAssistant, setu
     played = await source.async_resolve_media(MediaSourceItem(hass, DOMAIN, whale.path, None))
     # The plain path: Home Assistant signs it, escaping any query.
     assert (played.url, played.mime_type) == (f"/api/hey_auri_client/pictures/{whale.path}", "image/jpeg")
+
+
+# ── How long they're kept ────────────────────────────────────────────────────
+
+
+async def test_pictures_no_note_shows_go_after_30_days(hass: HomeAssistant, setup, freezer) -> None:
+    pictures = await async_get_pictures(hass)
+    folder = Path(hass.config.path("hey_auri_client", "pictures"))
+    chat = await pictures.async_add(_image("JPEG"), title="Sperm whale", kind="photo", guest=False)
+    on_note = await pictures.async_add(_image("JPEG"), title="Koala", kind="photo", guest=False)
+    note_deleted = await pictures.async_add(_image("JPEG"), title="Narwhal", kind="drawing", guest=False)
+    first_build = await pictures.async_add(_image("JPEG"), title="Beluga whale", kind="photo", guest=False)
+    guest = await pictures.async_add(_image("JPEG"), title="Red panda", kind="photo", guest=True)
+    await setup.create(hass, pictures.note_markdown(on_note), "Koala")
+    deleted = (await setup.create(hass, pictures.note_markdown(note_deleted), "Narwhal"))["note_id"]
+    await setup.delete(hass, deleted)
+    # A note from 0.2.19's first build: the plain path, no key.
+    await setup.create(hass, f"![Beluga whale](/api/hey_auri_client/pictures/{first_build.file})\n<small>📷</small>", "Beluga")
+    guest_note = (await setup.create(hass, pictures.note_markdown(guest), "Red panda"))["note_id"]
+    pictures.add_guest_note("video-note-gone")
+    pictures.add_guest_note(guest_note)
+
+    freezer.tick(timedelta(days=20))
+    young = await pictures.async_add(_image("JPEG"), title="Axolotl", kind="photo", guest=False)
+    await async_expire_pictures(hass)
+    assert len(pictures.pictures(guest=False)) == 5  # nothing is 30 days old yet
+
+    freezer.tick(timedelta(days=10, minutes=1))
+    await async_expire_pictures(hass)
+
+    assert {p.title for p in pictures.pictures(guest=False)} == {"Koala", "Beluga whale", "Axolotl"}
+    assert [p.title for p in pictures.pictures(guest=True)] == ["Red panda"]
+    for picture in (chat, note_deleted):
+        assert not (folder / picture.file).exists() and not (folder / "thumbs" / picture.file).exists()
+    for picture in (on_note, first_build, young):
+        assert (folder / picture.file).exists()
+    assert pictures._guest_notes == [guest_note]  # a guest video note already deleted is forgotten
+
+
+async def test_nothing_is_deleted_without_the_notes(hass: HomeAssistant, setup, freezer, monkeypatch, caplog) -> None:
+    pictures = await async_get_pictures(hass)
+    await pictures.async_add(_image("JPEG"), title="Koala", kind="photo", guest=False)
+    freezer.tick(timedelta(days=40))
+
+    async def unreadable(hass):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(sticky_note_services, "async_sticky_note_markdowns", unreadable)
+    await async_expire_pictures(hass)
+
+    assert [p.title for p in pictures.pictures(guest=False)] == ["Koala"]
+    assert "no old pictures were deleted" in caplog.text
+
+
+async def test_the_notes_text_comes_from_storage_and_the_running_notes(hass: HomeAssistant, hass_storage) -> None:
+    class Running:
+        def to_record(self) -> dict[str, str]:
+            return {"note_id": "b2", "title": "Two", "markdown": "second", "created_at": ""}
+
+    hass_storage["hey_auri_client_sticky_notes"] = {"version": 1, "key": "hey_auri_client_sticky_notes", "data": {
+        "a1": {"note_id": "a1", "title": "One", "markdown": "first", "created_at": ""}}}
+    hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})["sticky_notes"] = {"b2": Running()}
+
+    assert await sticky_note_services.async_sticky_note_markdowns(hass) == {"a1": "first", "b2": "second"}
 
 
 # ── Finding a photo ──────────────────────────────────────────────────────────

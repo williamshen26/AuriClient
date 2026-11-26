@@ -210,6 +210,22 @@ async def get_auri_sticky_notes_native(hass: HomeAssistant) -> dict[str, Any]:
     return {"sticky_notes": notes}
 
 
+async def async_sticky_note_markdowns(hass: HomeAssistant) -> dict[str, str]:
+    """Every sticky note's text by note_id, saved or running (pictures.py keeps the pictures notes show).
+
+    Read from storage as well: right after a restart the sensor platform may not have restored them yet.
+    """
+    saved = await _get_store(hass).async_load() or {}
+    notes = {
+        str(note_id): str(record.get("markdown") or "")
+        for note_id, record in (saved.items() if isinstance(saved, dict) else ())
+        if isinstance(record, dict)
+    }
+    for note_id, note in _get_runtime(hass)["sticky_notes"].items():
+        notes[str(note_id)] = str(note.to_record().get("markdown") or "")
+    return notes
+
+
 class StickyNoteToolService:
     """Handle sticky-note-oriented tool calls."""
 
