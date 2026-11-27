@@ -541,7 +541,8 @@ var AuriHomeStickNoteViewStrategy = class {
       `^${entityIdPattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`
     );
     const entities = await fetchEntities(hass);
-    const stickyNoteEntityIds = entities.map((e) => e.entity_id).filter((id) => typeof id === "string" && matcher.test(id)).sort((a, b) => a.localeCompare(b));
+    const createdAt = (id) => Date.parse(hass?.states?.[id]?.attributes?.created_at ?? "") || 0;
+    const stickyNoteEntityIds = entities.map((e) => e.entity_id).filter((id) => typeof id === "string" && matcher.test(id)).sort((a, b) => createdAt(b) - createdAt(a) || a.localeCompare(b));
     const cards = stickyNoteEntityIds.map((entityId) => ({
       type: "custom:auri-sticky-note-card",
       entity: entityId

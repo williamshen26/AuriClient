@@ -18,10 +18,12 @@ export class AuriHomeStickNoteViewStrategy {
     );
 
     const entities = await fetchEntities(hass);
+    // Newest first, by when each note was made (its created_at attribute); the id breaks ties.
+    const createdAt = (id) => Date.parse(hass?.states?.[id]?.attributes?.created_at ?? "") || 0;
     const stickyNoteEntityIds = entities
       .map((e) => e.entity_id)
       .filter((id) => typeof id === "string" && matcher.test(id))
-      .sort((a, b) => a.localeCompare(b));
+      .sort((a, b) => createdAt(b) - createdAt(a) || a.localeCompare(b));
 
     const cards = stickyNoteEntityIds.map((entityId) => ({
       type: "custom:auri-sticky-note-card",

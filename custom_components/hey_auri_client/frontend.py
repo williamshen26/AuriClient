@@ -20,7 +20,8 @@ _WWW_DIR = Path(__file__).parent / "www"
 _PAGE_FILES = (
     "session-qr-card.js",
     "auri-dashboard.js",
-    "auri-sticky-note-card.js",  # the sticky note card (the Home dashboard and the Sticky Notes view)
+    "auri-sticky-note-card.js",  # the sticky note card (the Home dashboard and the Sticky Notes view), and Auri's
+    # videos playing in the chat, which needs to be on every page
 )
 _DASHBOARD_BUNDLE = "auri-dashboard.js"
 # Served too, but loaded by the dashboards' strategies when they generate (dashboard/helpers/communityCards.js),
@@ -29,6 +30,9 @@ _DASHBOARD_BUNDLE = "auri-dashboard.js"
 # - auto-entities 1.16.1 (thomasloven/lovelace-auto-entities, MIT);
 # - timer-bar-card 1.31.0 (rianadon/timer-bar-card, Apache-2.0).
 _DASHBOARD_CARDS = ("auto-entities.js", "timer-bar-card.js")
+# Served for the sticky note card's handwriting, which declares it itself: Patrick Hand 1.003 (SIL Open Font
+# License 1.1), converted to WOFF2. Served from the hub, not Google Fonts, so it works offline and in mainland China.
+_FONT_FILES = ("patrick-hand.woff2",)
 
 
 def _asset_version(path: Path) -> str:
@@ -49,7 +53,7 @@ async def async_register_frontend_resources(hass: HomeAssistant) -> None:
     await hass.http.async_register_static_paths(
         [
             StaticPathConfig(f"/{DOMAIN}/{name}", str(_WWW_DIR / name), cache_headers=False)
-            for name in (*_PAGE_FILES, *_DASHBOARD_CARDS)
+            for name in (*_PAGE_FILES, *_DASHBOARD_CARDS, *_FONT_FILES)
         ]
     )
     card_versions = {
